@@ -1,0 +1,14 @@
+*.log
+*.lnk
+settings.json
+
+Thumbs.db
+desktop.ini
+.vs/
+.vscode/
+*.swp
+*~
+
+app/node_modules/
+app/dist/
+app/src-tauri/target/

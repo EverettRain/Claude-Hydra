@@ -1,0 +1,398 @@
+//! Claude-Hydra application entry, system tray management, and Tauri IPC commands.
+
+pub mod cli;
+pub mod install;
+pub mod launcher;
+pub mod paths;
+pub mod profiles;
+pub mod settings;
+pub mod sys;
+pub mod watchdog;
+
+use install::Install;
+use profiles::{Profile, ProfileOptions};
+use serde::Serialize;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder};
+
+const TRAY_ID: &str = "hydra";
+
+#[derive(Default)]
+struct AppState {
+    install: Mutex<Option<Install>>,
+}
+
+fn current_install(app: &AppHandle) -> Result<Install, String> {
+    let state = app.state::<AppState>();
+    let mut guard = state.install.lock().map_err(|_| "内部状态错误")?;
+    if let Some(i) = guard.as_ref() {
+        if i.launch_exe().is_some() || i.is_msix() {
+            return Ok(i.clone());
+        }
+    }
+    let found = install::resolve()?;
+    *guard = Some(found.clone());
+    Ok(found)
+}
+
+fn find(app: &AppHandle, id: &str) -> Result<(Install, Profile), String> {
+    let i = current_install(app)?;
+    let p = profiles::resolve(&i, id, false).ok_or("找不到这个账号。")?;
+    Ok((i, p))
+}
+
+fn after_change(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || refresh_tray(&app));
+}
+
+#[tauri::command]
+fn list_profiles(app: AppHandle) -> Result<Vec<Profile>, String> {
+    let i = current_install(&app)?;
+    Ok(profiles::list(&i, true))
+}
+
+#[tauri::command]
+async fn launch_profile(app: AppHandle, id: String) -> Result<String, String> {
+    let a = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let (i, p) = find(&a, &id)?;
+        launcher::launch(&i, &p).map(str::to_string)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    after_change(&app);
+    r
+}
+
+#[tauri::command]
+async fn close_profile(app: AppHandle, id: String) -> Result<String, String> {
+    let a = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let (i, p) = find(&a, &id)?;
+        launcher::close(&i, &p).map(str::to_string)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    after_change(&app);
+    r
+}
+
+#[tauri::command]
+async fn restart_profile(app: AppHandle, id: String) -> Result<String, String> {
+    let a = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let (i, p) = find(&a, &id)?;
+        launcher::restart(&i, &p).map(str::to_string)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    after_change(&app);
+    r
+}
+
+#[tauri::command]
+async fn add_account(app: AppHandle) -> Result<Profile, String> {
+    let a = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || launcher::add_account(&current_install(&a)?))
+        .await
+        .map_err(|e| e.to_string())?;
+    after_change(&app);
+    r
+}
+
+#[tauri::command]
+fn profile_options(app: AppHandle, id: String) -> Result<ProfileOptions, String> {
+    profiles::options(&current_install(&app)?, &id)
+}
+
+#[tauri::command]
+fn save_profile_options(app: AppHandle, id: String, options: ProfileOptions) -> Result<(), String> {
+    profiles::save_options(&current_install(&app)?, &id, &options)?;
+    after_change(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
+    profiles::remove(&current_install(&app)?, &id)?;
+    after_change(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_profile_folder(app: AppHandle, id: String) -> Result<(), String> {
+    let (_, p) = find(&app, &id)?;
+    std::fs::create_dir_all(&p.path).ok();
+    let opener = if cfg!(windows) { "explorer.exe" } else { "open" };
+    std::process::Command::new(opener)
+        .arg(&p.path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_shortcut(app: AppHandle, id: String) -> Result<String, String> {
+    let (_, p) = find(&app, &id)?;
+    let path = launcher::create_shortcut(&p)?;
+    Ok(format!("已在桌面创建快捷方式：{}", path.file_name().unwrap_or_default().to_string_lossy()))
+}
+
+#[tauri::command]
+fn diagnostics(app: AppHandle) -> String {
+    launcher::diagnostics(current_install(&app))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppInfo {
+    version: String,
+    platform: String,
+    install: Option<Install>,
+    install_error: Option<String>,
+    claude_path: Option<String>,
+    storage_root: String,
+    settings_path: String,
+    autostart: bool,
+}
+
+#[tauri::command]
+fn app_info(app: AppHandle) -> AppInfo {
+    let (install, install_error) = match current_install(&app) {
+        Ok(i) => (Some(i), None),
+        Err(e) => (None, Some(e)),
+    };
+    let s = settings::load();
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION").into(),
+        platform: std::env::consts::OS.into(),
+        install,
+        install_error,
+        claude_path: s.claude_path,
+        storage_root: paths::storage_root().to_string_lossy().into(),
+        settings_path: paths::settings_path().to_string_lossy().into(),
+        autostart: sys::autostart_enabled(),
+    }
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        sys::set_autostart(Some(&format!("\"{}\" --tray", exe.display())))
+    } else {
+        sys::set_autostart(None)
+    }
+}
+
+#[tauri::command]
+fn set_claude_path(app: AppHandle, path: Option<String>) -> Result<(), String> {
+    let path = path
+        .map(|p| p.trim().trim_matches('"').to_string())
+        .filter(|p| !p.is_empty());
+    if let Some(p) = &path {
+        if !std::path::Path::new(p).exists() {
+            return Err(format!("路径不存在：{p}"));
+        }
+    }
+    settings::update(|s| {
+        s.claude_path = path.clone();
+        s.install_cache = None;
+    })?;
+    if let Ok(mut g) = app.state::<AppState>().install.lock() {
+        *g = None;
+    }
+    current_install(&app).map(|_| ())
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() else { return };
+    let Ok(builder) = WebviewWindowBuilder::from_config(app, &cfg) else { return };
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+    if let Ok(w) = builder.build() {
+        fit_to_screen(&w);
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            if let Some(w) = app.get_webview_window("main") {
+                if !w.is_visible().unwrap_or(true) {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+        });
+    }
+}
+
+fn fit_to_screen(w: &tauri::WebviewWindow) {
+    let (Ok(Some(mon)), Ok(size)) = (w.current_monitor(), w.outer_size()) else { return };
+    let area = mon.work_area().size;
+    let max_w = (area.width as f64 * 0.9) as u32;
+    let max_h = (area.height as f64 * 0.9) as u32;
+    if size.width > max_w || size.height > max_h {
+        let _ = w.set_size(tauri::PhysicalSize::new(size.width.min(max_w), size.height.min(max_h)));
+        let _ = w.center();
+    }
+}
+
+fn build_menu(app: &AppHandle, list: &[Profile]) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::new(app)?;
+    for p in list {
+        let mark = if p.pid.is_some() { "●" } else { "○" };
+        menu.append(&MenuItem::with_id(app, format!("p:{}", p.id), format!("{mark}  {}", p.name), true, None::<&str>)?)?;
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(app, "add", "添加账号…", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "show", "打开 Claude-Hydra", true, None::<&str>)?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?)?;
+    Ok(menu)
+}
+
+fn signature(list: &[Profile]) -> String {
+    list.iter().map(|p| format!("{}|{}|{:?};", p.id, p.name, p.pid)).collect()
+}
+
+fn refresh_tray(app: &AppHandle) -> Option<String> {
+    let i = current_install(app).ok()?;
+    let list = profiles::list(&i, true);
+    if let (Some(tray), Ok(menu)) = (app.tray_by_id(TRAY_ID), build_menu(app, &list)) {
+        let _ = tray.set_menu(Some(menu));
+    }
+    let _ = app.emit_to("main", "profiles-changed", &list);
+    Some(signature(&list))
+}
+
+fn on_menu(app: &AppHandle, id: &str) {
+    match id {
+        "show" => show_main(app),
+        "quit" => app.exit(0),
+        "add" => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = current_install(&app).and_then(|i| launcher::add_account(&i)) {
+                    sys::error_box(&e);
+                }
+                refresh_tray(&app);
+            });
+        }
+        other => {
+            if let Some(pid) = other.strip_prefix("p:") {
+                let (app, pid) = (app.clone(), pid.to_string());
+                std::thread::spawn(move || {
+                    if let Err(e) = find(&app, &pid).and_then(|(i, p)| launcher::launch(&i, &p)) {
+                        sys::error_box(&e);
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
+                    refresh_tray(&app);
+                });
+            }
+        }
+    }
+}
+
+fn start_background(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut last = String::new();
+        let mut last_watch = Instant::now();
+        loop {
+            let open = app.get_webview_window("main").is_some();
+            std::thread::sleep(Duration::from_secs(if open { 3 } else { 10 }));
+            if let Ok(i) = current_install(&app) {
+                let list = profiles::list(&i, true);
+                let sig = signature(&list);
+                if sig != last {
+                    if let (Some(tray), Ok(menu)) = (app.tray_by_id(TRAY_ID), build_menu(&app, &list)) {
+                        let _ = tray.set_menu(Some(menu));
+                    }
+                    let _ = app.emit_to("main", "profiles-changed", &list);
+                    last = sig;
+                }
+                if last_watch.elapsed() >= Duration::from_secs(60) {
+                    last_watch = Instant::now();
+                    if watchdog::any_kept() {
+                        watchdog::run_once(&i);
+                    }
+                }
+            }
+        }
+    });
+}
+
+pub fn run(start_in_tray: bool) {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            list_profiles,
+            launch_profile,
+            close_profile,
+            restart_profile,
+            add_account,
+            profile_options,
+            save_profile_options,
+            delete_profile,
+            open_profile_folder,
+            create_shortcut,
+            diagnostics,
+            app_info,
+            set_autostart,
+            set_claude_path,
+            quit_app,
+        ])
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let list = current_install(&handle).map(|i| profiles::list(&i, true)).unwrap_or_default();
+            let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+                .tooltip("Claude-Hydra")
+                .menu(&build_menu(&handle, &list)?)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, e| on_menu(app, e.id().as_ref()))
+                .on_tray_icon_event(|tray, e| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = e
+                    {
+                        show_main(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(app)?;
+            start_background(handle.clone());
+            if !start_in_tray {
+                show_main(&handle);
+            }
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Claude-Hydra")
+        .run(|_app, event| {
+            if let RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
+            }
+        });
+}
