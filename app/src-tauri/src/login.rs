@@ -1,6 +1,8 @@
 //! One-shot routing of browser sign-in callbacks to an explicitly selected profile.
-use crate::{install, paths, profiles};
+use crate::{install, paths, profiles, settings};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 fn marker() -> std::path::PathBuf { paths::storage_root().join("pending-login.json") }
 
@@ -31,6 +33,13 @@ pub fn route(url: &str) -> Result<(), String> {
     let exe = i.launch_exe().ok_or("找不到 Claude 启动程序。")?;
     let mut cmd = Command::new(exe);
     if !p.is_default { cmd.arg(format!("--user-data-dir={}", p.path)); }
+    let settings = settings::load();
+    let extra = profiles::extra_args(&settings, &p.id);
+    #[cfg(windows)]
+    if !extra.is_empty() { cmd.raw_arg(extra); }
+    #[cfg(not(windows))]
+    if !extra.is_empty() { cmd.args(extra.split_whitespace()); }
+    cmd.envs(profiles::env_vars(&settings, &p.id));
     cmd.arg(url).spawn().map_err(|e| format!("无法转发登录回调：{e}"))?;
     Ok(())
 }

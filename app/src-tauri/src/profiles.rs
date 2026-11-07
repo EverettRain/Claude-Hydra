@@ -208,12 +208,18 @@ pub fn validate_name(install: &Install, name: &str, except_id: Option<&str>) -> 
         if target.exists() {
             return Err(format!("“{name}”已被 {} 占用。", target.display()));
         }
+        let legacy = paths::storage_root().join(format!("ClaudeProfile-{name}"));
+        let legacy_nested = paths::storage_root().join("ClaudeProfiles").join(name);
+        if legacy.exists() || legacy_nested.exists() {
+            return Err(format!("“{name}”已存在旧版数据目录，请使用其他名称。"));
+        }
     }
     Ok(())
 }
 
 pub fn next_account_name(install: &Install) -> String {
-    (2..)
+    let current = list(install, false).iter().flat_map(|p| [&p.id, &p.name]).filter_map(|s| s.strip_prefix("Account ")?.parse::<u64>().ok()).max().unwrap_or(1);
+    (current.saturating_add(1).max(2)..)
         .map(|n| format!("Account {n}"))
         .find(|n| validate_name(install, n, None).is_ok())
         .unwrap()

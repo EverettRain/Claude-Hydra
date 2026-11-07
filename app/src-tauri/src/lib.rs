@@ -107,6 +107,60 @@ async fn add_account(app: AppHandle) -> Result<Profile, String> {
 }
 
 #[tauri::command]
+fn next_account_name(app: AppHandle) -> Result<String, String> {
+    Ok(profiles::next_account_name(&current_install(&app)?))
+}
+
+fn valid_proxy(proxy: &str) -> bool {
+    let Ok(url) = url::Url::parse(proxy) else { return false };
+    proxy.chars().all(|c| c.is_ascii_alphanumeric() || ":/.-[]".contains(c))
+        && matches!(url.scheme(), "http" | "https" | "socks5") && url.host_str().is_some() && url.port_or_known_default().is_some()
+        && url.username().is_empty() && url.password().is_none() && matches!(url.path(), "" | "/") && url.query().is_none() && url.fragment().is_none()
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    #[test]
+    fn accepts_only_simple_proxy_urls() {
+        for value in ["http://127.0.0.1:7890", "socks5://localhost:1080", "http://[::1]:8080"] { assert!(super::valid_proxy(value), "{value}"); }
+        for value in ["http://user:pass@host:80", "http://host:80/path", "http://host:80\" --no-proxy-server", "socks5://host", "file://host:80"] { assert!(!super::valid_proxy(value), "{value}"); }
+    }
+}
+
+#[tauri::command]
+async fn create_configured_account(app: AppHandle, name: String, proxy: String, locale: String) -> Result<Profile, String> {
+    let a = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let install = current_install(&a)?;
+        let name = name.trim();
+        profiles::validate_name(&install, name, None)?;
+        let proxy = proxy.trim();
+        if !proxy.is_empty() && !valid_proxy(proxy) {
+            return Err("请输入不含用户名、密码或路径的 HTTP、HTTPS 或 SOCKS5 代理地址。".to_string());
+        }
+        if !["", "en-US", "en-GB", "zh-CN", "zh-TW", "ja-JP", "ko-KR"].contains(&locale.as_str()) {
+            return Err("不支持此语言设置。".to_string());
+        }
+        let p = profiles::create(&install, name)?;
+        let mut args = Vec::new();
+        let mut env = std::collections::BTreeMap::new();
+        if !proxy.is_empty() {
+            args.push(format!("--proxy-server={proxy}"));
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] { env.insert(key.to_string(), proxy.to_string()); }
+        }
+        if !locale.is_empty() { args.push(format!("--lang={locale}")); }
+        if let Err(e) = settings::update(|s| { let acc = s.account_mut(&p.id); acc.args = args.join(" "); acc.env = env; }) {
+            let _ = std::fs::remove_dir(&p.path);
+            return Err(e);
+        }
+        if let Err(e) = launcher::launch(&install, &p) { return Err(format!("账号已创建，但启动失败：{e}")); }
+        Ok(p)
+    }).await.map_err(|e| e.to_string())?;
+    after_change(&app);
+    result
+}
+
+#[tauri::command]
 fn profile_options(app: AppHandle, id: String) -> Result<ProfileOptions, String> {
     profiles::options(&current_install(&app)?, &id)
 }
@@ -367,6 +421,8 @@ pub fn run(start_in_tray: bool) {
             close_profile,
             restart_profile,
             add_account,
+            next_account_name,
+            create_configured_account,
             profile_options,
             save_profile_options,
             delete_profile,

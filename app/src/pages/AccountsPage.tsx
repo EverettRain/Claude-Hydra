@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { EditAccountDialog } from "@/components/EditAccountDialog";
+import { CreateAccountPanel } from "@/components/CreateAccountPanel";
 import { Menu } from "@/components/Menu";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -58,18 +59,7 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
       if (r === "started") toast(`正在启动 ${p.name}`);
     });
 
-  const addAccount = async () => {
-    setAdding(true);
-    try {
-      const p = await api.addAccount();
-      toast(`已创建 ${p.name}，请在打开的 Claude 窗口中登录。`);
-      await refresh();
-    } catch (e) {
-      toast(errorText(e), "error");
-    } finally {
-      setAdding(false);
-    }
-  };
+  const addAccount = () => setAdding(true);
 
   const running = profiles?.filter((p) => p.pid).length ?? 0;
 
@@ -84,7 +74,7 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
               <RefreshCw className="h-4 w-4" />
             </Button>
             <Button onClick={addAccount} disabled={adding}>
-              {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              <Plus className="h-4 w-4" />
               添加账号
             </Button>
           </>
@@ -132,6 +122,7 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
       </div>
 
       <EditAccountDialog profile={editing} onClose={() => setEditing(null)} onSaved={refresh} />
+      <CreateAccountPanel open={adding} onClose={() => setAdding(false)} onCreated={async (p) => { setAdding(false); toast(`已创建 ${p.name}，请在打开的 Claude 窗口中登录。`); await refresh(); }} />
 
       <Dialog
         open={!!deleting}
