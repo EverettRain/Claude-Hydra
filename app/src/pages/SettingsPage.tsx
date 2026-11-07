@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { api, errorText, type AppInfo } from "@/lib/api";
+import { api, errorText, type AppInfo, type LocalUsage } from "@/lib/api";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -59,6 +59,7 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
   const toast = useToast();
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [usage, setUsage] = useState<LocalUsage | null>(null);
 
   useEffect(() => setPath(info?.claudePath ?? ""), [info?.claudePath]);
 
@@ -148,6 +149,17 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
               应用
             </Button>
           </div>
+        </Section>
+
+        <Section title="Claude Code 本地用量" description="只读取本机 Claude Code 会话日志；可能包含多个账号，不包含普通聊天的完整用量，也不代表官方账单或剩余额度。">
+          <Button variant="outline" size="sm" disabled={busy === "usage"} onClick={() => act("usage", async () => setUsage(await api.localUsage()))}>读取本地用量</Button>
+          {usage && <div className="space-y-1.5 rounded-md bg-muted/60 p-3">
+            <KeyValue k="日志目录" v={usage.path} />
+            <KeyValue k="会话日志" v={`${usage.files} 个文件，${usage.messages} 条消息${usage.unreadableFiles ? `，${usage.unreadableFiles} 个文件读取不完整` : ""}`} />
+            <KeyValue k="输入 / 输出" v={`${usage.inputTokens.toLocaleString()} / ${usage.outputTokens.toLocaleString()} tokens`} />
+            <KeyValue k="缓存写入 / 读取" v={`${usage.cacheCreationTokens.toLocaleString()} / ${usage.cacheReadTokens.toLocaleString()} tokens`} />
+            <p className="text-xs text-muted-foreground">结果仅覆盖可读取的本地日志；日志可能缺失或不完整。</p>
+          </div>}
         </Section>
 
         <Section title="数据与诊断" description="所有额外账号与配置文件均独立保存在以下目录。">

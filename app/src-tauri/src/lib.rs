@@ -8,6 +8,7 @@ pub mod paths;
 pub mod profiles;
 pub mod settings;
 pub mod sys;
+pub mod usage;
 pub mod watchdog;
 
 use install::Install;
@@ -157,6 +158,11 @@ fn prepare_login(app: AppHandle, id: String) -> Result<(), String> {
 #[tauri::command]
 fn diagnostics(app: AppHandle) -> String {
     launcher::diagnostics(current_install(&app))
+}
+
+#[tauri::command]
+async fn local_usage() -> Result<usage::Usage, String> {
+    tauri::async_runtime::spawn_blocking(usage::read).await.map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -369,6 +375,7 @@ pub fn run(start_in_tray: bool) {
             setup_login_router,
             prepare_login,
             diagnostics,
+            local_usage,
             app_info,
             set_autostart,
             set_claude_path,

@@ -40,6 +40,11 @@ export interface AppInfo {
   autostart: boolean;
 }
 
+export interface LocalUsage {
+  inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number;
+  messages: number; files: number; unreadableFiles: number; path: string;
+}
+
 export const api = {
   listProfiles: () => invoke<Profile[]>("list_profiles"),
   launch: (id: string) => invoke<string>("launch_profile", { id }),
@@ -54,6 +59,7 @@ export const api = {
   setupLoginRouter: () => invoke<void>("setup_login_router"),
   prepareLogin: (id: string) => invoke<void>("prepare_login", { id }),
   diagnostics: () => invoke<string>("diagnostics"),
+  localUsage: () => invoke<LocalUsage>("local_usage"),
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   setClaudePath: (path: string | null) => invoke<void>("set_claude_path", { path }),
