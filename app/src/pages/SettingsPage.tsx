@@ -111,6 +111,9 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
         </Section>
 
         <Section title="Claude 桌面端" description="自动查找本机安装的 Claude；若安装在非默认位置可手动指定。">
+          {info?.platform === "windows" && <Row label="浏览器登录回调" hint="首次使用请注册并在 Windows 默认应用中将 claude 链接设为 Claude-Hydra 登录回调；随后在账号菜单选择“准备浏览器登录”。未准备的链接不会转发。">
+            <Button variant="outline" size="sm" disabled={busy === "router"} onClick={() => act("router", () => api.setupLoginRouter(), "已注册。请在系统设置中选择 Claude-Hydra 登录回调。")}>设置登录回调</Button>
+          </Row>}
           {info?.installError && <p className="text-sm text-red-500">{info.installError}</p>}
           {install && (
             <div className="space-y-1.5 rounded-md bg-muted/60 p-3">

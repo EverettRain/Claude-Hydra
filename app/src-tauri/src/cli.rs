@@ -18,6 +18,13 @@ const HELP: &str = "Claude-Hydra - 同时运行多个 Claude 桌面端账号
 /// Returns `Some(exit_code)` when a CLI subcommand was executed, or `None` to start the GUI/tray.
 pub fn run(args: &[String]) -> Option<i32> {
     let first = args.first()?.as_str();
+    if first == "--login-callback" {
+        let result = args.get(1).ok_or("缺少登录回调地址。".to_string()).and_then(|url| crate::login::route(url));
+        return Some(match result {
+            Ok(()) => 0,
+            Err(e) => { sys::error_box(&e); 1 }
+        });
+    }
     if first == "--tray" {
         return None;
     }

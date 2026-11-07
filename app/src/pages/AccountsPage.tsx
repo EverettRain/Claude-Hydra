@@ -107,6 +107,7 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
             onClose={() => run(p, "关闭中", () => api.close(p.id), `已关闭 ${p.name}`)}
             onRestart={() => run(p, "重启中", () => api.restart(p.id), `已重启 ${p.name}`)}
             onEdit={() => setEditing(p)}
+            onLogin={() => run(p, "准备登录", () => api.prepareLogin(p.id), `已选择 ${p.name}，请在 10 分钟内完成浏览器登录。`)}
             onFolder={() => api.openFolder(p.id).catch((e) => toast(errorText(e), "error"))}
             onShortcut={() =>
               run(p, "创建中", async () => {
@@ -170,12 +171,13 @@ interface CardProps {
   onClose: () => void;
   onRestart: () => void;
   onEdit: () => void;
+  onLogin: () => void;
   onFolder: () => void;
   onShortcut: () => void;
   onDelete: () => void;
 }
 
-function AccountCard({ p, busy, onLaunch, onClose, onRestart, onEdit, onFolder, onShortcut, onDelete }: CardProps) {
+function AccountCard({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, onFolder, onShortcut, onDelete }: CardProps) {
   const isRunning = !!p.pid;
   return (
     <div
@@ -245,6 +247,7 @@ function AccountCard({ p, busy, onLaunch, onClose, onRestart, onEdit, onFolder, 
           )}
           items={[
             { label: "编辑…", icon: Pencil, onSelect: onEdit },
+            { label: "准备浏览器登录", icon: Link2, onSelect: onLogin },
             { label: "重启", icon: RotateCw, onSelect: onRestart, disabled: !isRunning },
             { label: "打开数据目录", icon: FolderOpen, onSelect: onFolder },
             { label: "创建桌面快捷方式", icon: Link2, onSelect: onShortcut },

@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod install;
 pub mod launcher;
+pub mod login;
 pub mod paths;
 pub mod profiles;
 pub mod settings;
@@ -140,6 +141,17 @@ fn create_shortcut(app: AppHandle, id: String) -> Result<String, String> {
     let (_, p) = find(&app, &id)?;
     let path = launcher::create_shortcut(&p)?;
     Ok(format!("已在桌面创建快捷方式：{}", path.file_name().unwrap_or_default().to_string_lossy()))
+}
+
+#[tauri::command]
+fn setup_login_router() -> Result<(), String> { login::register() }
+
+#[tauri::command]
+fn prepare_login(app: AppHandle, id: String) -> Result<(), String> {
+    let (i, p) = find(&app, &id)?;
+    login::arm(&p.id)?;
+    launcher::launch(&i, &p)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -354,6 +366,8 @@ pub fn run(start_in_tray: bool) {
             delete_profile,
             open_profile_folder,
             create_shortcut,
+            setup_login_router,
+            prepare_login,
             diagnostics,
             app_info,
             set_autostart,
