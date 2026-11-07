@@ -1,0 +1,18 @@
+# Claude Desktop 会话迁移验证
+
+验证日期：2026-11-07。此次只读取目录和记录字段，没有修改或复制账号数据。
+
+## 结论
+
+- Claude Desktop 的普通聊天和 Cowork 云端会话不能仅靠复制本地目录完整迁移到另一个个人账号。[Anthropic 说明](https://support.claude.com/en/articles/9450526-export-your-claude-data)不支持把导出数据导入另一个个人账号。
+- Claude Desktop 内的本地 Claude Code 会话值得继续验证，但不能据此保证其他会话类型可迁移。[第三方 macOS 工具](https://github.com/EminBudak/claude-multi-account)描述通过合并各账号的 `claude-code-sessions` 索引共享会话列表，实际对话日志依然在本地 Claude Code 项目目录中。
+- 本机默认 Claude 数据目录存在 `claude-code-sessions`，只读检查发现一个账号目录和 131 个 `local_*.json` 索引文件。抽样文件包含 `sessionId`、`cliSessionId` 和 `cwd` 等字段；未记录字段值。本机未发现默认位置的 Hydra 额外账号目录，因此没有可用于跨账号恢复的目标，尚未验证 Windows 上的可见性或继续执行。
+
+## 下一步验证
+
+1. 在两个已登录账号中分别创建无敏感内容的测试会话，确认两个账号的索引目录和各自 Claude Code 配置目录。
+2. 关闭相关 Claude 实例，备份索引；针对单个测试会话生成只读迁移预览，核实源日志、目标索引、工作目录及潜在冲突。
+3. 在备份可恢复的前提下，将一个测试索引复制到目标账号，重新打开目标实例，确认会话是否显示以及能否继续。还需单独验证附件、工具权限、组织限制和工作目录。
+4. 测试删除、同名冲突、版本升级和回滚后，再决定是否开发迁移功能。不要复制登录凭据或直接合并全部数据目录。
+
+第三方项目针对 macOS；索引格式和行为均可能随 Claude 更新而改变。
