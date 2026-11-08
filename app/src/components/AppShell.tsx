@@ -1,14 +1,16 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { CircleHelp, Minus, Moon, Square, Sun, SunMoon, Users, X, SlidersHorizontal } from "lucide-react";
+import { CircleHelp, Minus, Moon, Square, Sun, SunMoon, Users, X, SlidersHorizontal, BarChart3, ArrowRightLeft } from "lucide-react";
 import type React from "react";
 import appIcon from "../assets/claude-hydra-icon-256.png";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-export type PageId = "accounts" | "settings" | "about";
+export type PageId = "accounts" | "usage" | "sessions" | "settings" | "about";
 
 const navItems: Array<{ id: PageId; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "accounts", label: "账号", icon: Users },
+  { id: "usage", label: "用量统计", icon: BarChart3 },
+  { id: "sessions", label: "聊天续聊", icon: ArrowRightLeft },
   { id: "settings", label: "设置", icon: SlidersHorizontal },
   { id: "about", label: "关于", icon: CircleHelp },
 ];

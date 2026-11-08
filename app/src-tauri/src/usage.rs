@@ -37,8 +37,8 @@ fn read_root(root: &Path) -> Result<Usage, String> {
     if !root.exists() { return Ok(total); }
     let mut files = Vec::new();
     walk(&root, &mut files).map_err(|e| format!("无法扫描 Claude Code 日志：{e}"))?;
-    let mut messages: HashMap<String, [u64; 4]> = HashMap::new();
     for file in files {
+        let mut messages: HashMap<String, [u64; 4]> = HashMap::new();
         let Ok(f) = std::fs::File::open(&file) else { total.unreadable_files += 1; continue };
         total.files += 1;
         for (line_no, line) in BufReader::new(f).lines().enumerate() {
@@ -55,13 +55,13 @@ fn read_root(root: &Path) -> Result<Usage, String> {
             let values = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].map(|k| u[k].as_u64().unwrap_or(0));
             messages.entry(key).and_modify(|old| { for i in 0..4 { old[i] = old[i].max(values[i]); } }).or_insert(values);
         }
-    }
-    total.messages = messages.len() as u64;
-    for v in messages.values() {
-        total.input_tokens = total.input_tokens.saturating_add(v[0]);
-        total.output_tokens = total.output_tokens.saturating_add(v[1]);
-        total.cache_creation_tokens = total.cache_creation_tokens.saturating_add(v[2]);
-        total.cache_read_tokens = total.cache_read_tokens.saturating_add(v[3]);
+        total.messages = total.messages.saturating_add(messages.len() as u64);
+        for v in messages.values() {
+            total.input_tokens = total.input_tokens.saturating_add(v[0]);
+            total.output_tokens = total.output_tokens.saturating_add(v[1]);
+            total.cache_creation_tokens = total.cache_creation_tokens.saturating_add(v[2]);
+            total.cache_read_tokens = total.cache_read_tokens.saturating_add(v[3]);
+        }
     }
     Ok(total)
 }

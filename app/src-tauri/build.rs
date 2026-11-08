@@ -1,4 +1,11 @@
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        cc::Build::new().cpp(true).file("src/taskbar.cpp").compile("hydra_taskbar");
+        println!("cargo:rerun-if-changed=src/taskbar.cpp");
+        for lib in ["propsys", "shell32", "ole32", "uuid", "user32"] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
+    }
     tauri_build::build();
     println!("cargo:rerun-if-changed=icons");
 

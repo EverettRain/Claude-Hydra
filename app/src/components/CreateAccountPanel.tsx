@@ -1,3 +1,4 @@
+import { ProxyField } from "./ProxyField";
 import { Globe2, Loader2, Network, ShieldCheck, Shuffle, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, type Profile } from "@/lib/api";
@@ -62,8 +63,7 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
           </section>
           <section className="space-y-4 border-t border-border pt-6">
             <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500/10"><Network className="h-4 w-4" /></span>网络设置</div>
-            <div className="space-y-2"><Label htmlFor="new-account-proxy">代理地址（可选）</Label><Input id="new-account-proxy" value={proxy} onChange={(e) => setProxy(e.target.value)} placeholder="http://127.0.0.1:7890" className="font-mono text-xs" /><p className="text-xs leading-5 text-muted-foreground">支持 HTTP、HTTPS 或 SOCKS5；暂不支持在地址中填写代理账号和密码。</p></div>
-            <div className="rounded-lg bg-muted/70 p-3 text-xs leading-5 text-muted-foreground">代理参数会传给此 Claude 窗口及支持代理环境变量的子进程。系统浏览器、部分子进程和其他网络流量不一定经过代理，请自行验证实际出口。</div>
+            <ProxyField value={proxy} onChange={setProxy} />
           </section>
           <section className="space-y-4 border-t border-border pt-6">
             <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500/10"><Globe2 className="h-4 w-4" /></span>环境设置</div>

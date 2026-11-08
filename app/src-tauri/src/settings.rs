@@ -30,6 +30,8 @@ pub struct AccountConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub args: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_endpoint: String,
     #[serde(default)]
     pub keep_running: bool,
 }

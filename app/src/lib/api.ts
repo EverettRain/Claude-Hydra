@@ -18,6 +18,7 @@ export interface ProfileOptions {
   env: string;
   args: string;
   keepRunning: boolean;
+  proxyEndpoint: string;
 }
 
 export interface Install {
@@ -40,6 +41,10 @@ export interface AppInfo {
   autostart: boolean;
 }
 
+
+export interface QuotaWindow { utilization: number; resetsAt: string | null }
+export interface Quota { fiveHour: QuotaWindow | null; sevenDay: QuotaWindow | null; fetchedAt: number }
+
 export interface LocalUsage {
   inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number;
   messages: number; files: number; unreadableFiles: number; path: string;
@@ -61,6 +66,9 @@ export const api = {
   setupLoginRouter: () => invoke<void>("setup_login_router"),
   prepareLogin: (id: string) => invoke<void>("prepare_login", { id }),
   diagnostics: () => invoke<string>("diagnostics"),
+  saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
+  checkProxy: (endpoint: string) => invoke<string>("check_proxy", { endpoint }),
+  profileQuota: (id: string) => invoke<Quota>("profile_quota", { id }),
   localUsage: () => invoke<LocalUsage>("local_usage"),
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),

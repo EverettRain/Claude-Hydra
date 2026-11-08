@@ -12,6 +12,8 @@ use std::os::windows::process::CommandExt;
 pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     let running = profiles::running_map(install).get(&path_key(&p.path)).copied();
     if let Some(pid) = running {
+        #[cfg(windows)]
+        crate::taskbar::apply(p, pid);
         if sys::focus(pid) {
             return Ok("focused");
         }
@@ -20,6 +22,11 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     let s = settings::load();
     let outcome = if running.is_some() { "focused" } else { "started" };
 
+    let endpoint = s.account(&p.id).proxy_endpoint;
+    if !endpoint.is_empty() {
+        if p.is_default && install.is_msix() { return Err("商店版默认账号无法应用独立代理入口。".into()); }
+        crate::proxy::verify(&endpoint).map_err(|e| format!("账号未启动：{e}"))?;
+    }
     if p.is_default && install.is_msix() {
         let aumid = install.aumid.as_deref().ok_or("缺少商店版应用标识。")?;
         Command::new("explorer.exe")
@@ -33,8 +40,16 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     if !p.is_default {
         std::fs::create_dir_all(&path).map_err(|e| format!("无法创建账号目录：{e}"))?;
     }
-    let extra = profiles::extra_args(&s, &p.id);
-    let env = profiles::env_vars(&s, &p.id);
+    let mut extra = profiles::extra_args(&s, &p.id);
+    let mut env = profiles::env_vars(&s, &p.id);
+    if !endpoint.is_empty() {
+        if extra.contains("proxy") { return Err("额外启动参数与独立代理入口冲突。".into()); }
+        extra = format!("{extra} --proxy-server={endpoint} --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+            env.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+            env.push((key.to_string(), if key == "NO_PROXY" { String::new() } else { endpoint.clone() }));
+        }
+    }
 
     #[cfg(target_os = "macos")]
     {
@@ -75,7 +90,15 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         #[cfg(not(windows))]
         cmd.args(line);
         cmd.envs(env).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        cmd.spawn().map_err(|e| format!("无法启动 Claude（{}）：{e}", exe.display()))?;
+        let child = cmd.spawn().map_err(|e| format!("无法启动 Claude（{}）：{e}", exe.display()))?;
+        #[cfg(windows)]
+        if !p.is_default {
+            for _ in 0..20 {
+                if crate::taskbar::apply(p, child.id()) || !sys::is_alive(child.id()) { break; }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+        drop(child);
         Ok(outcome)
     }
 }
@@ -146,6 +169,8 @@ pub fn create_shortcut(p: &Profile) -> Result<PathBuf, String> {
     let args = format!("--launch \"{}\"", p.id);
     let desc = format!("启动 Claude-Hydra 账号：{}", p.name);
     sys::write_shortcut(&lnk_path, &exe, &args, &desc)?;
+    #[cfg(windows)]
+    crate::taskbar::shortcut(p, &lnk_path)?;
     Ok(lnk_path)
 }
 

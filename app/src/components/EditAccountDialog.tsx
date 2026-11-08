@@ -1,3 +1,4 @@
+import { ProxyField } from "./ProxyField";
 import { Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, type Profile, type ProfileOptions } from "@/lib/api";
@@ -121,6 +122,8 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
             </div>
             <Switch id="acc-keep" checked={opts.keepRunning} onCheckedChange={(v) => setOpts({ ...opts, keepRunning: v })} />
           </div>
+
+          {!profile.isDefault && <ProxyField value={opts.proxyEndpoint} onChange={proxyEndpoint => setOpts({ ...opts, proxyEndpoint })} />}
 
           <div className="space-y-1.5">
             <Label htmlFor="acc-args">额外启动参数</Label>

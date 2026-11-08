@@ -257,6 +257,8 @@ pub struct ProfileOptions {
     pub color: i32,
     pub env: String,
     pub args: String,
+    #[serde(default)]
+    pub proxy_endpoint: String,
     pub keep_running: bool,
 }
 
@@ -292,6 +294,7 @@ pub fn options(install: &Install, id: &str) -> Result<ProfileOptions, String> {
     let acc = s.account(id);
     Ok(ProfileOptions {
         name: p.name,
+        proxy_endpoint: acc.proxy_endpoint.clone(),
         color: acc.custom_color.map(|v| (v % PALETTE_LEN) as i32).unwrap_or(-1),
         env: env_vars(&s, id)
             .iter()
@@ -331,12 +334,19 @@ pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(
     if name != current.name {
         validate_name(install, name, Some(id))?;
     }
+    let proxy = o.proxy_endpoint.trim();
+    if !proxy.is_empty() {
+        crate::proxy::transport(proxy)?;
+        if current.is_default && install.is_msix() { return Err("商店版默认账号不支持独立代理入口。".into()); }
+        if o.args.contains("proxy") { return Err("请移除额外启动参数中的代理设置，再使用独立代理入口。".into()); }
+    }
     let env = parse_env_lines(&o.env)?;
     settings::update(|s| {
         let acc = s.account_mut(id);
         acc.label = (!name.is_empty() && name != id).then(|| name.to_string());
         acc.custom_color = (o.color >= 0).then(|| (o.color as usize) % PALETTE_LEN);
         acc.env = env;
+        acc.proxy_endpoint = proxy.to_owned();
         acc.args = o.args.trim().to_string();
         acc.keep_running = o.keep_running;
     })

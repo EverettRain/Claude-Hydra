@@ -12,6 +12,7 @@ crate-type = ["staticlib", "rlib"]
 doctest = false
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2.4.0", features = [] }
 
 [dependencies]
@@ -19,6 +20,9 @@ tauri = { version = "2.8.2", features = ["tray-icon", "image-png"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"] }
+base64 = "0.22"
+aes-gcm = "0.10"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -27,6 +31,8 @@ tauri-plugin-single-instance = "2"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_System_Memory",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_Diagnostics_ToolHelp",

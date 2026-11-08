@@ -6,8 +6,12 @@ pub mod launcher;
 pub mod login;
 pub mod paths;
 pub mod profiles;
+mod proxy;
+pub mod quota;
 pub mod settings;
 pub mod sys;
+#[cfg(windows)]
+mod taskbar;
 pub mod usage;
 pub mod watchdog;
 
@@ -143,13 +147,10 @@ async fn create_configured_account(app: AppHandle, name: String, proxy: String, 
         }
         let p = profiles::create(&install, name)?;
         let mut args = Vec::new();
-        let mut env = std::collections::BTreeMap::new();
-        if !proxy.is_empty() {
-            args.push(format!("--proxy-server={proxy}"));
-            for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] { env.insert(key.to_string(), proxy.to_string()); }
-        }
+
+
         if !locale.is_empty() { args.push(format!("--lang={locale}")); }
-        if let Err(e) = settings::update(|s| { let acc = s.account_mut(&p.id); acc.args = args.join(" "); acc.env = env; }) {
+        if let Err(e) = settings::update(|s| { let acc = s.account_mut(&p.id); acc.args = args.join(" "); acc.proxy_endpoint = proxy.to_string(); }) {
             let _ = std::fs::remove_dir(&p.path);
             return Err(e);
         }
@@ -158,6 +159,11 @@ async fn create_configured_account(app: AppHandle, name: String, proxy: String, 
     }).await.map_err(|e| e.to_string())?;
     after_change(&app);
     result
+}
+
+#[tauri::command]
+async fn check_proxy(endpoint: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || proxy::verify(&endpoint)).await.map_err(|_| "检测任务失败。".to_string())?
 }
 
 #[tauri::command]
@@ -217,6 +223,40 @@ fn diagnostics(app: AppHandle) -> String {
 #[tauri::command]
 async fn local_usage() -> Result<usage::Usage, String> {
     tauri::async_runtime::spawn_blocking(usage::read).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn profile_quota(app: AppHandle, id: String) -> Result<quota::Quota, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (_, profile) = find(&app, &id)?;
+        quota::fetch(&profile)
+    }).await.map_err(|_| "额度查询任务失败。".to_string())?
+}
+
+#[tauri::command]
+async fn save_transcript(app: AppHandle, text: String) -> Result<String, String> {
+    use std::{fs::OpenOptions, io::Write};
+    let dir = app.path().download_dir().map_err(|_| "无法定位下载目录。")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|_| "无法访问下载目录。")?;
+        let stamp = paths::now_millis();
+        for i in 0..100 {
+            let file = dir.join(format!("Claude-chat-{stamp}-{i}.txt"));
+            match OpenOptions::new().write(true).create_new(true).open(&file) {
+                Ok(mut out) => {
+                    if out.write_all(text.as_bytes()).is_err() {
+                        drop(out);
+                        let _ = std::fs::remove_file(&file);
+                        return Err("续聊附件写入失败。".to_string());
+                    }
+                    return Ok(file.to_string_lossy().into_owned());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err("无法在下载目录创建附件。".to_string()),
+            }
+        }
+        Err("文件名冲突，请重新保存。".to_string())
+    }).await.map_err(|_| "保存任务失败。".to_string())?
 }
 
 #[derive(Serialize)]
@@ -392,6 +432,12 @@ fn start_background(app: AppHandle) {
             std::thread::sleep(Duration::from_secs(if open { 3 } else { 10 }));
             if let Ok(i) = current_install(&app) {
                 let list = profiles::list(&i, true);
+                #[cfg(windows)]
+                for profile in &list {
+                    if let Some(pid) = profile.pid {
+                        taskbar::apply(profile, pid);
+                    }
+                }
                 let sig = signature(&list);
                 if sig != last {
                     if let (Some(tray), Ok(menu)) = (app.tray_by_id(TRAY_ID), build_menu(&app, &list)) {
@@ -424,6 +470,7 @@ pub fn run(start_in_tray: bool) {
             next_account_name,
             create_configured_account,
             profile_options,
+            check_proxy,
             save_profile_options,
             delete_profile,
             open_profile_folder,
@@ -432,6 +479,8 @@ pub fn run(start_in_tray: bool) {
             prepare_login,
             diagnostics,
             local_usage,
+            profile_quota,
+            save_transcript,
             app_info,
             set_autostart,
             set_claude_path,
