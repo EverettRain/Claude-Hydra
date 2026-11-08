@@ -80,7 +80,7 @@ fn find_token(config: &Value, org: Option<&str>, decrypt: impl Fn(&[u8]) -> Opti
         let why = if org.is_none() { "该账号缓存了多个组织的凭据，且无法读取 Claude 当前选择的组织" } else { "账号凭据包含多个身份" };
         return Err(format!("{why}，无法安全确定额度归属。\n候选（不含令牌）：{}", describe(&picked, account.as_deref())));
     }
-    Err("未找到可用的桌面端登录凭据，请打开该账号并确认已登录。".into())
+    Err(no_token(config))
 }
 
 /// The organization currently selected in Claude, from claude.ai's `lastActiveOrg` cookie.
@@ -119,6 +119,20 @@ fn is_uuid(s: &str) -> bool {
 fn identity(key: &str) -> &str {
     let head = key.split_whitespace().next().unwrap_or(key);
     head.find(":user:").map_or(head, |i| &head[..i])
+}
+
+/// Why no usable credential was found. Signing in only creates Claude's web session; the
+/// desktop mints the OAuth token Hydra reads on demand, when a feature such as Claude Code
+/// needs it. An account that never used one (or cannot, e.g. pending identity verification)
+/// has no token even though it is signed in.
+fn no_token(config: &Value) -> String {
+    let signed_in = config.get("lastKnownAccountUuid").and_then(Value::as_str).is_some_and(|a| !a.is_empty())
+        || config.get("windowSizeWasSignedIn").and_then(Value::as_bool) == Some(true);
+    if signed_in {
+        "该账号已登录，但尚未使用过 Claude Code 等功能，桌面端还没有生成可查询用量的凭据。在该账号中使用一次 Claude Code 后再刷新；需要身份验证（KYC）等无法使用 Claude Code 的账号暂时无法读取用量。".into()
+    } else {
+        "未找到可用的桌面端登录凭据，请打开该账号并确认已登录。".into()
+    }
 }
 
 /// Expiry of a cache entry in milliseconds, accepting seconds or milliseconds.
@@ -184,7 +198,7 @@ fn mac_decrypt(password: &[u8], data: &[u8]) -> Option<Vec<u8>> {
 fn token(dir: &Path) -> Result<Found, String> {
     let config = read_json(dir, "config.json")?;
     if !["oauth:tokenCacheV2", "oauth:tokenCache"].iter().any(|k| config.get(*k).is_some()) {
-        return Err("未找到可用的桌面端登录凭据，请打开该账号并确认已登录。".into());
+        return Err(no_token(&config));
     }
     // `security` asks the user before releasing the Keychain item to Hydra.
     let out = std::process::Command::new("/usr/bin/security")
@@ -340,6 +354,13 @@ fn query(client: reqwest::blocking::Client, credential: String) -> Result<Quota,
         let blob = [b"v10".as_slice(), &sealed].concat();
         assert_eq!(mac_decrypt(b"secret", &blob).unwrap(), b"{\"k\":1}");
         assert!(mac_decrypt(b"wrong", &blob).map_or(true, |p| p != b"{\"k\":1}"));
+    }
+
+    #[test] fn explains_signed_in_account_without_token() {
+        let open = |d: &[u8]| Some(d[3..].to_vec());
+        let signed_in = serde_json::json!({"lastKnownAccountUuid": "789f2b9b-15d6-49dd-ab6d-030c2f759751"});
+        assert!(find_token(&signed_in, None, open).unwrap_err().contains("尚未使用过 Claude Code"));
+        assert!(find_token(&serde_json::json!({}), None, open).unwrap_err().contains("确认已登录"));
     }
 
     #[test] fn parse_preserves_missing_windows() {
