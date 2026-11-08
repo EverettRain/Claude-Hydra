@@ -5,7 +5,7 @@ export const LOCALES: [string, string][] = [
   ["zh-CN", "简体中文"], ["zh-TW", "繁體中文"], ["ja-JP", "日语"], ["ko-KR", "韩语"],
 ];
 
-export const emptyEnvironment = (): EnvironmentInput => ({ name: "", node: null, timezone: "proxy", locale: "", args: "", env: "" });
+export const emptyEnvironment = (): EnvironmentInput => ({ name: "", node: null, timezone: "proxy", locale: "", args: "", env: "", lastCheck: null });
 
 /** One-line description: proxy · timezone · language · extras. */
 export function environmentSummary(e: EnvironmentInput): string {
@@ -23,6 +23,6 @@ export function environmentSummary(e: EnvironmentInput): string {
 }
 
 export function toInput(e: Environment): EnvironmentInput {
-  const { name, node, timezone, locale, args, env } = e;
-  return { name, node, timezone, locale, args, env };
+  const { name, node, timezone, locale, args, env, lastCheck } = e;
+  return { name, node, timezone, locale, args, env, lastCheck: lastCheck ?? null };
 }

@@ -27,6 +27,20 @@ pub struct Environment {
     pub args: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Result of the last manual connectivity check, shown again when the environment is edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<NodeCheck>,
+}
+
+/// A successful connectivity check: exit info plus the residential/datacenter and risk notes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeCheck {
+    pub exit: node::ExitInfo,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub risk: String,
 }
 
 impl Environment {
@@ -63,6 +77,8 @@ pub struct EnvironmentInput {
     pub args: String,
     #[serde(default)]
     pub env: String,
+    #[serde(default)]
+    pub last_check: Option<NodeCheck>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -89,6 +105,7 @@ fn view(s: &Settings, id: &str, e: &Environment) -> EnvironmentView {
             locale: e.locale.clone(),
             args: e.args.clone(),
             env: e.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n"),
+            last_check: e.last_check.clone(),
         },
         used_by: s.accounts.iter().filter(|(_, a)| a.environment.as_deref() == Some(id)).map(|(aid, _)| account_name(s, aid)).collect(),
     }
@@ -121,7 +138,9 @@ fn build(input: &EnvironmentInput) -> Result<Environment, String> {
     let args = input.args.replace(['\r', '\n'], " ").trim().to_string();
     if node.is_some() && node::args_conflict(&args) { return Err("请移除额外启动参数中的代理开关，代理由节点设置。".into()); }
     let env = profiles::parse_env_lines(&input.env)?;
-    Ok(Environment { name: name.to_string(), node: node.map(|mut n| { n.password = node::seal(&n.password); n }), timezone, locale: input.locale.clone(), args, env })
+    // A check result only describes a node; drop it when the environment has none.
+    let last_check = node.as_ref().and(input.last_check.clone());
+    Ok(Environment { name: name.to_string(), node: node.map(|mut n| { n.password = node::seal(&n.password); n }), timezone, locale: input.locale.clone(), args, env, last_check })
 }
 
 /// Creates (`id` = None) or updates an environment and returns its id.
@@ -168,7 +187,7 @@ pub fn migrate() {
         }).collect();
         let mut name = format!("{} 的环境", account_name(&s, &id));
         while s.environments.values().any(|e| e.name == name) { name.push('′'); }
-        let env = Environment { name, node, timezone: acc.timezone.clone(), locale, args: args.join(" "), env: acc.env.clone() };
+        let env = Environment { name, node, timezone: acc.timezone.clone(), locale, args: args.join(" "), env: acc.env.clone(), last_check: None };
         let env_id = new_id(&s);
         s.environments.insert(env_id.clone(), env);
         let a = s.account_mut(&id);
@@ -194,7 +213,7 @@ mod tests {
             name: "东京".into(),
             node: Some(NodeConfig { kind: "socks5".into(), host: "jp.example".into(), port: 1080, password: node::seal("pw"), username: "u".into(), ..Default::default() }),
             timezone: "Asia/Tokyo".into(), locale: "ja-JP".into(), args: "--disable-gpu".into(),
-            env: BTreeMap::from([("FOO".into(), "1".into())]),
+            env: BTreeMap::from([("FOO".into(), "1".into())]), last_check: None,
         });
         s.accounts.insert("a".into(), AccountConfig { environment: Some("e1".into()), args: "--ignored".into(), ..Default::default() });
         let e = s.effective("a");
@@ -216,5 +235,15 @@ mod tests {
         let ok = build(&EnvironmentInput { name: "x".into(), node: Some(NodeConfig { password: "p".into(), username: "u".into(), ..node }), env: "A=1".into(), ..Default::default() }).unwrap();
         assert_ne!(ok.node.unwrap().password, "p");
         assert_eq!(ok.env.get("A").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn last_check_kept_only_with_node() {
+        let check = NodeCheck { exit: node::ExitInfo { ip: "1.2.3.4".into(), timezone: "Asia/Tokyo".into(), checked_at: 1, ..Default::default() }, quality: None, risk: "r".into() };
+        let node = NodeConfig { kind: "http".into(), host: "h".into(), port: 1, ..Default::default() };
+        let with = build(&EnvironmentInput { name: "x".into(), node: Some(node), last_check: Some(check.clone()), ..Default::default() }).unwrap();
+        assert_eq!(with.last_check, Some(check.clone()));
+        let without = build(&EnvironmentInput { name: "x".into(), last_check: Some(check), ..Default::default() }).unwrap();
+        assert_eq!(without.last_check, None);
     }
 }

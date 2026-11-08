@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3017",
-    "beforeDevCommand": "pnpm run dev:renderer",
-    "beforeBuildCommand": "pnpm run build:renderer"
+    "beforeDevCommand": "node scripts/fetch-mihomo.mjs && pnpm run dev:renderer",
+    "beforeBuildCommand": "node scripts/fetch-mihomo.mjs && pnpm run build:renderer"
   },
   "app": {
     "windows": [
@@ -41,6 +41,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "binaries/mihomo"
+    ],
+    "resources": {
+      "licenses/MIHOMO-LICENSE.txt": "licenses/MIHOMO-LICENSE.txt"
+    },
     "category": "Utility",
     "shortDescription": "Claude-Hydra",
     "longDescription": "Run several Claude desktop accounts side by side.",

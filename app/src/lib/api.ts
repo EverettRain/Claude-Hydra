@@ -33,6 +33,8 @@ export interface EnvironmentInput {
   args: string;
   /** One NAME=value per line. */
   env: string;
+  /** Last successful connectivity check of the node. */
+  lastCheck: NodeCheck | null;
 }
 export interface Environment extends EnvironmentInput { id: string; usedBy: string[] }
 
@@ -41,6 +43,7 @@ export interface NodeConfig {
   kind: NodeKind; host: string; port: number; username: string; password: string;
   ipVersion: "ipv4" | "ipv6"; geoChannel: "ipinfo" | "ipapi" | "ip-api"; refreshUrl: string;
 }
+export interface NodeCheck { exit: ExitInfo; quality: string | null; risk: string }
 export interface ExitInfo { ip: string; country: string; region: string; city: string; timezone: string; checkedAt: number }
 
 export interface Install {

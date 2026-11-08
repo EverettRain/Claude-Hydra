@@ -19,15 +19,15 @@ pub fn resolve(node: &NodeConfig) -> Result<(NodeConfig, Option<Core>), String> 
     let secret = uuid::Uuid::new_v4().to_string();
     let config = json!({"socks-port":port,"allow-lan":false,"mode":"rule","authentication":[format!("hydra:{secret}")],
         "proxies":[proxy],"rules":["MATCH,HYDRA-NODE"],"log-level":"silent"});
-    let home = paths::storage_root().join("mihomo").join(uuid::Uuid::new_v4().to_string());
+    // Per-run working dirs live apart from the installed binary path, otherwise the first run
+    // turns `<root>/mihomo` into a directory and the installed kernel can never be found.
+    let home = paths::storage_root().join("mihomo-run").join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&home).map_err(|_| "无法创建内核目录。")?;
-    let installed = paths::storage_root().join(if cfg!(windows) {"mihomo.exe"} else {"mihomo"});
-    let exe = std::env::var_os("HYDRA_MIHOMO_PATH").unwrap_or_else(|| if installed.is_file() {installed.into_os_string()} else {"mihomo".into()});
-    let mut cmd = Command::new(exe);
+    let mut cmd = Command::new(mihomo_exe());
     #[cfg(windows)]
     { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
     let mut core = Core(cmd.arg("-d").arg(&home).args(["-f","-"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
-        .spawn().map_err(|_| "无法启动 Mihomo。请将 mihomo 放入 PATH 或通过 HYDRA_MIHOMO_PATH 指定内核路径。")?, home);
+        .spawn().map_err(|_| { let _ = std::fs::remove_dir_all(&home); "无法启动内置的 Mihomo 内核，请重新安装 Claude-Hydra，或通过 HYDRA_MIHOMO_PATH 指定内核路径。" })?, home.clone());
     core.0.stdin.take().ok_or("内核输入不可用")?.write_all(config.to_string().as_bytes()).map_err(|_| "无法传递节点配置。")?;
     let end = Instant::now() + Duration::from_secs(8);
     while core.alive() && Instant::now() < end {
@@ -37,6 +37,23 @@ pub fn resolve(node: &NodeConfig) -> Result<(NodeConfig, Option<Core>), String> 
         std::thread::sleep(Duration::from_millis(60));
     }
     Err("Mihomo 未能启动所选节点。请检查节点协议和内核版本。".into())
+}
+
+/// HYDRA_MIHOMO_PATH, then the bundled sidecar next to our executable, then
+/// `<storage root>/mihomo`, then well-known install locations (apps launched from Finder
+/// do not inherit the shell PATH), then plain PATH lookup.
+fn mihomo_exe() -> std::ffi::OsString {
+    if let Some(p) = std::env::var_os("HYDRA_MIHOMO_PATH") { return p; }
+    let name = if cfg!(windows) { "mihomo.exe" } else { "mihomo" };
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        candidates.push(dir.join(name));
+    }
+    candidates.push(paths::storage_root().join(name));
+    if cfg!(target_os = "macos") {
+        candidates.extend(["/opt/homebrew/bin/mihomo", "/usr/local/bin/mihomo"].map(std::path::PathBuf::from));
+    }
+    candidates.into_iter().find(|p| p.is_file()).map(|p| p.into_os_string()).unwrap_or_else(|| name.into())
 }
 
 #[tauri::command]

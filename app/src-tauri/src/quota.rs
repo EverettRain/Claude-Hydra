@@ -27,10 +27,16 @@ fn read_json(dir: &Path, name: &str) -> Result<Value, String> {
     serde_json::from_slice(&data).map_err(|_| format!("账号的 {name} 格式无法识别。"))
 }
 
-/// Finds the single desktop OAuth token in Electron's encrypted token cache.
+/// Finds the desktop OAuth token of the signed-in account in Electron's encrypted token cache.
 /// `decrypt` receives the raw `v10`-prefixed blob and returns plaintext JSON bytes.
+///
+/// The cache can hold tokens of earlier sign-ins too, so candidates are narrowed to the
+/// account in `lastKnownAccountUuid` and to unexpired entries; identical tokens count once.
+/// If that still leaves several, we refuse rather than guess whose usage we would show.
 fn find_token(config: &Value, decrypt: impl Fn(&[u8]) -> Option<Vec<u8>>) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
+    let account = config.get("lastKnownAccountUuid").and_then(Value::as_str).map(str::to_ascii_lowercase).filter(|a| !a.is_empty());
+    let now = crate::paths::now_millis();
     for field in ["oauth:tokenCacheV2", "oauth:tokenCache"] {
         let Some(encoded) = config.get(field).and_then(Value::as_str) else { continue };
         let Ok(data) = STANDARD.decode(encoded) else { continue };
@@ -38,12 +44,58 @@ fn find_token(config: &Value, decrypt: impl Fn(&[u8]) -> Option<Vec<u8>>) -> Res
         let Some(plain) = decrypt(&data) else { continue };
         let Ok(value) = serde_json::from_slice::<Value>(&plain) else { continue };
         let Some(entries) = value.as_object() else { continue };
-        let candidates: Vec<&str> = entries.iter().filter(|(k, _)| k.split_whitespace().any(|s| s.ends_with("user:inference")))
-            .filter_map(|(_, v)| v.get("token").and_then(Value::as_str)).filter(|t| !t.is_empty()).collect();
-        if candidates.len() == 1 { return Ok(candidates[0].to_owned()); }
-        if candidates.len() > 1 { return Err("账号凭据包含多个身份，无法安全确定额度归属。".into()); }
+        let all: Vec<(&String, &Value, &str)> = entries.iter()
+            .filter(|(k, _)| k.split_whitespace().any(|s| s.ends_with("user:inference")))
+            .filter_map(|(k, v)| v.get("token").and_then(Value::as_str).filter(|t| !t.is_empty()).map(|t| (k, v, t)))
+            .collect();
+        if all.is_empty() { continue; }
+        let mut picked = all.clone();
+        if let Some(acc) = &account {
+            let mine: Vec<_> = picked.iter().copied().filter(|(k, v, _)| k.to_ascii_lowercase().contains(acc.as_str()) || v.to_string().to_ascii_lowercase().contains(acc.as_str())).collect();
+            if !mine.is_empty() { picked = mine; }
+        }
+        let live: Vec<_> = picked.iter().copied().filter(|(_, v, _)| expires_ms(v).map_or(true, |e| e > now)).collect();
+        if !live.is_empty() { picked = live; }
+        let mut tokens: Vec<&str> = picked.iter().map(|(_, _, t)| *t).collect();
+        tokens.sort_unstable();
+        tokens.dedup();
+        if tokens.len() == 1 { return Ok(tokens[0].to_owned()); }
+        // Several grants of one account and organization (e.g. Claude Code's extra scope) report
+        // the same usage; take the one valid longest.
+        let first = identity(picked[0].0);
+        if picked.iter().all(|(k, _, _)| identity(k) == first) {
+            if let Some((_, _, t)) = picked.iter().max_by_key(|(_, v, _)| expires_ms(v).unwrap_or(0)) { return Ok((*t).to_owned()); }
+        }
+        return Err(format!("账号凭据包含多个身份，无法安全确定额度归属。\n候选（不含令牌）：{}", describe(&picked, account.as_deref())));
     }
     Err("未找到可用的桌面端登录凭据，请打开该账号并确认已登录。".into())
+}
+
+/// Account + client + organization part of a cache key, i.e. everything before the scopes:
+/// `acct:<account>|<client>:<org>:https://api.anthropic.com:user:inference user:profile …`.
+fn identity(key: &str) -> &str {
+    let head = key.split_whitespace().next().unwrap_or(key);
+    head.find(":user:").map_or(head, |i| &head[..i])
+}
+
+/// Expiry of a cache entry in milliseconds, accepting seconds or milliseconds.
+fn expires_ms(v: &Value) -> Option<u64> {
+    let n = ["expiresAt", "expires_at", "expiry"].iter().find_map(|k| v.get(*k).and_then(Value::as_u64))?;
+    Some(if n < 100_000_000_000 { n * 1000 } else { n })
+}
+
+/// Token-free shape of the remaining candidates, so an ambiguous cache can be diagnosed.
+fn describe(c: &[(&String, &Value, &str)], account: Option<&str>) -> String {
+    c.iter().map(|(k, v, _)| {
+        let key: String = k.split(|ch: char| ch == ':' || ch == '|' || ch.is_whitespace()).map(|part| {
+            let lower = part.to_ascii_lowercase();
+            if account == Some(lower.as_str()) { "<当前账号>".to_string() }
+            else if part.len() == 36 && part.chars().filter(|c| *c == '-').count() == 4 { "<其他ID>".to_string() }
+            else { part.to_string() }
+        }).collect::<Vec<_>>().join("·");
+        let fields = v.as_object().map(|o| o.keys().filter(|f| *f != "token").cloned().collect::<Vec<_>>().join(",")).unwrap_or_default();
+        format!("[{key} | {fields}]")
+    }).collect::<Vec<_>>().join(" ")
 }
 
 /// Windows: Chromium os_crypt key protected by DPAPI, values sealed with AES-256-GCM.
@@ -145,6 +197,53 @@ fn query(client: reqwest::blocking::Client, credential: String) -> Result<Quota,
         let two = serde_json::json!({"oauth:tokenCache": seal(serde_json::json!({"a user:inference":{"token":"t1"},"b user:inference":{"token":"t2"}}))});
         assert!(find_token(&two, open).is_err());
         assert!(find_token(&serde_json::json!({}), open).is_err());
+    }
+
+    #[test] fn narrows_multiple_identities_to_current_live_account() {
+        let seal = |v: Value| STANDARD.encode([b"v10".as_slice(), v.to_string().as_bytes()].concat());
+        let open = |d: &[u8]| Some(d[3..].to_vec());
+        let me = "11111111-2222-3333-4444-555555555555";
+        let other = "99999999-8888-7777-6666-555555555555";
+        let far = 4_000_000_000_000u64;
+        // Old sign-in of another account plus the current one: pick the current account.
+        let c = serde_json::json!({"lastKnownAccountUuid": me, "oauth:tokenCacheV2": seal(serde_json::json!({
+            format!("cid:{other}:user:inference"): {"token":"old","expiresAt":far},
+            format!("cid:{me}:user:inference"): {"token":"mine","expiresAt":far}}))});
+        assert_eq!(find_token(&c, open).unwrap(), "mine");
+        // Same account, one expired entry: pick the live one (expiry in seconds is accepted too).
+        let c = serde_json::json!({"lastKnownAccountUuid": me, "oauth:tokenCacheV2": seal(serde_json::json!({
+            format!("a:{me}:user:inference"): {"token":"stale","expiresAt":1_000},
+            format!("b:{me}:user:inference"): {"token":"live","expiresAt":4_000_000_000u64}}))});
+        assert_eq!(find_token(&c, open).unwrap(), "live");
+        // Duplicates of one token are not ambiguous.
+        let c = serde_json::json!({"oauth:tokenCacheV2": seal(serde_json::json!({
+            "a user:inference": {"token":"same"}, "b user:inference user:profile": {"token":"same"}}))});
+        assert_eq!(find_token(&c, open).unwrap(), "same");
+        // Still ambiguous: refuse, and never leak tokens into the message.
+        let c = serde_json::json!({"lastKnownAccountUuid": me, "oauth:tokenCacheV2": seal(serde_json::json!({
+            format!("a:{me}:user:inference"): {"token":"secret-1","expiresAt":far},
+            format!("b:{me}:user:inference"): {"token":"secret-2","expiresAt":far}}))});
+        let err = find_token(&c, open).unwrap_err();
+        assert!(err.contains("<当前账号>") && err.contains("expiresAt") && !err.contains("secret"));
+    }
+
+    #[test] fn same_account_and_org_with_extra_scope_is_one_identity() {
+        let seal = |v: Value| STANDARD.encode([b"v10".as_slice(), v.to_string().as_bytes()].concat());
+        let open = |d: &[u8]| Some(d[3..].to_vec());
+        let me = "789f2b9b-15d6-49dd-ab6d-030c2f759751";
+        let key = |org: &str, scopes: &str| format!("acct:{me}|9d1c250a-e61b-44d9-88ed-5944d1962f5e:{org}:https://api.anthropic.com:{scopes}");
+        let org = "766c0284-b271-4b5d-aa58-031ed7724bee";
+        // Real Desktop layout: the plain grant plus Claude Code's grant with an extra scope.
+        let c = serde_json::json!({"lastKnownAccountUuid": me, "oauth:tokenCacheV2": seal(serde_json::json!({
+            key(org, "user:inference user:file_upload user:profile user:sessions:claude_code"): {"token":"code","expiresAt":4_000_000_000_001u64},
+            key(org, "user:inference user:file_upload user:profile"): {"token":"desktop","expiresAt":4_000_000_000_000u64}}))});
+        assert_eq!(find_token(&c, open).unwrap(), "code");
+        // Same account in two organizations has separate usage: refuse.
+        let c = serde_json::json!({"lastKnownAccountUuid": me, "oauth:tokenCacheV2": seal(serde_json::json!({
+            key(org, "user:inference"): {"token":"t1","expiresAt":4_000_000_000_000u64},
+            key("00000000-0000-0000-0000-000000000000", "user:inference"): {"token":"t2","expiresAt":4_000_000_000_000u64}}))});
+        let err = find_token(&c, open).unwrap_err();
+        assert!(err.contains("<当前账号>") && !err.contains("t1") && !err.contains("t2"));
     }
 
     #[cfg(target_os = "macos")]

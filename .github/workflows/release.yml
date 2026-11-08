@@ -1,4 +1,4 @@
-name: Publish Windows update
+name: Publish release
 on:
   push:
     tags: ['v*']
@@ -6,7 +6,20 @@ permissions:
   contents: write
 jobs:
   release:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -20,6 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.95'
+          targets: ${{ matrix.target }}
       - name: Verify release version
         shell: pwsh
         run: |
@@ -29,6 +43,8 @@ jobs:
         working-directory: app
       - run: pnpm typecheck
         working-directory: app
+      # The bundled Mihomo kernel is downloaded and checksum-verified by beforeBuildCommand
+      # (scripts/fetch-mihomo.mjs) for the target below.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,5 +56,5 @@ jobs:
           releaseName: Claude-Hydra ${{ github.ref_name }}
           releaseDraft: false
           prerelease: false
-          args: --bundles nsis
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
           includeUpdaterJson: true

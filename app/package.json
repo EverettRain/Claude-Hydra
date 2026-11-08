@@ -12,7 +12,8 @@
     "dev:renderer": "vite",
     "build:renderer": "vite build",
     "typecheck": "tsc --noEmit",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+    "fetch:mihomo": "node scripts/fetch-mihomo.mjs",
+    "test:rust": "node scripts/fetch-mihomo.mjs && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "license": "MIT",
   "devDependencies": {

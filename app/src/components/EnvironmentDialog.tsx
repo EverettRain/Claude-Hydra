@@ -79,8 +79,9 @@ export function EnvironmentDialog({ open, id, initial, onClose, onSaved }: Props
 
         <section>
           <div className="group-label">网络与时区</div>
-          <NodeConfigForm idPrefix="env-node" node={env.node} onNodeChange={(node) => setEnv({ ...env, node })}
-            timezone={env.timezone} onTimezoneChange={(timezone) => setEnv({ ...env, timezone })} />
+          <NodeConfigForm idPrefix="env-node" node={env.node} onNodeChange={(node) => setEnv((e) => ({ ...e, node }))}
+            timezone={env.timezone} onTimezoneChange={(timezone) => setEnv({ ...env, timezone })}
+            lastCheck={env.lastCheck} onLastCheckChange={(lastCheck) => setEnv((e) => ({ ...e, lastCheck }))} />
         </section>
 
         <section>

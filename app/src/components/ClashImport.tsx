@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { parseDocument } from "yaml";
 import { emptyNode } from "@/lib/node";
@@ -9,7 +9,7 @@ import { Input, Select } from "./ui/input";
 function nodes(raw: string): NodeConfig[] {
   if (raw.length > 4194304) throw new Error("配置超过 4 MB。");
   const doc = parseDocument(raw);
-  if (doc.errors.length) throw new Error("无法解析 YAML，请选择 Clash 配置或 Clash 格式订阅。");
+  if (doc.errors.length) throw new Error("无法解析 YAML，请确认订阅地址返回 Clash 格式配置。");
   const rows = doc.toJS({ maxAliasCount: 50 })?.proxies;
   if (!Array.isArray(rows)) throw new Error("配置中没有 proxies 节点列表。");
   return rows.flatMap(p => {
@@ -21,7 +21,6 @@ function nodes(raw: string): NodeConfig[] {
 }
 
 export function ClashImport({ node, choose }: { node: NodeConfig | null; choose: (n: NodeConfig) => void }) {
-  const input = useRef<HTMLInputElement>(null);
   const [url, setUrl] = useState("");
   const [list, setList] = useState<NodeConfig[]>([]);
   const [busy, setBusy] = useState(false);
@@ -36,12 +35,8 @@ export function ClashImport({ node, choose }: { node: NodeConfig | null; choose:
     finally { setBusy(false); }
   }
   const name = (n: NodeConfig) => String(JSON.parse(n.password).name);
-  return <div className="space-y-2 px-4 py-3">
+  return <div className="space-y-2 px-4 py-2">
     <div className="flex items-center gap-2">
-      <Button variant="outline" disabled={busy} onClick={() => input.current?.click()}>导入 Clash YAML</Button>
-      <input ref={input} hidden type="file" accept=".yaml,.yml,.json" onChange={e => {
-        const f = e.target.files?.[0]; e.target.value = ""; if (f) void load(f.size <= 4194304 ? f.text() : Promise.reject(new Error("配置超过 4 MB。")));
-      }} />
       <Input aria-label="Clash 订阅地址" type="password" placeholder="Clash 订阅地址" value={url} onChange={e => setUrl(e.target.value)} />
       <Button variant="outline" disabled={busy || !url.trim()} onClick={() => load(invoke<string>("clash_subscription", { url }))}>{busy ? "读取中…" : "读取订阅"}</Button>
     </div>

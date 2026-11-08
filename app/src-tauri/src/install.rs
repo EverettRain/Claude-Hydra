@@ -129,11 +129,20 @@ pub fn resolve() -> Result<Install, String> {
 }
 
 fn from_user_path(p: PathBuf) -> Install {
+    // The cache stores the executable (`Claude.app/Contents/MacOS/Claude`), while users may
+    // pick the bundle itself; both must resolve to the bundle so the default profile is the
+    // macOS one rather than the Windows `%APPDATA%` fallback (a relative `Claude` here).
     #[cfg(target_os = "macos")]
-    if p.extension().map(|e| e == "app").unwrap_or(false) {
-        return mac_app(&p);
+    if let Some(app) = mac_bundle(&p) {
+        return mac_app(app);
     }
     classic(p)
+}
+
+/// The `.app` bundle that is `p` or contains it.
+#[cfg(target_os = "macos")]
+fn mac_bundle(p: &Path) -> Option<&Path> {
+    p.ancestors().find(|a| a.extension().is_some_and(|e| e == "app"))
 }
 
 fn to_cache(i: &Install) -> CachedInstall {
@@ -269,5 +278,17 @@ mod tests {
             assert!(i.is_desktop_exe(r"C:\Users\u\AppData\Local\AnthropicClaude\app-1.2.0\Claude.exe"));
             assert!(!i.is_desktop_exe(r"C:\Users\u\.local\bin\claude.exe"));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_cached_exe_keeps_mac_default_profile() {
+        let from_bundle = from_user_path(PathBuf::from("/Applications/Claude.app"));
+        // The install cache stores the executable inside the bundle.
+        let from_exe = from_user_path(PathBuf::from("/Applications/Claude.app/Contents/MacOS/Claude"));
+        assert!(from_exe.default_profile.is_absolute());
+        assert!(from_exe.default_profile.ends_with("Library/Application Support/Claude"));
+        assert_eq!(from_exe.default_profile, from_bundle.default_profile);
+        assert_eq!(from_exe.exe, from_bundle.exe);
     }
 }

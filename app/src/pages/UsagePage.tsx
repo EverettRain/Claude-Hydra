@@ -86,7 +86,7 @@ export function UsagePage({ profiles }: { profiles: Profile[] | null }) {
                     </div>
                   )}
                   {errors[profile.id] && (
-                    <p className="mt-2 pl-10 text-[12px] text-danger">
+                    <p className="selectable mt-2 whitespace-pre-line break-all pl-10 text-[12px] text-danger">
                       {errors[profile.id]}
                       {q && " 当前显示的是上次结果。"}
                     </p>
