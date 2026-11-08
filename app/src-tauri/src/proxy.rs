@@ -9,6 +9,16 @@ pub(crate) fn transport(endpoint: &str) -> Result<reqwest::Proxy, String> {
     reqwest::Proxy::all(address).map_err(|_| "代理地址无效。".into())
 }
 
+/// Chromium switches that would override or bypass the managed proxy entrance.
+const PROXY_SWITCHES: [&str; 5] = ["--proxy-server", "--no-proxy-server", "--proxy-pac-url", "--proxy-auto-detect", "--proxy-bypass-list"];
+
+/// Whether extra launch arguments already contain a proxy switch (exact flag match only).
+pub fn args_conflict(args: &str) -> bool {
+    args.split_whitespace()
+        .map(|a| a.trim_matches('"').split('=').next().unwrap_or_default().to_ascii_lowercase())
+        .any(|flag| PROXY_SWITCHES.contains(&flag.as_str()))
+}
+
 fn check(endpoint: &str, destination: &str) -> Result<IpAddr, String> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -67,6 +77,16 @@ mod tests {
             .unwrap();
         });
         (endpoint, thread)
+    }
+
+    #[test]
+    fn only_real_proxy_switches_conflict() {
+        for args in ["--proxy-server=http://a:1", "--lang=en \"--proxy-pac-url=x\"", "--NO-PROXY-SERVER", "--proxy-bypass-list=*"] {
+            assert!(args_conflict(args), "{args}");
+        }
+        for args in ["", "--lang=zh-CN", "--no-proxy-xxx", "--proxy-serverless", "--disable-gpu --my-proxy=1"] {
+            assert!(!args_conflict(args), "{args}");
+        }
     }
 
     #[test]

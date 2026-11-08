@@ -41,14 +41,14 @@ export interface AppInfo {
   autostart: boolean;
 }
 
-
 export interface QuotaWindow { utilization: number; resetsAt: string | null }
 export interface Quota { fiveHour: QuotaWindow | null; sevenDay: QuotaWindow | null; fetchedAt: number }
 
-export interface LocalUsage {
-  inputTokens: number; outputTokens: number; cacheCreationTokens: number; cacheReadTokens: number;
-  messages: number; files: number; unreadableFiles: number; path: string;
+export interface CodeSession {
+  id: string; title: string; cwd: string | null; cwdExists: boolean; lastActivityAt: number | null; inTarget: boolean;
 }
+export interface SessionPreview { sessions: CodeSession[]; targetProblem: string | null; running: boolean }
+export interface TransferResult { copied: number; skipped: number; failed: number }
 
 export const api = {
   listProfiles: () => invoke<Profile[]>("list_profiles"),
@@ -69,7 +69,8 @@ export const api = {
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
   checkProxy: (endpoint: string) => invoke<string>("check_proxy", { endpoint }),
   profileQuota: (id: string) => invoke<Quota>("profile_quota", { id }),
-  localUsage: () => invoke<LocalUsage>("local_usage"),
+  sessionPreview: (source: string, target: string) => invoke<SessionPreview>("session_preview", { source, target }),
+  copySessions: (source: string, target: string, ids: string[]) => invoke<TransferResult>("copy_sessions", { source, target, ids }),
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   setClaudePath: (path: string | null) => invoke<void>("set_claude_path", { path }),

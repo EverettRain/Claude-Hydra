@@ -10,7 +10,7 @@ export type PageId = "accounts" | "usage" | "sessions" | "settings" | "about";
 const navItems: Array<{ id: PageId; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "accounts", label: "账号", icon: Users },
   { id: "usage", label: "用量统计", icon: BarChart3 },
-  { id: "sessions", label: "聊天续聊", icon: ArrowRightLeft },
+  { id: "sessions", label: "会话迁移", icon: ArrowRightLeft },
   { id: "settings", label: "设置", icon: SlidersHorizontal },
   { id: "about", label: "关于", icon: CircleHelp },
 ];

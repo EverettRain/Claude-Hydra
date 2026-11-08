@@ -22,33 +22,20 @@ fn parse_quota(v: &Value) -> Result<Quota, String> {
     Ok(Quota { five_hour, seven_day, fetched_at: crate::paths::now_millis() })
 }
 
-#[cfg(windows)]
-fn token(dir: &Path) -> Result<String, String> {
-    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+fn read_json(dir: &Path, name: &str) -> Result<Value, String> {
+    let data = std::fs::read(dir.join(name)).map_err(|_| format!("无法读取账号的 {name}。请先在该账号登录 Claude。"))?;
+    serde_json::from_slice(&data).map_err(|_| format!("账号的 {name} 格式无法识别。"))
+}
+
+/// Finds the single desktop OAuth token in Electron's encrypted token cache.
+/// `decrypt` receives the raw `v10`-prefixed blob and returns plaintext JSON bytes.
+fn find_token(config: &Value, decrypt: impl Fn(&[u8]) -> Option<Vec<u8>>) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    use std::ffi::c_void;
-    #[repr(C)] struct Blob { len: u32, data: *mut u8 }
-    #[link(name="crypt32")] extern "system" { fn CryptUnprotectData(input: *const Blob, description: *mut *mut u16, entropy: *const Blob, reserved: *mut c_void, prompt: *mut c_void, flags: u32, output: *mut Blob) -> i32; }
-    #[link(name="kernel32")] extern "system" { fn LocalFree(mem: *mut c_void) -> *mut c_void; }
-    let read_json = |name: &str| -> Result<Value, String> {
-        let data = std::fs::read(dir.join(name)).map_err(|_| format!("无法读取账号的 {name}。请先在该账号登录 Claude。"))?;
-        serde_json::from_slice(&data).map_err(|_| format!("账号的 {name} 格式无法识别。"))
-    };
-    let local = read_json("Local State")?;
-    let config = read_json("config.json")?;
-    let encoded = local.pointer("/os_crypt/encrypted_key").and_then(Value::as_str).ok_or("找不到该账号的加密密钥。")?;
-    let bytes = STANDARD.decode(encoded).map_err(|_| "加密密钥格式无法识别。")?;
-    let protected = bytes.strip_prefix(b"DPAPI").ok_or("该账号使用了不支持的加密格式。")?;
-    let input = Blob { len: protected.len() as u32, data: protected.as_ptr() as *mut u8 };
-    let mut output = Blob { len: 0, data: std::ptr::null_mut() };
-    if unsafe { CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), 1, &mut output) } == 0 { return Err("无法使用当前 Windows 用户解密该账号凭据。".into()); }
-    let key = unsafe { let v = std::slice::from_raw_parts(output.data, output.len as usize).to_vec(); LocalFree(output.data as *mut c_void); v };
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| "账号密钥格式无法识别。")?;
     for field in ["oauth:tokenCacheV2", "oauth:tokenCache"] {
         let Some(encoded) = config.get(field).and_then(Value::as_str) else { continue };
         let Ok(data) = STANDARD.decode(encoded) else { continue };
-        if !data.starts_with(b"v10") || data.len() < 31 { continue; }
-        let Ok(plain) = cipher.decrypt(Nonce::from_slice(&data[3..15]), &data[15..]) else { continue };
+        if !data.starts_with(b"v10") { continue; }
+        let Some(plain) = decrypt(&data) else { continue };
         let Ok(value) = serde_json::from_slice::<Value>(&plain) else { continue };
         let Some(entries) = value.as_object() else { continue };
         let candidates: Vec<&str> = entries.iter().filter(|(k, _)| k.split_whitespace().any(|s| s.ends_with("user:inference")))
@@ -58,8 +45,64 @@ fn token(dir: &Path) -> Result<String, String> {
     }
     Err("未找到可用的桌面端登录凭据，请打开该账号并确认已登录。".into())
 }
-#[cfg(not(windows))]
-fn token(_dir: &Path) -> Result<String, String> { Err("当前版本的桌面端额度读取仅支持 Windows。".into()) }
+
+/// Windows: Chromium os_crypt key protected by DPAPI, values sealed with AES-256-GCM.
+#[cfg(windows)]
+fn token(dir: &Path) -> Result<String, String> {
+    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::ffi::c_void;
+    #[repr(C)] struct Blob { len: u32, data: *mut u8 }
+    #[link(name="crypt32")] extern "system" { fn CryptUnprotectData(input: *const Blob, description: *mut *mut u16, entropy: *const Blob, reserved: *mut c_void, prompt: *mut c_void, flags: u32, output: *mut Blob) -> i32; }
+    #[link(name="kernel32")] extern "system" { fn LocalFree(mem: *mut c_void) -> *mut c_void; }
+    let local = read_json(dir, "Local State")?;
+    let config = read_json(dir, "config.json")?;
+    let encoded = local.pointer("/os_crypt/encrypted_key").and_then(Value::as_str).ok_or("找不到该账号的加密密钥。")?;
+    let bytes = STANDARD.decode(encoded).map_err(|_| "加密密钥格式无法识别。")?;
+    let protected = bytes.strip_prefix(b"DPAPI").ok_or("该账号使用了不支持的加密格式。")?;
+    let input = Blob { len: protected.len() as u32, data: protected.as_ptr() as *mut u8 };
+    let mut output = Blob { len: 0, data: std::ptr::null_mut() };
+    if unsafe { CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), 1, &mut output) } == 0 { return Err("无法使用当前 Windows 用户解密该账号凭据。".into()); }
+    let key = unsafe { let v = std::slice::from_raw_parts(output.data, output.len as usize).to_vec(); LocalFree(output.data as *mut c_void); v };
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| "账号密钥格式无法识别。")?;
+    find_token(&config, |data| {
+        if data.len() < 31 { return None; }
+        cipher.decrypt(Nonce::from_slice(&data[3..15]), &data[15..]).ok()
+    })
+}
+
+/// macOS: Electron safeStorage. The password lives in the login Keychain item
+/// "Claude Safe Storage" (shared by every profile of the app); values use AES-128-CBC
+/// with a PBKDF2-SHA1 derived key, salt "saltysalt", 1003 rounds and a space-filled IV.
+#[cfg(target_os = "macos")]
+fn mac_decrypt(password: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    let body = data.strip_prefix(b"v10")?;
+    let mut key = [0u8; 16];
+    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, b"saltysalt", 1003, &mut key);
+    cbc::Decryptor::<aes::Aes128>::new(&key.into(), &[b' '; 16].into()).decrypt_padded_vec_mut::<Pkcs7>(body).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn token(dir: &Path) -> Result<String, String> {
+    let config = read_json(dir, "config.json")?;
+    if !["oauth:tokenCacheV2", "oauth:tokenCache"].iter().any(|k| config.get(*k).is_some()) {
+        return Err("未找到可用的桌面端登录凭据，请打开该账号并确认已登录。".into());
+    }
+    // `security` asks the user before releasing the Keychain item to Hydra.
+    let out = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-w", "-s", "Claude Safe Storage"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|_| "无法调用系统钥匙串。")?;
+    if !out.status.success() { return Err("未获得钥匙串中「Claude Safe Storage」的访问授权，无法读取登录凭据。".into()); }
+    let mut password = out.stdout;
+    while password.last().is_some_and(|b| *b == b'\n' || *b == b'\r') { password.pop(); }
+    find_token(&config, |data| mac_decrypt(&password, data))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn token(_dir: &Path) -> Result<String, String> { Err("当前平台暂不支持读取桌面端额度。".into()) }
 
 pub fn fetch(profile: &crate::profiles::Profile) -> Result<Quota, String> {
     let credential = token(Path::new(&profile.path))?;
@@ -87,6 +130,29 @@ pub fn fetch(profile: &crate::profiles::Profile) -> Result<Quota, String> {
 
 #[cfg(test)] mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    #[test] fn picks_single_inference_token_and_rejects_ambiguity() {
+        let seal = |v: Value| STANDARD.encode([b"v10".as_slice(), v.to_string().as_bytes()].concat());
+        let open = |d: &[u8]| Some(d[3..].to_vec());
+        let one = serde_json::json!({"oauth:tokenCacheV2": seal(serde_json::json!({"a user:inference user:profile":{"token":"t1"},"b user:profile":{"token":"x"}}))});
+        assert_eq!(find_token(&one, open).unwrap(), "t1");
+        let two = serde_json::json!({"oauth:tokenCache": seal(serde_json::json!({"a user:inference":{"token":"t1"},"b user:inference":{"token":"t2"}}))});
+        assert!(find_token(&two, open).is_err());
+        assert!(find_token(&serde_json::json!({}), open).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test] fn mac_safe_storage_round_trip() {
+        use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        let mut key = [0u8; 16];
+        pbkdf2::pbkdf2_hmac::<sha1::Sha1>(b"secret", b"saltysalt", 1003, &mut key);
+        let sealed = cbc::Encryptor::<aes::Aes128>::new(&key.into(), &[b' '; 16].into()).encrypt_padded_vec_mut::<Pkcs7>(b"{\"k\":1}");
+        let blob = [b"v10".as_slice(), &sealed].concat();
+        assert_eq!(mac_decrypt(b"secret", &blob).unwrap(), b"{\"k\":1}");
+        assert!(mac_decrypt(b"wrong", &blob).map_or(true, |p| p != b"{\"k\":1}"));
+    }
+
     #[test] fn parse_preserves_missing_windows() {
         let q = parse_quota(&serde_json::json!({"five_hour":{"utilization":23.5,"resets_at":"2026-01-01T00:00:00Z"},"seven_day":null})).unwrap();
         assert_eq!(q.five_hour.unwrap().utilization, 23.5); assert!(q.seven_day.is_none());

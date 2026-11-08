@@ -28,7 +28,7 @@ export function UsagePage({ profiles }: { profiles: Profile[] | null }) {
     finally { setBusy(null); }
   };
   return <div className="pb-8"><PageHeader title="用量统计" /><div className="space-y-4 px-6">
-    <p className="text-sm text-muted-foreground">按账号读取 Claude 返回的订阅额度，包含共用额度的其他设备和产品。点击刷新才会联网；此接口未公开，可能随 Claude 更新变化。</p>
+    <p className="text-sm text-muted-foreground">按账号读取 Claude 返回的订阅额度，包含共用额度的其他设备和产品。点击刷新才会联网；此接口未公开，可能随 Claude 更新变化。macOS 首次读取时系统会询问是否允许访问钥匙串中的「Claude Safe Storage」，请选择「允许」；凭据只在本机解密并用于这次查询。</p>
     {profiles === null && <p className="text-sm text-muted-foreground">正在读取账号…</p>}
     {profiles?.map(profile => { const q = values[profile.id]; return <section key={profile.id} className="space-y-3 rounded-lg border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">{profile.name}</h2><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => refresh(profile.id)}>{busy === profile.id ? "读取中…" : "刷新额度"}</Button></div>

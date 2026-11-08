@@ -8,11 +8,11 @@ pub mod paths;
 pub mod profiles;
 mod proxy;
 pub mod quota;
+pub mod sessions;
 pub mod settings;
 pub mod sys;
 #[cfg(windows)]
 mod taskbar;
-pub mod usage;
 pub mod watchdog;
 
 use install::Install;
@@ -147,8 +147,6 @@ async fn create_configured_account(app: AppHandle, name: String, proxy: String, 
         }
         let p = profiles::create(&install, name)?;
         let mut args = Vec::new();
-
-
         if !locale.is_empty() { args.push(format!("--lang={locale}")); }
         if let Err(e) = settings::update(|s| { let acc = s.account_mut(&p.id); acc.args = args.join(" "); acc.proxy_endpoint = proxy.to_string(); }) {
             let _ = std::fs::remove_dir(&p.path);
@@ -208,11 +206,21 @@ fn create_shortcut(app: AppHandle, id: String) -> Result<String, String> {
 fn setup_login_router() -> Result<(), String> { login::register() }
 
 #[tauri::command]
-fn prepare_login(app: AppHandle, id: String) -> Result<(), String> {
-    let (i, p) = find(&app, &id)?;
-    login::arm(&p.id)?;
-    launcher::launch(&i, &p)?;
-    Ok(())
+async fn prepare_login(app: AppHandle, id: String) -> Result<(), String> {
+    let a = app.clone();
+    // Launching may wait for the proxy check; keep it off the main thread.
+    if !cfg!(windows) {
+        return Err("浏览器登录回调目前仅支持 Windows；macOS 请直接在对应账号窗口内完成登录。".into());
+    }
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let (i, p) = find(&a, &id)?;
+        login::arm(&p.id)?;
+        launcher::launch(&i, &p).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    after_change(&app);
+    r
 }
 
 #[tauri::command]
@@ -221,8 +229,21 @@ fn diagnostics(app: AppHandle) -> String {
 }
 
 #[tauri::command]
-async fn local_usage() -> Result<usage::Usage, String> {
-    tauri::async_runtime::spawn_blocking(usage::read).await.map_err(|e| e.to_string())?
+async fn session_preview(app: AppHandle, source: String, target: String) -> Result<sessions::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (i, s) = find(&app, &source)?;
+        let (_, t) = find(&app, &target)?;
+        sessions::preview(&i, &s, &t)
+    }).await.map_err(|_| "读取会话任务失败。".to_string())?
+}
+
+#[tauri::command]
+async fn copy_sessions(app: AppHandle, source: String, target: String, ids: Vec<String>) -> Result<sessions::TransferResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (i, s) = find(&app, &source)?;
+        let (_, t) = find(&app, &target)?;
+        sessions::copy(&i, &s, &t, &ids)
+    }).await.map_err(|_| "迁移任务失败。".to_string())?
 }
 
 #[tauri::command]
@@ -427,15 +448,24 @@ fn start_background(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last = String::new();
         let mut last_watch = Instant::now();
+        // Re-tag a process only when it is new or its set of top-level windows changed,
+        // instead of rewriting window properties on every tick.
+        #[cfg(windows)]
+        let mut tagged: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         loop {
             let open = app.get_webview_window("main").is_some();
             std::thread::sleep(Duration::from_secs(if open { 3 } else { 10 }));
             if let Ok(i) = current_install(&app) {
                 let list = profiles::list(&i, true);
                 #[cfg(windows)]
-                for profile in &list {
-                    if let Some(pid) = profile.pid {
-                        taskbar::apply(profile, pid);
+                {
+                    tagged.retain(|pid, _| list.iter().any(|p| p.pid == Some(*pid)));
+                    for profile in list.iter().filter(|p| !p.is_default) {
+                        let Some(pid) = profile.pid else { continue };
+                        let windows = sys::top_windows(pid).len();
+                        if tagged.get(&pid) != Some(&windows) && taskbar::apply(profile, pid) {
+                            tagged.insert(pid, windows);
+                        }
                     }
                 }
                 let sig = signature(&list);
@@ -478,7 +508,8 @@ pub fn run(start_in_tray: bool) {
             setup_login_router,
             prepare_login,
             diagnostics,
-            local_usage,
+            session_preview,
+            copy_sessions,
             profile_quota,
             save_transcript,
             app_info,

@@ -43,7 +43,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     let mut extra = profiles::extra_args(&s, &p.id);
     let mut env = profiles::env_vars(&s, &p.id);
     if !endpoint.is_empty() {
-        if extra.contains("proxy") { return Err("额外启动参数与独立代理入口冲突。".into()); }
+        if crate::proxy::args_conflict(&extra) { return Err("额外启动参数与独立代理入口冲突。".into()); }
         extra = format!("{extra} --proxy-server={endpoint} --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp");
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
             env.retain(|(k, _)| !k.eq_ignore_ascii_case(key));

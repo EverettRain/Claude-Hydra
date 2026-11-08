@@ -338,7 +338,7 @@ pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(
     if !proxy.is_empty() {
         crate::proxy::transport(proxy)?;
         if current.is_default && install.is_msix() { return Err("商店版默认账号不支持独立代理入口。".into()); }
-        if o.args.contains("proxy") { return Err("请移除额外启动参数中的代理设置，再使用独立代理入口。".into()); }
+        if crate::proxy::args_conflict(&o.args) { return Err("请移除额外启动参数中的代理设置，再使用独立代理入口。".into()); }
     }
     let env = parse_env_lines(&o.env)?;
     settings::update(|s| {

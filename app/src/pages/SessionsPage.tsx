@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { api, errorText, type Profile } from "@/lib/api";
 import { readChats } from "@/lib/chatExport";
+import { CodeSessionMigration } from "@/components/CodeSessionMigration";
 
 export function SessionsPage({ profiles }: { profiles: Profile[] | null }) {
   const [chats, setChats] = useState<ReturnType<typeof readChats>>([]);
@@ -37,7 +38,10 @@ export function SessionsPage({ profiles }: { profiles: Profile[] | null }) {
     finally { setBusy(false); }
   }
   const field = "w-full rounded-md border border-border bg-background p-2";
-  return <div className="pb-8"><PageHeader title="普通聊天续聊" /><div className="space-y-4 px-6">
+  return <div className="pb-8"><PageHeader title="会话迁移" /><div className="space-y-6 px-6">
+    <CodeSessionMigration profiles={profiles} />
+    <section className="space-y-4">
+    <h2 className="font-semibold">普通聊天续聊</h2>
     <p className="text-sm text-muted-foreground">在来源账号的 Claude Desktop 中打开「设置 → 隐私 → 导出数据」。下载并解压导出包，然后选择 conversations.json。</p>
     <input aria-label="选择普通聊天导出文件" type="file" accept=".json" disabled={busy} onChange={e => void read(e.target.files?.[0])} />
     {chat && <section className="space-y-3 rounded-lg border border-border bg-card p-4">
@@ -53,5 +57,6 @@ export function SessionsPage({ profiles }: { profiles: Profile[] | null }) {
       {savedPath && <p className="text-sm">在新聊天中附上文件，然后发送「请阅读这段旧对话，从最后一个未完成的问题继续。」</p>}
     </section>}
     {status && <p role="status" className="text-sm">{status}</p>}
+    </section>
   </div></div>;
 }
