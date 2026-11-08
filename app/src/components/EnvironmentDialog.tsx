@@ -11,6 +11,8 @@ interface Props {
   /** Existing environment id, or null to create a new one. */
   id: string | null;
   initial?: EnvironmentInput;
+  /** Exit timezone already confirmed for the saved node, if any. */
+  detectedTimezone?: string | null;
   onClose: () => void;
   onSaved: (id: string) => void;
 }
@@ -25,7 +27,7 @@ function Line({ label, children }: { label: string; children: React.ReactNode })
 }
 
 /** Create or edit a reusable environment: network, timezone, language and advanced launch options. */
-export function EnvironmentDialog({ open, id, initial, onClose, onSaved }: Props) {
+export function EnvironmentDialog({ open, id, initial, detectedTimezone, onClose, onSaved }: Props) {
   const [env, setEnv] = useState<EnvironmentInput>(emptyEnvironment);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -81,6 +83,7 @@ export function EnvironmentDialog({ open, id, initial, onClose, onSaved }: Props
           <div className="group-label">网络与时区</div>
           <NodeConfigForm idPrefix="env-node" node={env.node} onNodeChange={(node) => setEnv((e) => ({ ...e, node }))}
             timezone={env.timezone} onTimezoneChange={(timezone) => setEnv({ ...env, timezone })}
+            detectedTimezone={JSON.stringify(env.node) === JSON.stringify(initial?.node ?? null) ? detectedTimezone : null}
             lastCheck={env.lastCheck} onLastCheckChange={(lastCheck) => setEnv((e) => ({ ...e, lastCheck }))} />
         </section>
 

@@ -89,6 +89,9 @@ pub struct EnvironmentView {
     pub input: EnvironmentInput,
     /// Names of the accounts that use this environment.
     pub used_by: Vec<String>,
+    /// Exit timezone last confirmed for this environment's node, from its own connectivity
+    /// check or an account's launch check, whichever is newer. `None` without a node.
+    pub detected_timezone: Option<String>,
 }
 
 fn account_name(s: &Settings, id: &str) -> String {
@@ -108,7 +111,17 @@ fn view(s: &Settings, id: &str, e: &Environment) -> EnvironmentView {
             last_check: e.last_check.clone(),
         },
         used_by: s.accounts.iter().filter(|(_, a)| a.environment.as_deref() == Some(id)).map(|(aid, _)| account_name(s, aid)).collect(),
+        detected_timezone: detected_timezone(s, id, e),
     }
+}
+
+fn detected_timezone(s: &Settings, id: &str, e: &Environment) -> Option<String> {
+    e.node.as_ref()?;
+    let launches = s.accounts.values().filter(|a| a.environment.as_deref() == Some(id)).filter_map(|a| a.last_exit.as_ref());
+    e.last_check.iter().map(|c| &c.exit).chain(launches)
+        .filter(|x| !x.timezone.is_empty())
+        .max_by_key(|x| x.checked_at)
+        .map(|x| x.timezone.clone())
 }
 
 pub fn list() -> Vec<EnvironmentView> {
@@ -137,6 +150,7 @@ fn build(input: &EnvironmentInput) -> Result<Environment, String> {
     if !LOCALES.contains(&input.locale.as_str()) { return Err("不支持此窗口语言。".into()); }
     let args = input.args.replace(['\r', '\n'], " ").trim().to_string();
     if node.is_some() && node::args_conflict(&args) { return Err("请移除额外启动参数中的代理开关，代理由节点设置。".into()); }
+    if let Some(f) = node::forbidden_switch(&args) { return Err(format!("Claude 不允许使用启动参数 {f}，带上它会直接退出，请移除。")); }
     let env = profiles::parse_env_lines(&input.env)?;
     // A check result only describes a node; drop it when the environment has none.
     let last_check = node.as_ref().and(input.last_check.clone());
@@ -153,6 +167,11 @@ pub fn save(install: &crate::install::Install, id: Option<&str>, input: &Environ
         return Err("商店版默认账号正在使用此环境，而它无法应用代理、时区或启动参数。请先为默认账号取消此环境。".into());
     }
     let id = id.map(str::to_string).unwrap_or_else(|| new_id(&s));
+    // A different node makes earlier launch checks of its accounts describe the wrong exit.
+    let node_changed = s.environments.get(&id).map(|old| old.node() != env.node()).unwrap_or(false);
+    if node_changed {
+        for acc in s.accounts.values_mut().filter(|a| a.environment.as_deref() == Some(id.as_str())) { acc.last_exit = None; }
+    }
     s.environments.insert(id.clone(), env);
     settings::save(&s)?;
     Ok(id)
@@ -235,6 +254,21 @@ mod tests {
         let ok = build(&EnvironmentInput { name: "x".into(), node: Some(NodeConfig { password: "p".into(), username: "u".into(), ..node }), env: "A=1".into(), ..Default::default() }).unwrap();
         assert_ne!(ok.node.unwrap().password, "p");
         assert_eq!(ok.env.get("A").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn detected_timezone_prefers_newest_confirmation() {
+        let mut s = Settings::default();
+        let exit = |tz: &str, at: u64| node::ExitInfo { timezone: tz.into(), checked_at: at, ..Default::default() };
+        let node = NodeConfig { kind: "http".into(), host: "h".into(), port: 1, ..Default::default() };
+        let mut e = Environment { name: "x".into(), node: Some(node), last_check: Some(NodeCheck { exit: exit("Asia/Tokyo", 10), ..Default::default() }), ..Default::default() };
+        s.accounts.insert("a".into(), AccountConfig { environment: Some("e".into()), last_exit: Some(exit("America/Los_Angeles", 20)), ..Default::default() });
+        s.accounts.insert("b".into(), AccountConfig { last_exit: Some(exit("Europe/Paris", 99)), ..Default::default() });
+        assert_eq!(detected_timezone(&s, "e", &e).as_deref(), Some("America/Los_Angeles"));
+        e.last_check = Some(NodeCheck { exit: exit("Asia/Tokyo", 30), ..Default::default() });
+        assert_eq!(detected_timezone(&s, "e", &e).as_deref(), Some("Asia/Tokyo"));
+        e.node = None;
+        assert_eq!(detected_timezone(&s, "e", &e), None);
     }
 
     #[test]

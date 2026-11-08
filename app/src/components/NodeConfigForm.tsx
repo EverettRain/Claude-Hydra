@@ -15,6 +15,8 @@ interface Props {
   lastExit?: ExitInfo | null;
   /** Last successful connectivity check, saved with the environment. */
   lastCheck?: NodeCheck | null;
+  /** Exit timezone confirmed earlier for this exact node (e.g. by an account's launch). */
+  detectedTimezone?: string | null;
   onLastCheckChange?: (check: NodeCheck | null) => void;
   idPrefix?: string;
 }
@@ -63,7 +65,7 @@ export function checkText(c: NodeCheck) {
   return `已连通　${exitText(c.exit)}\n${c.quality ?? "家宽 / 机房可能性：未知（未取得分类依据）"}\n${c.risk}`;
 }
 
-export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange, lastExit, lastCheck, onLastCheckChange, idPrefix = "node" }: Props) {
+export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange, lastExit, lastCheck, onLastCheckChange, detectedTimezone, idPrefix = "node" }: Props) {
   const [checking, setChecking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -83,7 +85,8 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
   };
   // A fresh message (error, IP refresh) takes precedence over the saved check.
   const shown = result ?? (lastCheck ? { ok: true, text: `${checkText(lastCheck)}\n检测时间：${new Date(lastCheck.exit.checkedAt).toLocaleString()}` } : null);
-  const checkedTz = lastCheck?.exit.timezone;
+  // The zone "follow proxy" resolves to, once known: a check in this form wins over earlier ones.
+  const checkedTz = node ? lastCheck?.exit.timezone || detectedTimezone || lastExit?.timezone || undefined : undefined;
   const tzMode = timezone === "system" ? "system" : !timezone || timezone === "proxy" ? "proxy" : "custom";
 
   // Split "type://host:port:user:pass" style strings on paste or when the field loses focus.
@@ -184,7 +187,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
       )}
 
       <Row label="时区" hint="通过 TZ 环境变量设置。macOS 上窗口与子进程均生效；Windows 上 Claude 窗口可能仍显示系统时区。">
-        <Segmented label="时区" value={tzMode} options={[["proxy", "跟随代理 IP"], ["system", "跟随系统"], ["custom", "自定义"]]}
+        <Segmented label="时区" value={tzMode} options={[["proxy", checkedTz ?? "跟随代理 IP"], ["system", "跟随系统"], ["custom", "自定义"]]}
           onChange={(v) => onTimezoneChange(v === "custom" ? checkedTz || lastExit?.timezone || "Asia/Tokyo" : v)} />
       </Row>
       {tzMode === "custom" && (
@@ -196,7 +199,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
       {tzMode === "proxy" && node && checkedTz && (
         <div className="flex items-center gap-2.5 px-4 py-2 text-[11.5px] text-fg-2">
           <Clock className="h-4 w-4 shrink-0 text-muted" />
-          <p>已匹配代理 IP 时区：<span className="selectable font-mono">{checkedTz}</span></p>
+          <p>跟随代理 IP，已匹配时区：<span className="selectable font-mono">{checkedTz}</span></p>
         </div>
       )}
       {(lastExit || (tzMode === "proxy" && !node)) && (

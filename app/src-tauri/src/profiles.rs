@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub const PALETTE_LEN: usize = 8;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
     pub id: String,
@@ -41,6 +41,12 @@ pub fn path_key(p: &str) -> String {
 }
 
 pub fn user_data_dir_arg(cmd: &str) -> Option<String> {
+    // Windows command lines quote values with spaces; macOS `ps` prints argv unquoted, so an
+    // unquoted value there runs up to the next switch (`~/Library/Application Support/...`).
+    parse_user_data_dir(cmd, !cfg!(windows))
+}
+
+fn parse_user_data_dir(cmd: &str, unquoted_spaces: bool) -> Option<String> {
     const FLAG: &str = "--user-data-dir=";
     let i = cmd.find(FLAG)?;
     let after = &cmd[i + FLAG.len()..];
@@ -49,6 +55,8 @@ pub fn user_data_dir_arg(cmd: &str) -> Option<String> {
         after.split('"').next()?
     } else if let Some(rest) = after.strip_prefix('"') {
         rest.split('"').next()?
+    } else if unquoted_spaces {
+        after.split(" --").next()?.trim_end()
     } else {
         after.split_whitespace().next()?
     };
@@ -412,6 +420,10 @@ mod tests {
         );
         assert_eq!(user_data_dir_arg(r"Claude.exe --user-data-dir=D:\abc --x").as_deref(), Some(r"D:\abc"));
         assert_eq!(user_data_dir_arg("Claude.exe"), None);
+        let mac = "/Applications/Claude.app/Contents/MacOS/Claude --user-data-dir=/Users/u/Library/Application Support/ClaudeHydra/profiles/2 --proxy-server=socks5://127.0.0.1:1 --disable-quic";
+        assert_eq!(parse_user_data_dir(mac, true).as_deref(), Some("/Users/u/Library/Application Support/ClaudeHydra/profiles/2"));
+        assert_eq!(parse_user_data_dir("Claude --user-data-dir=/a b/c", true).as_deref(), Some("/a b/c"));
+        assert_eq!(parse_user_data_dir(r"Claude.exe --user-data-dir=D:bc claude://x", false).as_deref(), Some(r"D:bc"));
     }
 
     #[test]

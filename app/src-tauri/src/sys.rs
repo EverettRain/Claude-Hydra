@@ -416,7 +416,7 @@ mod unix {
     }
 
     pub fn is_alive(pid: u32) -> bool {
-        Command::new("/bin/kill")
+        Command::new("/bin/kill").stderr(std::process::Stdio::null())
             .args(["-0", &pid.to_string()])
             .status()
             .map(|s| s.success())
@@ -443,7 +443,7 @@ mod unix {
     }
 
     pub fn close_windows(pid: u32) {
-        let _ = Command::new("/bin/kill").args(["-TERM", &pid.to_string()]).status();
+        let _ = Command::new("/bin/kill").stderr(std::process::Stdio::null()).args(["-TERM", &pid.to_string()]).status();
     }
 
     pub fn wait_exit(pid: u32, ms: u32) -> bool {
@@ -458,7 +458,7 @@ mod unix {
     }
 
     pub fn terminate(pid: u32) -> bool {
-        Command::new("/bin/kill")
+        Command::new("/bin/kill").stderr(std::process::Stdio::null())
             .args(["-KILL", &pid.to_string()])
             .status()
             .map(|s| s.success())
@@ -471,6 +471,11 @@ mod unix {
 
     pub fn error_box(text: &str) {
         eprintln!("{text}");
+        // The text is passed as an argument, never spliced into the script.
+        #[cfg(target_os = "macos")]
+        let _ = Command::new("/usr/bin/osascript")
+            .args(["-e", "on run argv", "-e", "display alert \"Claude-Hydra\" message (item 1 of argv) as warning", "-e", "end run", text])
+            .spawn();
     }
 
     pub fn autostart_enabled() -> bool {

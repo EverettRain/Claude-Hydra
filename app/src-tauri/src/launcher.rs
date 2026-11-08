@@ -24,6 +24,9 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     let effective = s.effective(&p.id);
     let node = effective.node.clone();
     let extra = profiles::extra_args(&s, &p.id);
+    if let Some(f) = crate::node::forbidden_switch(&extra) {
+        return Err(format!("Claude 不允许使用启动参数 {f}，带上它会直接退出。请在环境配置的额外启动参数中移除。"));
+    }
     let mut env = profiles::env_vars(&s, &p.id);
     // Hydra-managed switches; passed as separate arguments (some contain spaces).
     let mut managed: Vec<String> = Vec::new();
@@ -84,8 +87,11 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
             cmd.arg("--args").args(pass);
         }
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        cmd.spawn().map_err(|e| format!("无法启动 Claude：{e}"))?;
-        return Ok(outcome);
+        let status = cmd.status().map_err(|e| format!("无法启动 Claude：{e}"))?;
+        if !status.success() { return Err("无法启动 Claude（open 返回错误）。".into()); }
+        // `open` returns once the app is launched; Claude may still quit right away (e.g. it
+        // rejects a switch). Report that instead of a false "started".
+        return confirm_running(install, p).map(|_| outcome);
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -163,6 +169,23 @@ pub fn restart(install: &Install, p: &Profile) -> Result<&'static str, String> {
     close(install, p)?;
     std::thread::sleep(std::time::Duration::from_millis(400));
     launch(install, p)
+}
+
+/// Waits for the account's Claude to appear and stay up for a moment.
+#[cfg(target_os = "macos")]
+fn confirm_running(install: &Install, p: &Profile) -> Result<(), String> {
+    let key = path_key(&p.path);
+    let pid = || profiles::running_map(install).get(&key).copied();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < until {
+        if pid().is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            if pid().is_some() { return Ok(()); }
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Err("Claude 启动后立即退出了。请检查环境配置中的额外启动参数，或先关闭该账号后重试。".into())
 }
 
 pub fn add_account(install: &Install) -> Result<Profile, String> {

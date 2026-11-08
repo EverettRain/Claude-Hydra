@@ -287,12 +287,31 @@ pub fn args_conflict(args: &str) -> bool {
         .any(|flag| PROXY_SWITCHES.contains(&flag.as_str()))
 }
 
+/// Switches Claude refuses to start with ("a debugging or network-override switch is present
+/// on the command line"), matched by prefix after stripping `--`/`-`/`/`. Mirrors the list in
+/// Claude's main process; passing any of them makes Claude exit immediately.
+const CLAUDE_FORBIDDEN: [&str; 16] = [
+    "remote-debugging-port", "remote-debugging-pipe", "ignore-certificate-errors", "host-resolver-rules",
+    "host-rules", "disable-web-security", "log-net-log", "net-log-capture-mode", "ssl-key-log-file",
+    "renderer-cmd-prefix", "utility-cmd-prefix", "gpu-launcher", "zygote-cmd-prefix",
+    "ppapi-plugin-launcher", "nacl-loader-cmd-prefix", "browser-subprocess-path",
+];
+
+/// The first switch in `args` that Claude would refuse to start with.
+pub fn forbidden_switch(args: &str) -> Option<String> {
+    args.split_whitespace().map(|a| a.trim_matches('"')).find(|a| {
+        let name = a.trim_start_matches("--").trim_start_matches(['-', '/']).split('=').next().unwrap_or_default().to_ascii_lowercase();
+        CLAUDE_FORBIDDEN.iter().any(|f| name.starts_with(f))
+    }).map(|a| a.split('=').next().unwrap_or(a).to_string())
+}
+
 /// Chromium switches that route everything through the local relay and close the usual leaks:
-/// no local DNS (all names resolve at the node), no QUIC/UDP, WebRTC limited to proxied paths.
+/// a SOCKS5 proxy (Chromium sends hostnames to it, so names resolve at the node), no QUIC/UDP,
+/// WebRTC limited to proxied paths. `--host-resolver-rules` is not used: Claude refuses to
+/// start with it, and Claude already disables DNS prefetching itself.
 pub fn chromium_args(relay_port: u16) -> Vec<String> {
     vec![
         format!("--proxy-server=socks5://127.0.0.1:{relay_port}"),
-        "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost".into(),
         "--disable-quic".into(),
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into(),
         "--webrtc-ip-handling-policy=disable_non_proxied_udp".into(),
@@ -356,6 +375,10 @@ mod tests {
 
     #[test]
     fn only_real_proxy_switches_conflict() {
+        for f in chromium_args(1080) { assert!(forbidden_switch(&f).is_none(), "{f}"); }
+        assert_eq!(forbidden_switch("--lang=en --host-resolver-rules=MAP").as_deref(), Some("--host-resolver-rules"));
+        assert_eq!(forbidden_switch("\"--Remote-Debugging-Port=9222\"").as_deref(), Some("--Remote-Debugging-Port"));
+        assert!(forbidden_switch("--disable-gpu --lang=zh-CN").is_none());
         for args in ["--proxy-server=http://a:1", "--lang=en \"--proxy-pac-url=x\"", "--NO-PROXY-SERVER", "--proxy-bypass-list=*", "--host-resolver-rules=x"] {
             assert!(args_conflict(args), "{args}");
         }

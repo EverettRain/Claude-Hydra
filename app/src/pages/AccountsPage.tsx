@@ -25,6 +25,7 @@ import { cn, relativeTime } from "@/lib/utils";
 
 // The browser sign-in callback router is Windows-only (see login.rs).
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
+const IS_MAC = navigator.userAgent.includes("Mac");
 
 interface Props {
   profiles: Profile[] | null;
@@ -218,7 +219,7 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
           )}
           items={[
             { label: "编辑…", icon: Pencil, onSelect: onEdit },
-            ...(IS_WINDOWS ? [{ label: "准备浏览器登录", icon: Link2, onSelect: onLogin }] : []),
+            ...(IS_WINDOWS || (IS_MAC && !p.isDefault) ? [{ label: "准备浏览器登录", icon: Link2, onSelect: onLogin }] : []),
             { label: "重启", icon: RotateCw, onSelect: onRestart, disabled: !isRunning },
             { label: "打开数据目录", icon: FolderOpen, onSelect: onFolder },
             { label: "创建桌面快捷方式", icon: Link2, onSelect: onShortcut },

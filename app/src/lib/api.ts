@@ -36,7 +36,12 @@ export interface EnvironmentInput {
   /** Last successful connectivity check of the node. */
   lastCheck: NodeCheck | null;
 }
-export interface Environment extends EnvironmentInput { id: string; usedBy: string[] }
+export interface Environment extends EnvironmentInput {
+  id: string;
+  usedBy: string[];
+  /** Exit timezone last confirmed for the node (connectivity or launch check). */
+  detectedTimezone: string | null;
+}
 
 export type NodeKind = "clash" | "http" | "https" | "socks5";
 export interface NodeConfig {

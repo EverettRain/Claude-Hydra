@@ -5,6 +5,8 @@ pub mod environment;
 pub mod install;
 pub mod launcher;
 pub mod login;
+#[cfg(target_os = "macos")]
+mod mac_url;
 pub mod paths;
 pub mod profiles;
 pub mod node;
@@ -106,7 +108,14 @@ async fn restart_profile(app: AppHandle, id: String) -> Result<String, String> {
 #[tauri::command]
 async fn add_account(app: AppHandle) -> Result<Profile, String> {
     let a = app.clone();
-    let r = tauri::async_runtime::spawn_blocking(move || launcher::add_account(&current_install(&a)?))
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let i = current_install(&a)?;
+        let p = profiles::create(&i, &profiles::next_account_name(&i))?;
+        #[cfg(target_os = "macos")]
+        let _ = login::mac::expect_sign_in(&p.id);
+        launcher::launch(&i, &p)?;
+        Ok(p)
+    })
         .await
         .map_err(|e| e.to_string())?;
     after_change(&app);
@@ -132,6 +141,8 @@ async fn create_configured_account(app: AppHandle, name: String, environment: St
             return Err(e);
         }
         relay::sync_all();
+        #[cfg(target_os = "macos")]
+        let _ = login::mac::expect_sign_in(&p.id);
         if let Err(e) = launcher::launch(&install, &p) { return Err(format!("账号已创建，但启动失败：{e}")); }
         Ok(p)
     }).await.map_err(|e| e.to_string())?;
@@ -225,12 +236,15 @@ fn setup_login_router() -> Result<(), String> { login::register() }
 async fn prepare_login(app: AppHandle, id: String) -> Result<(), String> {
     let a = app.clone();
     // Launching may wait for the proxy check; keep it off the main thread.
-    if !cfg!(windows) {
-        return Err("浏览器登录回调目前仅支持 Windows；macOS 请直接在对应账号窗口内完成登录。".into());
+    if !cfg!(any(windows, target_os = "macos")) {
+        return Err("浏览器登录回调目前仅支持 Windows 和 macOS。".into());
     }
     let r = tauri::async_runtime::spawn_blocking(move || {
         let (i, p) = find(&a, &id)?;
-        login::arm(&p.id)?;
+        let signed_in = profiles::resolve(&i, &p.id, true).and_then(|x| x.signed_in).unwrap_or(false);
+        login::arm(&p.id, signed_in)?;
+        #[cfg(target_os = "macos")]
+        login::mac::hold_during_login()?;
         launcher::launch(&i, &p).map(|_| ())
     })
     .await
@@ -517,6 +531,8 @@ fn start_background(app: AppHandle) {
             std::thread::sleep(Duration::from_secs(if open { 3 } else { 10 }));
             if let Ok(i) = current_install(&app) {
                 let list = profiles::list(&i, true);
+                #[cfg(target_os = "macos")]
+                login::mac::maintain(&i, &list);
                 #[cfg(windows)]
                 {
                     tagged.retain(|pid, _| list.iter().any(|p| p.pid == Some(*pid)));
@@ -622,7 +638,18 @@ pub fn run(start_in_tray: bool) {
         .build(tauri::generate_context!())
         .expect("error while building Claude-Hydra")
         .run(|_app, event| {
-            if matches!(event, RunEvent::Exit) { relay::shutdown(); }
+            if matches!(event, RunEvent::Exit) {
+                relay::shutdown();
+                #[cfg(target_os = "macos")]
+                if let Ok(i) = install::resolve() { login::mac::restore(&i); }
+            }
+            // Sign-in callbacks arrive as Apple events while Hydra holds `claude://`.
+            #[cfg(target_os = "macos")]
+            if let RunEvent::Opened { urls } = &event {
+                for url in urls.iter().filter(|u| u.scheme() == "claude").map(|u| u.to_string()) {
+                    std::thread::spawn(move || if let Err(e) = login::mac::handle(&url) { sys::error_box(&e) });
+                }
+            }
             if let RunEvent::ExitRequested { code: None, api, .. } = event {
                 api.prevent_exit();
             }

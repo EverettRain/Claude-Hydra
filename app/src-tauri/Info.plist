@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Hydra becomes the claude:// handler only while a sign-in is pending (see login::mac). -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Claude-Hydra Sign-in Callback</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>claude</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Claude-Hydra 需要把浏览器登录结果交给正在登录的那个 Claude 账号窗口。</string>
+</dict>
+</plist>

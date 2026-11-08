@@ -84,7 +84,7 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 
 | 泄漏途径 | 处理方式 |
 | --- | --- |
-| DNS | `--host-resolver-rules` 禁止本地解析，域名原样交给节点解析 |
+| DNS | 通过 SOCKS5 代理（`--proxy-server=socks5://…`）把域名原样交给节点解析；Claude 自身已关闭 DNS 预解析。Claude 不允许 `--host-resolver-rules` 等网络覆盖开关，带上会直接退出，因此不使用 |
 | WebRTC | `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`，不暴露本机或 STUN 地址 |
 | UDP / QUIC | `--disable-quic`；中继拒绝 SOCKS5 UDP ASSOCIATE |
 | IPv6 | Claude 只连接 127.0.0.1 中继，不直接使用本机 IPv6 |
@@ -201,7 +201,8 @@ cd app/src-tauri && HYDRA_TEST_CHROME="/Applications/Google Chrome.app/Contents/
 
 - 防泄漏覆盖 Claude 的 Chromium 网络栈与读取代理环境变量的子进程；不读取代理变量、自行直连的子进程，以及在系统浏览器中打开的登录页无法拦截。需要系统级保证时，请配合防火墙或独立虚拟机。
 - 独立数据目录只隔离本地登录数据，不修改设备指纹，也不保证账号之间不被关联。
-- 使用代理节点时，额外启动参数中不能再包含 `--proxy-server`、`--host-resolver-rules` 等代理开关。
+- 使用代理节点时，额外启动参数中不能再包含 `--proxy-server` 等代理开关。
+- Claude 会拒绝带调试或网络覆盖开关（如 `--remote-debugging-port`、`--host-resolver-rules`、`--ignore-certificate-errors`）的启动，Hydra 保存环境时会提示移除。
 - 商店版（MSIX）的默认账号由系统启动，无法应用代理节点、时区与额外参数。
 - 用量统计与会话迁移依赖 Claude 桌面端未公开的数据格式，可能随其更新失效。
 
