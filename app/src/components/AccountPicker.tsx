@@ -1,6 +1,7 @@
+import { ProfileAvatar } from "./ProfileAvatar";
 import { Check } from "lucide-react";
 import type { Profile } from "@/lib/api";
-import { PALETTE, badgeLetter, cn } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
 interface Props {
   profiles: Profile[] | null;
@@ -34,8 +35,8 @@ export function AccountPicker({ profiles, value, onChange, exclude, disabled, la
               on ? "bg-card font-medium text-fg dark:bg-white/[.1] shadow-[0_0_0_1.5px_rgb(var(--fg)),0_1px_2px_rgba(0,0,0,.08)]" : "bg-pill text-fg-2 hover:bg-pill-hover hover:text-fg",
             )}
           >
-            <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white" style={{ background: PALETTE[p.color % PALETTE.length] }}>
-              {on ? <Check className="h-3.5 w-3.5" /> : badgeLetter(p.name)}
+            <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white">
+              <ProfileAvatar badge={p.badge} isDefault={p.isDefault} color={p.color} className="h-6 w-6" />{on && <Check className="absolute -left-1 -top-1 h-3 w-3 rounded-full bg-fg text-card" />}
               {p.pid && <span className="absolute -bottom-px -right-px h-2 w-2 rounded-full border-[1.5px] border-card bg-ok" />}
             </span>
             {p.name}

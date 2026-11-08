@@ -6,8 +6,7 @@ import { api, errorText, type Profile, type SessionPreview } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /** Copies Desktop Claude Code session indexes from one account to another (never moves or overwrites). */
-export function CodeSessionMigration({ profiles }: { profiles: Profile[] | null }) {
-  const [source, setSource] = useState("");
+export function CodeSessionMigration({ profiles, source, setSource }: { profiles: Profile[] | null; source: string; setSource: (source: string) => void }) {
   const [target, setTarget] = useState("");
   const [preview, setPreview] = useState<SessionPreview | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -15,10 +14,14 @@ export function CodeSessionMigration({ profiles }: { profiles: Profile[] | null 
   const [status, setStatus] = useState("");
 
   const load = async () => {
-    setPreview(null); setPicked(new Set()); setStatus("");
-    if (!source || !target || source === target) return;
+    setPreview(null); setStatus("");
+    if (!source || source === target) return;
     setBusy(true);
-    try { setPreview(await api.sessionPreview(source, target)); }
+    try {
+      const next = await api.sessionPreview(source, target);
+      setPreview(next);
+      setPicked(old => new Set(next.sessions.filter(s => !s.inTarget && old.has(s.id)).map(s => s.id)));
+    }
     catch (e) { setStatus(errorText(e)); }
     finally { setBusy(false); }
   };
@@ -36,21 +39,24 @@ export function CodeSessionMigration({ profiles }: { profiles: Profile[] | null 
     finally { setBusy(false); }
   };
 
-  const blocked = !preview || !!preview.targetProblem || preview.running;
+  const blocked = !target || !preview || !!preview.targetProblem || preview.running;
   const allPicked = copyable.length > 0 && picked.size === copyable.length;
 
+  if (!source) return (
+    <Group label="选择来源账号">
+      <div className="px-4 py-3"><AccountPicker label="查看可迁移会话" profiles={profiles} value="" onChange={setSource} /></div>
+    </Group>
+  );
   return (
-    <Group label="Claude Code 会话">
-      <div className="space-y-3 px-4 py-3">
-        <p className="text-[12px] leading-[18px] text-muted">复制 Claude Desktop 内本地 Claude Code 会话的索引。原会话保留不动，同名会话不会被覆盖，对话记录仍留在本机原位置；普通聊天与云端会话不在此列。</p>
-      </div>
+    <Group label={`${profiles?.find(p => p.id === source)?.name ?? source} · 本地 Claude Code 会话`}>
+      <div className="px-4 py-2"><Button size="sm" variant="ghost" disabled={busy} onClick={() => {
+        setSource(""); setTarget(""); setPreview(null); setPicked(new Set()); setStatus("");
+      }}>← 返回账号列表</Button></div>
       <div className="grid grid-cols-[56px_1fr] items-start gap-3 px-4 py-3">
-        <span className="pt-1.5 text-[12.5px] text-fg-2">从</span>
-        <AccountPicker label="来源账号" profiles={profiles} value={source} exclude={target} disabled={busy} onChange={setSource} />
         <span className="pt-1.5 text-[12.5px] text-fg-2">复制到</span>
         <AccountPicker label="目标账号" profiles={profiles} value={target} exclude={source} disabled={busy} onChange={setTarget} />
       </div>
-      {!preview && !status && <p className="px-4 py-2.5 text-[12px] text-muted">{source && target ? "正在读取会话…" : "选择来源和目标账号后，这里会列出可复制的会话。"}</p>}
+      {!preview && !status && <p className="px-4 py-2.5 text-[12px] text-muted">{"正在读取会话…"}</p>}
 
       {preview && (
         <>
@@ -61,7 +67,7 @@ export function CodeSessionMigration({ profiles }: { profiles: Profile[] | null 
             </div>
           )}
           {preview.sessions.length === 0 ? (
-            <p className="px-4 py-3 text-[12.5px] text-muted">来源账号没有本地 Claude Code 会话。</p>
+            <p className="px-4 py-3 text-[12.5px] text-muted">来源账号没有本地 Claude Code 会话。普通聊天请使用导出文件续聊。</p>
           ) : (
             <div className="max-h-72 overflow-y-auto py-1">
               {preview.sessions.map((s) => (

@@ -1,3 +1,4 @@
+import { ProfileAvatar } from "@/components/ProfileAvatar";
 import {
   FolderOpen,
   Link2,
@@ -20,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
 import { api, errorText, type Profile } from "@/lib/api";
-import { PALETTE, badgeLetter, cn, relativeTime } from "@/lib/utils";
+import { cn, relativeTime } from "@/lib/utils";
 
 // The browser sign-in callback router is Windows-only (see login.rs).
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
@@ -67,7 +68,7 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
     <Page>
       <PageHeader
         title="账号"
-        subtitle="每个账号使用独立的数据目录与登录态，可同时运行；双击一行即可启动或切到该账号。"
+        subtitle="每个账号使用独立的数据目录、登录态与环境配置，可同时运行。"
         actions={
           <>
             <Button variant="ghost" size="iconSm" aria-label="刷新" title="刷新" onClick={() => refresh()}>
@@ -176,12 +177,7 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
   const isRunning = !!p.pid;
   return (
     <div onDoubleClick={onLaunch} className="group flex items-center gap-3 px-4 py-3 hover:bg-card-2">
-      <div
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] text-[13.5px] font-semibold text-white"
-        style={{ background: PALETTE[p.color % PALETTE.length] }}
-      >
-        {badgeLetter(p.name)}
-      </div>
+      <ProfileAvatar badge={p.badge} isDefault={p.isDefault} color={p.color} className="h-8 w-8 shrink-0" />
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
@@ -201,7 +197,7 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1">
+      <div className="flex shrink-0 items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
         {busy ? (
           <span className="flex h-7 items-center gap-1.5 px-2 text-[12.5px] text-muted">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -209,13 +205,8 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
           </span>
         ) : (
           <>
-            {isRunning && (
-              <Button variant="ghost" size="iconSm" title="关闭" aria-label="关闭" onClick={onClose}>
-                <Power />
-              </Button>
-            )}
-            <Button variant="outline" size="sm" className="min-w-[72px]" onClick={onLaunch}>
-              {isRunning ? "切换到" : <><Play className="!h-3 !w-3" />启动</>}
+            <Button variant="outline" size="sm" className="min-w-[72px]" onClick={isRunning ? onClose : onLaunch}>
+              {isRunning ? <><Power />关闭</> : <><Play className="!h-3 !w-3" />启动</>}
             </Button>
           </>
         )}

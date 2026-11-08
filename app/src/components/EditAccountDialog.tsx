@@ -1,7 +1,8 @@
+import { ProfileAvatar } from "@/components/ProfileAvatar";
 import { Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, type Profile, type ProfileOptions } from "@/lib/api";
-import { PALETTE, badgeLetter, cn } from "@/lib/utils";
+import { PALETTE, cn } from "@/lib/utils";
 import { EnvironmentPicker } from "./EnvironmentPicker";
 import { exitText } from "./NodeConfigForm";
 import { Button } from "./ui/button";
@@ -69,9 +70,7 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
             <div className="group-label">基础</div>
             <div className="list-card">
               <div className="flex items-center gap-3 px-4 py-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[11px] text-[15px] font-semibold text-white" style={{ background: PALETTE[color] }}>
-                  {badgeLetter(opts.name || profile.id)}
-                </div>
+                <ProfileAvatar badge={profile.badge} isDefault={profile.isDefault} color={color} className="h-10 w-10 shrink-0" />
                 <Input id="acc-name" aria-label="名称" value={opts.name} maxLength={40} autoFocus onChange={(e) => setOpts({ ...opts, name: e.target.value })} />
               </div>
               <div className="flex flex-wrap items-center gap-2 px-4 py-3">

@@ -162,12 +162,13 @@ function ChatImport({ profiles }: { profiles: Profile[] | null }) {
 }
 
 export function SessionsPage({ profiles }: { profiles: Profile[] | null }) {
+  const [source, setSource] = useState("");
   return (
     <Page>
       <PageHeader title="会话迁移" subtitle="在账号之间复制本地 Claude Code 会话，或把普通聊天带到另一个账号继续。" />
       <div className="space-y-5 px-5">
-        <CodeSessionMigration profiles={profiles} />
-        <ChatImport profiles={profiles} />
+        <CodeSessionMigration profiles={profiles} source={source} setSource={setSource} />
+        {!source && <ChatImport profiles={profiles} />}
       </div>
     </Page>
   );

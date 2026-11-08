@@ -72,7 +72,10 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
   };
   const check = async () => {
     setChecking(true); setResult(null);
-    try { setResult({ ok: true, text: exitText(await api.checkNode(n)) }); }
+    try {
+      const [exit, quality, risk] = await api.checkNode(n);
+      setResult({ ok: true, text: `已连通　${exitText(exit)}\n${quality ?? "家宽 / 机房可能性：未知（未取得分类依据）"}\n${risk}` });
+    }
     catch (e) { setResult({ ok: false, text: errorText(e) }); }
     finally { setChecking(false); }
   };
@@ -89,7 +92,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
   };
 
   return (
-    <div className="list-card">
+    <fieldset disabled={checking || refreshing} className="list-card min-w-0">
       <Row label="代理方式" required>
         <Segmented label="代理方式" value={node ? "custom" : "none"} options={[["none", "不使用代理"], ["custom", "自定义代理"]]}
           onChange={(v) => { setResult(null); onNodeChange(v === "custom" ? n : null); }} />
@@ -126,7 +129,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
             </Select>
             <Button variant="outline" disabled={checking || !n.host || !n.port} onClick={check}>
               {checking && <Loader2 className="animate-spin" />}
-              代理检测
+              连通检测
             </Button>
             <Button variant="ghost" size="icon" aria-label="复制节点字符串（含密码）" title="复制节点字符串（含密码）" disabled={!n.host || !n.port} onClick={copy}>
               {copied ? <Check className="text-ok" /> : <Copy />}
@@ -139,7 +142,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
             </Button>
           </Row>
           {result && (
-            <div className={cn("selectable px-4 py-2 text-[12px]", result.ok ? "bg-ok-soft/70 text-ok" : "bg-danger-soft/70 text-danger")} role="status">
+            <div className={cn("selectable whitespace-pre-line px-4 py-2 text-[12px]", result.ok ? "bg-ok-soft/70 text-ok" : "bg-danger-soft/70 text-danger")} role="status">
               {result.text}
             </div>
           )}
@@ -169,6 +172,6 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
           {lastExit && <p>上次启动检测：{exitText(lastExit)}（{new Date(lastExit.checkedAt).toLocaleString()}）</p>}
         </div>
       )}
-    </div>
+    </fieldset>
   );
 }

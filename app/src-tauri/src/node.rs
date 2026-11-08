@@ -151,16 +151,58 @@ pub fn inspect(client: &reqwest::blocking::Client, node: &NodeConfig) -> Result<
         .map_err(|e| if node.ip_version == "ipv6" { format!("{e}（节点可能不支持 IPv6 出口）") } else { e })?
         .trim().parse().map_err(|_| "检测服务未返回有效的出口 IP。")?;
     let geo_url = match node.geo_channel.as_str() {
-        "ipapi" => "https://ipapi.co/json/",
-        "ip-api" => "http://ip-api.com/json/?fields=status,message,query,countryCode,regionName,city,timezone",
-        _ => "https://ipinfo.io/json",
+        "ipapi" => format!("https://ipapi.co/{ip}/json/"),
+        "ip-api" => format!("http://ip-api.com/json/{ip}?fields=status,message,query,countryCode,regionName,city,timezone"),
+        _ => format!("https://ipinfo.io/{ip}/json"),
     };
-    let mut info = parse_geo(&node.geo_channel, &get_text(client, geo_url, 16 * 1024)?)?;
-    // The geo service may see the other IP family; the version-checked address is authoritative.
-    info.ip = ip.to_string();
+    let mut info = parse_geo(&node.geo_channel, &get_text(client, &geo_url, 16 * 1024)?)?;
+    if info.ip.parse::<IpAddr>().ok() != Some(ip) { return Err("位置服务返回了其他 IP 的结果。".into()); }
     if !valid_timezone(&info.timezone) { info.timezone.clear(); }
     info.checked_at = crate::paths::now_millis();
     Ok(info)
+}
+
+/// Classification is optional and never participates in the launch check.
+pub fn network_quality(client: &reqwest::blocking::Client, ip: &str) -> Option<String> {
+    let lookup = |url: &str| -> Option<Value> {
+        serde_json::from_str(&get_text(client, url, 128 * 1024).ok()?).ok()
+    };
+    let routing = lookup(&format!("https://stat.ripe.net/data/network-info/data.json?resource={ip}"))?;
+    let origins = routing.pointer("/data/asns")?.as_array()?;
+    // Multiple origin ASNs cannot be attributed to a single network operator.
+    if origins.len() != 1 { return None; }
+    let asn = origins[0].as_str().and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| origins[0].as_u64().and_then(|n| u32::try_from(n).ok()))?;
+    // MIT-licensed hosting list from github.com/brianhama/bad-asn-list.
+    let number = asn.to_string();
+    let known_host = include_str!("data/hosting-asns.txt").lines().any(|line| line.trim() == number);
+    let (home, hosting, basis) = if known_host {
+        ("低", "高", "开源托管 ASN 名单")
+    } else {
+        let network = lookup(&format!("https://www.peeringdb.com/api/net?asn={asn}"))?;
+        match network.pointer("/data/0/info_type")?.as_str()? {
+            "Cable/DSL/ISP" => ("较高", "较低", "PeeringDB 宽带运营商"),
+            "Content" | "NSP" | "Enterprise" => ("未知", "未知", "网络类型不足以区分家宽与机房"),
+            _ => return None,
+        }
+    };
+    Some(format!("家宽可能性：{home} · 机房可能性：{hosting}（AS{asn}，{basis}）"))
+}
+
+/// IPsum level 3 contains IPv4 addresses reported by at least three source lists.
+pub fn reputation(client: &reqwest::blocking::Client, ip: &str) -> &'static str {
+    if ip.parse::<std::net::Ipv4Addr>().is_err() { return "IPsum 风险记录：不覆盖 IPv6"; }
+    const LIMIT: u64 = 2 * 1024 * 1024;
+    let url = "https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt";
+    let Ok(list) = get_text(client, url, LIMIT) else { return "IPsum 风险记录：查询失败"; };
+    if list.len() as u64 >= LIMIT || list.lines().next().and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()).is_none() {
+        return "IPsum 风险记录：数据不完整";
+    }
+    if list.lines().any(|entry| entry.trim() == ip) {
+        "IPsum 风险记录：命中至少三份风险名单"
+    } else {
+        "IPsum 风险记录：未命中三源风险名单"
+    }
 }
 
 /// Calls the provider's IP rotation URL directly and returns a short status line.
@@ -313,6 +355,19 @@ mod tests {
         for args in ["", "--lang=zh-CN", "--no-proxy-xxx", "--proxy-serverless", "--disable-gpu --my-proxy=1"] {
             assert!(!args_conflict(args), "{args}");
         }
+    }
+
+    #[test]
+    #[ignore = "requires HYDRA_TEST_PROXY and internet"]
+    fn checks_configured_proxy_exit() {
+        let endpoint = std::env::var("HYDRA_TEST_PROXY").unwrap();
+        let node = NodeConfig::from_legacy(&endpoint).unwrap().validated().unwrap();
+        let client = node.client(Duration::from_secs(15)).unwrap();
+        let exit = inspect(&client, &node).unwrap();
+        assert!(exit.ip.parse::<IpAddr>().is_ok());
+        assert!(!exit.country.is_empty());
+        println!("Network classification: {:?}", network_quality(&client, &exit.ip));
+        println!("{}", reputation(&client, &exit.ip));
     }
 
     #[test]

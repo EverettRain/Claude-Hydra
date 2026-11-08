@@ -118,6 +118,11 @@ fn is_running(install: &Install, profiles: &[&Profile]) -> bool {
     profiles.iter().any(|p| running.contains_key(&profiles::path_key(&p.path)))
 }
 
+pub fn source_preview(install: &Install, source: &Profile) -> Result<Preview, String> {
+    let sessions = collect(&root(install, source))?.into_iter().map(|e| e.session).collect();
+    Ok(Preview { sessions, target_problem: None, running: is_running(install, &[source]) })
+}
+
 pub fn preview(install: &Install, source: &Profile, target: &Profile) -> Result<Preview, String> {
     if source.id == target.id { return Err("来源和目标账号不能相同。".into()); }
     let mut sessions: Vec<Session> = collect(&root(install, source))?.into_iter().map(|e| e.session).collect();

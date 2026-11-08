@@ -1,9 +1,10 @@
+import { ProfileAvatar } from "@/components/ProfileAvatar";
 import { Loader2, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Page, PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { api, errorText, type Profile, type Quota, type QuotaWindow } from "@/lib/api";
-import { PALETTE, badgeLetter, cn } from "@/lib/utils";
+import { cn, relativeTime } from "@/lib/utils";
 
 // Cache contains only quota results, never credentials; it survives page navigation.
 const cache = new Map<string, Quota>();
@@ -32,6 +33,11 @@ export function UsagePage({ profiles }: { profiles: Profile[] | null }) {
   const [values, setValues] = useState<Record<string, Quota>>(() => Object.fromEntries(cache));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => tick(value => value + 1), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const refresh = async (id: string) => {
     const since = Date.now() - (attempts.get(id) ?? 0);
     if (since < RETRY_MS) {
@@ -53,7 +59,7 @@ export function UsagePage({ profiles }: { profiles: Profile[] | null }) {
   };
   return (
     <Page>
-      <PageHeader title="用量" subtitle="按账号读取订阅额度，含同账号其他设备的用量；点击刷新才会联网。" />
+      <PageHeader title="用量" subtitle="获取账号剩余额度。" />
       <div className="space-y-3 px-5">
         {profiles === null && <p className="px-1 text-[13px] text-muted">正在读取账号…</p>}
         {profiles && profiles.length > 0 && (
@@ -63,12 +69,10 @@ export function UsagePage({ profiles }: { profiles: Profile[] | null }) {
               return (
                 <div key={profile.id} className="px-4 py-3">
                   <div className="flex items-center gap-3">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[12px] font-semibold text-white" style={{ background: PALETTE[profile.color % PALETTE.length] }}>
-                      {badgeLetter(profile.name)}
-                    </div>
+                    <ProfileAvatar badge={profile.badge} isDefault={profile.isDefault} color={profile.color} className="h-7 w-7 shrink-0" />
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[13.5px] font-medium">{profile.name}</div>
-                      <div className="text-[11px] text-muted">{q ? `更新于 ${new Date(q.fetchedAt).toLocaleString()}` : "尚未读取"}</div>
+                      <div className="text-[11px] text-muted">{q ? `${relativeTime(new Date(q.fetchedAt).getTime())}更新` : "尚未读取"}</div>
                     </div>
                     <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => refresh(profile.id)}>
                       {busy === profile.id ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -77,8 +81,8 @@ export function UsagePage({ profiles }: { profiles: Profile[] | null }) {
                   </div>
                   {q && (
                     <div className="mt-3 flex gap-6 pl-10">
-                      <Meter title="当前时段" value={q.fiveHour} />
-                      <Meter title="每周" value={q.sevenDay} />
+                      <Meter title="5 小时已用" value={q.fiveHour} />
+                      <Meter title="本周已用" value={q.sevenDay} />
                     </div>
                   )}
                   {errors[profile.id] && (
@@ -92,9 +96,6 @@ export function UsagePage({ profiles }: { profiles: Profile[] | null }) {
             })}
           </div>
         )}
-        <p className="px-1 text-[11.5px] leading-[18px] text-muted">
-          此接口未公开，可能随 Claude 更新变化。macOS 首次读取时系统会询问是否允许访问钥匙串中的“Claude Safe Storage”，请选择“允许”；凭据只在本机解密并用于这次查询。
-        </p>
       </div>
     </Page>
   );

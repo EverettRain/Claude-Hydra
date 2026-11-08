@@ -160,10 +160,14 @@ fn delete_environment(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn check_node(node: node::NodeConfig) -> Result<node::ExitInfo, String> {
+async fn check_node(node: node::NodeConfig) -> Result<(node::ExitInfo, Option<String>, String), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let node = node.validated()?;
-        node::inspect(&node.client(Duration::from_secs(15))?, &node)
+        let client = node.client(Duration::from_secs(15))?;
+        let exit = node::inspect(&client, &node)?;
+        let quality = node::network_quality(&client, &exit.ip);
+        let risk = node::reputation(&client, &exit.ip).to_owned();
+        Ok((exit, quality, risk))
     }).await.map_err(|_| "检测任务失败。".to_string())?
 }
 
@@ -242,6 +246,7 @@ fn diagnostics(app: AppHandle) -> String {
 async fn session_preview(app: AppHandle, source: String, target: String) -> Result<sessions::Preview, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (i, s) = find(&app, &source)?;
+        if target.is_empty() { return sessions::source_preview(&i, &s); }
         let (_, t) = find(&app, &target)?;
         sessions::preview(&i, &s, &t)
     }).await.map_err(|_| "读取会话任务失败。".to_string())?
@@ -480,7 +485,7 @@ fn start_background(app: AppHandle) {
         // Re-tag a process only when it is new or its set of top-level windows changed,
         // instead of rewriting window properties on every tick.
         #[cfg(windows)]
-        let mut tagged: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        let mut tagged: std::collections::HashMap<u32, (usize, usize, String)> = std::collections::HashMap::new();
         loop {
             let open = app.get_webview_window("main").is_some();
             std::thread::sleep(Duration::from_secs(if open { 3 } else { 10 }));
@@ -491,7 +496,7 @@ fn start_background(app: AppHandle) {
                     tagged.retain(|pid, _| list.iter().any(|p| p.pid == Some(*pid)));
                     for profile in list.iter().filter(|p| !p.is_default) {
                         let Some(pid) = profile.pid else { continue };
-                        let windows = sys::top_windows(pid).len();
+                        let windows = (sys::top_windows(pid).len(), profile.color, profile.badge.clone());
                         if tagged.get(&pid) != Some(&windows) && taskbar::apply(profile, pid) {
                             tagged.insert(pid, windows);
                         }

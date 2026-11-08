@@ -5,6 +5,41 @@
 #include <wrl/client.h>
 #include <cwchar>
 
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
+
+// Paint directly into a bottom-up BGRA DIB for the Windows ICO resource.
+extern "C" bool hydra_draw_badge(const wchar_t* label, unsigned rgb, const wchar_t* base,
+                                int size, unsigned char* pixels) {
+    using namespace Gdiplus;
+    static const bool ready = [] {
+        ULONG_PTR token;
+        GdiplusStartupInput input;
+        return GdiplusStartup(&token, &input, nullptr) == Ok;
+    }();
+    if (!ready) return false;
+    Bitmap bitmap(size, size, -4 * size, PixelFormat32bppARGB, pixels + 4 * size * (size - 1));
+    Graphics graphics(&bitmap);
+    graphics.Clear(Color(0, 0, 0, 0));
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    float d = static_cast<float>(size);
+    if (base) {
+        Image image(base);
+        if (image.GetLastStatus() != Ok || graphics.DrawImage(&image, 0, 0, size, size) != Ok) return false;
+        d *= 0.5f;
+    }
+    const float x = size - d;
+    SolidBrush white(Color::White), fill(Color(0xff000000 | rgb));
+    graphics.FillEllipse(&white, x, x, d, d);
+    graphics.FillEllipse(&fill, x + d * .05f, x + d * .05f, d * .90f, d * .90f);
+    Font font(L"Microsoft YaHei UI", d * (wcslen(label) > 1 ? .55f : .68f), FontStyleBold, UnitPixel);
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    return graphics.DrawString(label, -1, &font, RectF(x, x, d, d), &format, &white) == Ok;
+}
+
 using Microsoft::WRL::ComPtr;
 
 // Called from an initialized COM apartment. All string storage remains caller-owned.
@@ -18,7 +53,7 @@ static HRESULT put(IPropertyStore* store, REFPROPERTYKEY key, const wchar_t* tex
 
 struct Identity {
     DWORD pid;
-    const wchar_t *id, *name, *command, *icon;
+    const wchar_t *id, *name, *command, *icon, *badge;
     unsigned tagged;
 };
 
@@ -56,7 +91,7 @@ static BOOL CALLBACK visit(HWND hwnd, LPARAM param) {
         ComPtr<ITaskbarList3> bar;
         if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&bar))) &&
             SUCCEEDED(bar->HrInit())) {
-            auto icon = static_cast<HICON>(LoadImageW(nullptr, profile.icon, IMAGE_ICON, 32, 32, LR_LOADFROMFILE));
+            auto icon = static_cast<HICON>(LoadImageW(nullptr, profile.badge, IMAGE_ICON, 32, 32, LR_LOADFROMFILE));
             if (icon) {
                 if (SUCCEEDED(bar->SetOverlayIcon(hwnd, icon, profile.name)))
                     SetPropW(hwnd, L"ClaudeHydra.OverlaySet", reinterpret_cast<HANDLE>(1));
@@ -69,10 +104,10 @@ static BOOL CALLBACK visit(HWND hwnd, LPARAM param) {
 }
 
 extern "C" unsigned hydra_tag_windows(DWORD pid, const wchar_t* id, const wchar_t* name,
-                                       const wchar_t* command, const wchar_t* icon) {
+                                       const wchar_t* command, const wchar_t* icon, const wchar_t* badge) {
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(init) && init != RPC_E_CHANGED_MODE) return 0;
-    Identity profile{pid, id, name, command, icon, 0};
+    Identity profile{pid, id, name, command, icon, badge, 0};
     EnumWindows(visit, reinterpret_cast<LPARAM>(&profile));
     if (SUCCEEDED(init)) CoUninitialize();
     return profile.tagged;

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface Profile {
+  badge: string;
   id: string;
   name: string;
   path: string;
@@ -92,7 +93,7 @@ export const api = {
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
   revealTranscript: (path: string) => invoke<void>("reveal_transcript", { path }),
-  checkNode: (node: NodeConfig) => invoke<ExitInfo>("check_node", { node }),
+  checkNode: (node: NodeConfig) => invoke<[ExitInfo, string | null, string]>("check_node", { node }),
   refreshNodeIp: (url: string) => invoke<string>("refresh_node_ip", { url }),
   profileQuota: (id: string) => invoke<Quota>("profile_quota", { id }),
   sessionPreview: (source: string, target: string) => invoke<SessionPreview>("session_preview", { source, target }),

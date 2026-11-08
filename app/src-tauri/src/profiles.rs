@@ -16,6 +16,7 @@ pub const PALETTE_LEN: usize = 8;
 pub struct Profile {
     pub id: String,
     pub name: String,
+    pub badge: String,
     pub path: String,
     pub is_default: bool,
     pub pid: Option<u32>,
@@ -144,6 +145,32 @@ fn resolve_colors(ids: &[String], s: &mut Settings) -> (HashMap<String, usize>, 
     (out, changed)
 }
 
+/// Prefer a short explicit suffix, then the first character after a shared prefix.
+fn account_badges(names: &[String]) -> Vec<String> {
+    let words: Vec<Vec<char>> = names.iter().map(|name| name.chars()
+        .filter(|c| c.is_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()).collect();
+    let mut used = std::collections::HashSet::new();
+    let mut next_number = 1;
+    words.iter().enumerate().map(|(i, word)| {
+        let digits: String = word.iter().rev().take_while(|c| c.is_ascii_digit())
+            .take(2).copied().collect::<Vec<_>>().into_iter().rev().collect();
+        let shared = words.iter().enumerate().filter(|(j, _)| *j != i)
+            .map(|(_, other)| word.iter().zip(other).take_while(|(a, b)| a == b).count()).max().unwrap_or(0);
+        let suffix = names[i].split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).next_back()
+            .filter(|w| w.len() <= 2 && w.is_ascii()).map(str::to_ascii_uppercase);
+        let candidates = std::iter::once(digits).chain(suffix)
+            .chain(word.iter().skip(shared).chain(word.iter()).map(char::to_string));
+        for label in candidates {
+            if !label.is_empty() && used.insert(label.clone()) { return label; }
+        }
+        loop {
+            let label = next_number.to_string();
+            next_number += 1;
+            if used.insert(label.clone()) { return label; }
+        }
+    }).collect()
+}
+
 pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
     let ids = ids(install);
     let mut s = settings::load();
@@ -152,7 +179,7 @@ pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
         let _ = settings::save(&s);
     }
     let running = if with_status { running_map(install) } else { HashMap::new() };
-    ids.into_iter()
+    let mut profiles: Vec<Profile> = ids.into_iter()
         .map(|id| {
             let path = profile_path(install, &id);
             let pstr = path.to_string_lossy().to_string();
@@ -162,6 +189,7 @@ pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
                 .filter(|l| !l.trim().is_empty())
                 .unwrap_or_else(|| id.clone());
             Profile {
+                badge: String::new(),
                 is_default: id == DEFAULT_ID,
                 pid: running.get(&path_key(&pstr)).copied(),
                 last_used: if with_status { last_used(&path) } else { None },
@@ -174,7 +202,12 @@ pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
                 id,
             }
         })
-        .collect()
+        .collect();
+    let names = profiles.iter().filter(|p| !p.is_default).map(|p| p.name.clone()).collect::<Vec<_>>();
+    for (profile, badge) in profiles.iter_mut().filter(|p| !p.is_default).zip(account_badges(&names)) {
+        profile.badge = badge;
+    }
+    profiles
 }
 
 pub fn resolve(install: &Install, name: &str, with_status: bool) -> Option<Profile> {
@@ -363,6 +396,12 @@ pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn badges_distinguish_related_names() {
+        let names = ["测试账号 A", "测试账号 B", "Account 1", "Account 12", "工作上海", "工作北京"];
+        assert_eq!(account_badges(&names.map(String::from)), ["A", "B", "1", "12", "上", "北"]);
+    }
 
     #[test]
     fn reads_every_user_data_dir_form() {
