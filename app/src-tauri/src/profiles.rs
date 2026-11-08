@@ -23,6 +23,8 @@ pub struct Profile {
     pub color: usize,
     pub keep_running: bool,
     pub signed_in: Option<bool>,
+    /// Name of the assigned environment config.
+    pub environment: Option<String>,
 }
 
 pub fn profile_path(install: &Install, id: &str) -> PathBuf {
@@ -166,6 +168,7 @@ pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
                 signed_in: if with_status { signed_in(&path) } else { None },
                 color: colors.get(&id).copied().unwrap_or(0),
                 keep_running: acc.keep_running,
+                environment: s.environment_name(&id),
                 name,
                 path: pstr,
                 id,
@@ -255,17 +258,13 @@ pub struct ProfileOptions {
     pub name: String,
     /// -1 indicates automatic palette assignment.
     pub color: i32,
-    pub env: String,
-    pub args: String,
+    pub keep_running: bool,
+    /// Assigned environment id; "" = none (direct connection, system timezone).
     #[serde(default)]
-    pub node: Option<crate::node::NodeConfig>,
-    /// "proxy" (follow node exit), "system", or an IANA timezone name.
-    #[serde(default)]
-    pub timezone: String,
-    /// Last exit seen at launch or check; read-only for the UI.
+    pub environment: String,
+    /// Last exit seen at launch; read-only for the UI.
     #[serde(default, skip_deserializing)]
     pub last_exit: Option<crate::node::ExitInfo>,
-    pub keep_running: bool,
 }
 
 fn valid_env_name(n: &str) -> bool {
@@ -275,23 +274,11 @@ fn valid_env_name(n: &str) -> bool {
 }
 
 pub fn env_vars(s: &Settings, id: &str) -> Vec<(String, String)> {
-    s.accounts
-        .get(id)
-        .map(|acc| {
-            acc.env
-                .iter()
-                .filter(|(k, _)| valid_env_name(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
-        .unwrap_or_default()
+    s.effective(id).env.into_iter().filter(|(k, _)| valid_env_name(k)).collect()
 }
 
 pub fn extra_args(s: &Settings, id: &str) -> String {
-    s.accounts
-        .get(id)
-        .map(|acc| acc.args.replace(['\r', '\n'], " ").trim().to_string())
-        .unwrap_or_default()
+    s.effective(id).args
 }
 
 pub fn options(install: &Install, id: &str) -> Result<ProfileOptions, String> {
@@ -300,17 +287,10 @@ pub fn options(install: &Install, id: &str) -> Result<ProfileOptions, String> {
     let acc = s.account(id);
     Ok(ProfileOptions {
         name: p.name,
-        node: acc.node(),
-        timezone: if acc.timezone.is_empty() { "proxy".into() } else { acc.timezone.clone() },
-        last_exit: acc.last_exit.clone(),
         color: acc.custom_color.map(|v| (v % PALETTE_LEN) as i32).unwrap_or(-1),
-        env: env_vars(&s, id)
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        args: extra_args(&s, id),
         keep_running: p.keep_running,
+        environment: acc.environment.clone().filter(|e| s.environments.contains_key(e)).unwrap_or_default(),
+        last_exit: acc.last_exit.clone(),
     })
 }
 
@@ -347,33 +327,36 @@ pub fn parse_env_lines(text: &str) -> Result<BTreeMap<String, String>, String> {
     }
 }
 
+/// Checks that an account may use an environment (store default accounts can't be customised).
+pub fn check_environment(install: &Install, s: &Settings, account_id: &str, environment: &str) -> Result<Option<String>, String> {
+    if environment.is_empty() { return Ok(None); }
+    let env = s.environments.get(environment).ok_or("所选环境配置已不存在。")?;
+    if account_id == DEFAULT_ID && install.is_msix() && env.customizes_launch() {
+        return Err("商店版默认账号由系统启动，无法应用代理、时区或启动参数，不能使用此环境。".into());
+    }
+    Ok(Some(environment.to_string()))
+}
+
 pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(), String> {
     let current = resolve(install, id, false).ok_or("找不到这个账号。")?;
     let name = o.name.trim();
     if name != current.name {
         validate_name(install, name, Some(id))?;
     }
-    let node = o.node.as_ref().map(|n| n.validated()).transpose()?;
-    let timezone = normalize_timezone(&o.timezone)?;
-    let store_default = current.is_default && install.is_msix();
-    if node.is_some() {
-        if store_default { return Err("商店版默认账号不支持代理节点。".into()); }
-        if crate::node::args_conflict(&o.args) { return Err("请移除额外启动参数中的代理开关，再使用代理节点。".into()); }
-    }
-    if store_default && !matches!(timezone.as_str(), "" | "system") { return Err("商店版默认账号不支持单独的时区设置。".into()); }
-    let env = parse_env_lines(&o.env)?;
+    let s = settings::load();
+    let environment = check_environment(install, &s, id, &o.environment)?;
     settings::update(|s| {
         let acc = s.account_mut(id);
         acc.label = (!name.is_empty() && name != id).then(|| name.to_string());
         acc.custom_color = (o.color >= 0).then(|| (o.color as usize) % PALETTE_LEN);
-        acc.env = env;
-        if acc.node.is_some() || node.is_some() || !acc.proxy_endpoint.is_empty() {
-            if node.as_ref() != acc.node().as_ref() { acc.relay_port = acc.relay_port.filter(|_| node.is_some()); acc.last_exit = None; }
-            acc.set_node(node.clone());
-        }
-        acc.timezone = timezone.clone();
-        acc.args = o.args.trim().to_string();
         acc.keep_running = o.keep_running;
+        if acc.environment != environment { acc.last_exit = None; }
+        acc.environment = environment.clone();
+        // Launch settings now live in environments; drop any leftover per-account copy.
+        acc.set_node(None);
+        acc.args.clear();
+        acc.env.clear();
+        acc.timezone.clear();
     })
 }
 

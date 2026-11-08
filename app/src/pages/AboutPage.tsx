@@ -1,54 +1,49 @@
-import { Cpu, Feather, Layers } from "lucide-react";
+import { Cpu, Feather, Layers, ShieldCheck } from "lucide-react";
 import appIcon from "../assets/claude-hydra-icon-256.png";
-import { PageHeader } from "@/components/PageHeader";
+import { Group, Page } from "@/components/PageHeader";
 import type { AppInfo } from "@/lib/api";
 
 const points = [
-  {
-    icon: Layers,
-    title: "账号互不干扰",
-    text: "每个账号使用独立的 Claude 数据目录（--user-data-dir），登录、Cookie 和设置彼此隔离，可以同时打开。",
-  },
-  {
-    icon: Feather,
-    title: "托盘里几乎不占资源",
-    text: "关闭窗口即销毁 WebView 界面，仅保留轻量的 Rust 后台进程驻留系统托盘并实时感知进程状态。",
-  },
-  {
-    icon: Cpu,
-    title: "快捷方式秒开",
-    text: "桌面快捷方式通过 --launch 直接启动或唤醒目标账号窗口，不加载任何界面，只需几毫秒。",
-  },
+  { icon: Layers, title: "账号互不干扰", text: "每个账号使用独立的数据目录，登录、Cookie 与设置彼此隔离，可以同时打开。" },
+  { icon: ShieldCheck, title: "按账号走代理节点", text: "内置本机中继转发到节点，DNS、WebRTC、UDP 不外泄；节点失效时断网而非直连。" },
+  { icon: Feather, title: "托盘里几乎不占资源", text: "关闭窗口即销毁界面，仅保留轻量的 Rust 后台进程感知各账号状态。" },
+  { icon: Cpu, title: "快捷方式秒开", text: "桌面快捷方式通过 --launch 直接启动或唤醒目标账号，不加载任何界面。" },
 ];
 
 export function AboutPage({ info }: { info: AppInfo | null }) {
   return (
-    <div className="pb-8">
-      <PageHeader title="关于" />
-      <div className="space-y-4 px-6">
-        <div className="flex items-center gap-5 rounded-lg border border-border bg-card p-5">
-          <img src={appIcon} alt="" className="h-20 w-20 rounded-2xl" draggable={false} />
-          <div>
-            <div className="text-2xl font-semibold">Claude-Hydra</div>
-            <div className="mt-1 text-sm text-muted-foreground">同时运行多个 Claude 桌面端账号</div>
-            <div className="mt-2 inline-flex rounded-md bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground">
-              v{info?.version ?? "…"} · {info?.platform ?? ""}
-            </div>
+    <Page>
+      <h1 className="sr-only">关于</h1>
+      <div className="space-y-5 px-5 pt-3">
+        <div className="flex flex-col items-center py-4 text-center">
+          <img src={appIcon} alt="" className="h-16 w-16 rounded-[18px] shadow-card" draggable={false} />
+          <div className="mt-3 text-[17px] font-semibold tracking-[-0.01em]">Claude-Hydra</div>
+          <div className="mt-0.5 text-[13px] text-muted">同时运行多个 Claude 桌面端账号</div>
+          <div className="mt-2.5 inline-flex h-[22px] items-center rounded-full bg-card px-2.5 font-mono text-[11px] text-fg-2 shadow-card">
+            v{info?.version ?? "…"} · {info?.platform ?? ""}
           </div>
         </div>
-        <div className="grid gap-3 md:grid-cols-3">
+
+        <Group>
           {points.map((p) => (
-            <div key={p.title} className="rounded-lg border border-border bg-card p-4">
-              <p.icon className="h-5 w-5 text-blue-500" />
-              <div className="mt-2 text-sm font-semibold">{p.title}</div>
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{p.text}</p>
+            <div key={p.title} className="flex items-start gap-3 px-4 py-3">
+              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-pill text-fg-2">
+                <p.icon className="h-[15px] w-[15px]" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-[13px] font-medium">{p.title}</div>
+                <p className="mt-0.5 text-[12px] leading-[18px] text-muted">{p.text}</p>
+              </div>
             </div>
           ))}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          命令行：<span className="selectable font-mono">claude-hydra --launch &lt;账号&gt; | --close | --restart | --list | --add-account | --tray</span>
-        </p>
+        </Group>
+
+        <Group label="命令行">
+          <div className="selectable px-4 py-3 font-mono text-[11.5px] leading-5 text-fg-2">
+            claude-hydra --launch &lt;账号&gt; | --close | --restart | --list | --add-account | --tray
+          </div>
+        </Group>
       </div>
-    </div>
+    </Page>
   );
 }

@@ -25,19 +25,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={push}>
       {children}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2">
+      <div className="pointer-events-none fixed inset-x-0 bottom-5 z-[60] flex flex-col items-center gap-2 px-4">
         {items.map((t) => (
           <div
             key={t.id}
-            className={cn(
-              "pointer-events-auto flex animate-pop-in items-start gap-2 rounded-lg border bg-card px-3 py-2.5 text-sm shadow-md",
-              t.kind === "error" ? "border-red-500/40" : "border-border",
-            )}
+            style={{ background: "var(--pop)" }}
+            className="pointer-events-auto flex max-w-md animate-pop-in items-start gap-2 rounded-xl px-3.5 py-2.5 text-[13px] shadow-pop backdrop-blur-md"
           >
             {t.kind === "error" ? (
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
+              <AlertCircle className="mt-px h-4 w-4 shrink-0 text-danger" />
             ) : (
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+              <CheckCircle2 className={cn("mt-px h-4 w-4 shrink-0 text-ok")} />
             )}
             <span className="selectable whitespace-pre-wrap break-words">{t.text}</span>
           </div>

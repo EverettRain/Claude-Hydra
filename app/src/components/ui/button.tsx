@@ -2,20 +2,22 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 const variants = {
-  default: "bg-blue-500 text-white hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700",
-  destructive: "bg-red-500 text-white hover:bg-red-600 dark:bg-red-600 dark:hover:bg-red-700",
-  outline:
-    "border border-border bg-background text-muted-foreground hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-gray-100",
-  ghost:
-    "text-gray-500 hover:text-gray-900 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-100 dark:hover:bg-gray-800",
-  success: "bg-emerald-500 text-white hover:bg-emerald-600 dark:bg-emerald-600 dark:hover:bg-emerald-700",
+  /** Graphite primary: the one action that matters on a surface. */
+  default: "bg-fg text-card hover:bg-fg/85",
+  /** Indigo, for actions that change state outside the app (rare). */
+  brand: "bg-brand text-brand-fg hover:bg-brand/90",
+  destructive: "bg-danger text-white hover:bg-danger/90 dark:text-bg",
+  /** Soft pill, the default secondary button. */
+  outline: "bg-pill text-fg hover:bg-pill-hover",
+  ghost: "text-muted hover:bg-pill hover:text-fg",
+  success: "bg-ok text-white hover:bg-ok/90",
 } as const;
 
 const sizes = {
-  default: "h-9 px-4",
-  sm: "h-8 rounded-md px-3 text-xs",
-  icon: "h-9 w-9 p-1.5",
-  iconSm: "h-8 w-8 p-1.5",
+  default: "h-8 px-3.5 text-[13px]",
+  sm: "h-7 px-2.5 text-[12.5px]",
+  icon: "h-8 w-8",
+  iconSm: "h-[26px] w-[26px] rounded-[7px]",
 } as const;
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -29,7 +31,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       ref={ref}
       type={type}
       className={cn(
-        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+        "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg font-medium disabled:pointer-events-none disabled:opacity-40 [&_svg]:h-[15px] [&_svg]:w-[15px]",
         variants[variant],
         sizes[size],
         className,

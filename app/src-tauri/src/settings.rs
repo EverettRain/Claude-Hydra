@@ -44,8 +44,20 @@ pub struct AccountConfig {
     pub relay_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<crate::node::ExitInfo>,
+    /// Id of the assigned environment config; `None` = direct connection, system timezone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     #[serde(default)]
     pub keep_running: bool,
+}
+
+/// The launch configuration that actually applies to an account.
+#[derive(Clone, Debug, Default)]
+pub struct Effective {
+    pub node: Option<crate::node::NodeConfig>,
+    pub timezone: String,
+    pub args: String,
+    pub env: BTreeMap<String, String>,
 }
 
 impl AccountConfig {
@@ -75,6 +87,8 @@ pub struct Settings {
     pub install_cache: Option<CachedInstall>,
     #[serde(default)]
     pub accounts: BTreeMap<String, AccountConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environments: BTreeMap<String, crate::environment::Environment>,
 }
 
 impl Settings {
@@ -84,6 +98,22 @@ impl Settings {
 
     pub fn account_mut(&mut self, id: &str) -> &mut AccountConfig {
         self.accounts.entry(id.to_string()).or_default()
+    }
+
+    /// Assigned environment if any (a dangling id means none); otherwise legacy per-account fields.
+    pub fn effective(&self, id: &str) -> Effective {
+        let acc = self.account(id);
+        if let Some(env_id) = &acc.environment {
+            return match self.environments.get(env_id) {
+                Some(e) => Effective { node: e.node(), timezone: e.timezone.clone(), args: e.launch_args(), env: e.env.clone() },
+                None => Effective::default(),
+            };
+        }
+        Effective { node: acc.node(), timezone: acc.timezone.clone(), args: acc.args.replace(['\r', '\n'], " ").trim().to_string(), env: acc.env.clone() }
+    }
+
+    pub fn environment_name(&self, id: &str) -> Option<String> {
+        self.account(id).environment.and_then(|e| self.environments.get(&e).map(|e| e.name.clone()))
     }
 
     pub fn remove_account(&mut self, id: &str) {

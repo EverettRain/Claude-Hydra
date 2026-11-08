@@ -1,10 +1,10 @@
-import { Copy, Info, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
+import { Check, Copy, Info, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { api, errorText, type ExitInfo, type NodeConfig } from "@/lib/api";
 import { COMMON_TIMEZONES, emptyNode, formatNode, parseNodeText } from "@/lib/node";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
-import { Input } from "./ui/input";
+import { Input, Select } from "./ui/input";
 
 interface Props {
   node: NodeConfig | null;
@@ -15,22 +15,40 @@ interface Props {
   idPrefix?: string;
 }
 
-const select = "h-9 w-full rounded-lg border border-input bg-background px-3 text-sm";
-
 function Row({ label, required, hint, children }: { label: string; required?: boolean; hint?: string; children: React.ReactNode }) {
-  return <div className="grid grid-cols-[96px_1fr] items-center gap-3">
-    <span className="text-sm text-foreground">{required && <span className="mr-0.5 text-red-500">*</span>}{label}</span>
-    <div className="flex min-w-0 items-center gap-2">
-      <div className="min-w-0 flex-1">{children}</div>
-      {hint && <span title={hint} className="shrink-0 text-muted-foreground"><Info className="h-4 w-4" /></span>}
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-center gap-3 px-4 py-2">
+      <span className="flex items-center gap-1 text-[12.5px] text-fg-2">
+        {label}
+        {required && <span className="text-danger">*</span>}
+        {hint && (
+          <span title={hint} className="text-faint hover:text-muted">
+            <Info className="h-3 w-3" />
+          </span>
+        )}
+      </span>
+      <div className="flex min-w-0 items-center gap-2">{children}</div>
     </div>
-  </div>;
+  );
 }
 
-function Radio({ name, value, current, label, onChange }: { name: string; value: string; current: string; label: string; onChange: (v: string) => void }) {
-  return <label className="inline-flex cursor-pointer items-center gap-1.5 text-sm">
-    <input type="radio" name={name} className="h-4 w-4 accent-blue-600" checked={current === value} onChange={() => onChange(value)} />{label}
-  </label>;
+/** Segmented control: quiet track, white thumb on the selected option. */
+function Segmented<T extends string>({ value, options, onChange, label }: { value: T; options: [T, string][]; onChange: (v: T) => void; label: string }) {
+  return (
+    <div role="radiogroup" aria-label={label} className="inline-flex rounded-lg bg-pill p-0.5">
+      {options.map(([v, text]) => (
+        <button
+          key={v}
+          role="radio"
+          aria-checked={value === v}
+          onClick={() => onChange(v)}
+          className={cn("h-6 rounded-md px-2.5 text-[12.5px] active:!scale-100", value === v ? "bg-card font-medium text-fg shadow-edge dark:bg-white/[.12]" : "text-muted hover:text-fg")}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 export function exitText(e: ExitInfo) {
@@ -40,6 +58,7 @@ export function exitText(e: ExitInfo) {
 export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange, lastExit, idPrefix = "node" }: Props) {
   const [checking, setChecking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const n = node ?? emptyNode();
   const set = (patch: Partial<NodeConfig>) => { setResult(null); onNodeChange({ ...n, ...patch }); };
@@ -53,7 +72,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
   };
   const check = async () => {
     setChecking(true); setResult(null);
-    try { const info = await api.checkNode(n); setResult({ ok: true, text: exitText(info) }); }
+    try { setResult({ ok: true, text: exitText(await api.checkNode(n)) }); }
     catch (e) { setResult({ ok: false, text: errorText(e) }); }
     finally { setChecking(false); }
   };
@@ -63,81 +82,93 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
     catch (e) { setResult({ ok: false, text: errorText(e) }); }
     finally { setRefreshing(false); }
   };
-  const copy = () => { void navigator.clipboard?.writeText(formatNode(n)); setResult({ ok: true, text: "已复制节点字符串（含密码）。" }); };
+  const copy = () => {
+    void navigator.clipboard?.writeText(formatNode(n));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1400);
+  };
 
-  return <div className="space-y-4">
-    <Row label="代理方式" required>
-      <div className="flex flex-wrap gap-4">
-        <Radio name={`${idPrefix}-mode`} value="none" current={node ? "custom" : "none"} label="不使用代理" onChange={() => { setResult(null); onNodeChange(null); }} />
-        <Radio name={`${idPrefix}-mode`} value="custom" current={node ? "custom" : "none"} label="自定义代理" onChange={() => onNodeChange(n)} />
-      </div>
-    </Row>
+  return (
+    <div className="list-card">
+      <Row label="代理方式" required>
+        <Segmented label="代理方式" value={node ? "custom" : "none"} options={[["none", "不使用代理"], ["custom", "自定义代理"]]}
+          onChange={(v) => { setResult(null); onNodeChange(v === "custom" ? n : null); }} />
+      </Row>
 
-    {node && <>
-      <Row label="IP查询渠道" hint="检测出口 IP、地区和时区所用的服务；请求经由代理节点发出。">
-        <div className="flex gap-2">
-          <select aria-label="IP查询渠道" className={select} value={n.geoChannel} onChange={e => set({ geoChannel: e.target.value as NodeConfig["geoChannel"] })}>
-            <option value="ipinfo">ipinfo.io</option><option value="ipapi">ipapi.co</option><option value="ip-api">ip-api.com</option>
-          </select>
-          <Button variant="outline" disabled={checking || !n.host || !n.port} onClick={check}>{checking ? <Loader2 className="h-4 w-4 animate-spin" /> : null}代理检测</Button>
-          <Button variant="ghost" size="icon" aria-label="复制节点字符串" disabled={!n.host || !n.port} onClick={copy}><Copy className="h-4 w-4" /></Button>
-        </div>
-      </Row>
-      <Row label="代理类型" required>
-        <select aria-label="代理类型" className={select} value={n.kind} onChange={e => set({ kind: e.target.value as NodeConfig["kind"] })}>
-          <option value="socks5">Socks5</option><option value="http">HTTP</option><option value="https">HTTPS</option>
-        </select>
-      </Row>
-      <Row label="IP协议" hint="检测并要求的出口 IP 版本。选 IPv6 时节点必须提供 IPv6 出口，否则无法启动。">
-        <div className="flex gap-4">
-          <Radio name={`${idPrefix}-ipv`} value="ipv4" current={n.ipVersion} label="IPv4" onChange={v => set({ ipVersion: v as NodeConfig["ipVersion"] })} />
-          <Radio name={`${idPrefix}-ipv`} value="ipv6" current={n.ipVersion} label="IPv6" onChange={v => set({ ipVersion: v as NodeConfig["ipVersion"] })} />
-        </div>
-      </Row>
-      <Row label="代理主机" required hint="支持粘贴“代理类型://主机:端口:账号:密码”或“账号:密码@主机:端口”，自动拆分。">
-        <Input aria-label="代理主机" className="font-mono text-xs" value={n.host} placeholder="支持“代理类型://主机:端口:账号:密码”自动拆分" onChange={e => set({ host: e.target.value })}
-          onPaste={e => { if (trySplit(e.clipboardData.getData("text"))) e.preventDefault(); }}
-          onBlur={e => trySplit(e.target.value)} />
-      </Row>
-      <Row label="代理端口" required>
-        <Input aria-label="代理端口" inputMode="numeric" className="font-mono text-xs" value={n.port || ""} placeholder="请输入端口"
-          onChange={e => { const v = e.target.value.replace(/\D/g, "").slice(0, 5); set({ port: v ? Math.min(Number(v), 65535) : 0 }); }} />
-      </Row>
-      <Row label="代理账号" hint="选填。账号和密码只保存在本机（Windows 使用系统加密），不会出现在 Claude 的启动参数或环境变量中。">
-        <Input aria-label="代理账号" value={n.username} maxLength={200} placeholder="请输入账号（选填）" autoComplete="off" onChange={e => set({ username: e.target.value })} />
-      </Row>
-      <Row label="代理密码">
-        <Input aria-label="代理密码" type="password" value={n.password} maxLength={200} placeholder="请输入密码（选填）" autoComplete="new-password" onChange={e => set({ password: e.target.value })} />
-      </Row>
-      <Row label="刷新URL" hint="代理服务商提供的换 IP 链接。点击右侧按钮会直接请求此链接（不经过代理）。">
-        <div className="flex gap-2">
-          <Input aria-label="刷新URL" className="font-mono text-xs" value={n.refreshUrl} placeholder="刷新URL" onChange={e => set({ refreshUrl: e.target.value })} />
-          <Button variant="ghost" size="icon" aria-label="请求刷新URL" disabled={!n.refreshUrl.trim() || refreshing} onClick={refresh}><RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} /></Button>
-        </div>
-      </Row>
-      {result && <p role="status" className={cn("selectable rounded-md p-2 text-xs", result.ok ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-red-500/10 text-red-600 dark:text-red-400")}>{result.text}</p>}
-      <div className="flex gap-2 rounded-lg bg-muted/70 p-3 text-xs leading-5 text-muted-foreground">
-        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
-        <div>
-          已自动启用防泄漏：Claude 只连接本机中继 127.0.0.1，由中继带认证转发到节点；域名全部在节点解析（禁止本地 DNS），禁用 QUIC，UDP 一律拒绝，WebRTC 仅允许走代理；
-          子进程（Claude Code、MCP）通过代理环境变量走同一节点。每次启动前会经此路径检测出口，失败则不启动；节点断开或 Claude-Hydra 退出时该账号断网，不会回退直连。
-          无法拦截的情况：不读取代理环境变量、自行直连网络的子进程，以及系统浏览器中的登录页。
-        </div>
-      </div>
-    </>}
+      {node && (
+        <>
+          <Row label="代理类型" required>
+            <Select aria-label="代理类型" className="w-36" value={n.kind} onChange={(e) => set({ kind: e.target.value as NodeConfig["kind"] })}>
+              <option value="socks5">SOCKS5</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+            </Select>
+            <span className="flex-1" />
+            <Segmented label="IP协议" value={n.ipVersion} options={[["ipv4", "IPv4"], ["ipv6", "IPv6"]]} onChange={(v) => set({ ipVersion: v })} />
+          </Row>
+          <Row label="代理主机" required hint="可粘贴“类型://主机:端口:账号:密码”或“账号:密码@主机:端口”，自动拆分到各栏。">
+            <Input aria-label="代理主机" className="font-mono text-xs" value={n.host} placeholder="粘贴 类型://主机:端口:账号:密码 自动拆分"
+              onChange={(e) => set({ host: e.target.value })}
+              onPaste={(e) => { if (trySplit(e.clipboardData.getData("text"))) e.preventDefault(); }}
+              onBlur={(e) => trySplit(e.target.value)} />
+            <Input aria-label="代理端口" inputMode="numeric" className="w-24 shrink-0 font-mono text-xs" value={n.port || ""} placeholder="端口"
+              onChange={(e) => { const v = e.target.value.replace(/\D/g, "").slice(0, 5); set({ port: v ? Math.min(Number(v), 65535) : 0 }); }} />
+          </Row>
+          <Row label="账号密码" hint="选填。只保存在本机（Windows 使用系统加密），不会出现在 Claude 的启动参数或环境变量中。">
+            <Input aria-label="代理账号" value={n.username} maxLength={200} placeholder="账号（选填）" autoComplete="off" onChange={(e) => set({ username: e.target.value })} />
+            <Input aria-label="代理密码" type="password" value={n.password} maxLength={200} placeholder="密码（选填）" autoComplete="new-password" onChange={(e) => set({ password: e.target.value })} />
+          </Row>
+          <Row label="出口检测" hint="经节点访问所选服务，检测出口 IP、地区与时区。IP 协议选 IPv6 时节点须提供 IPv6 出口。">
+            <Select aria-label="IP查询渠道" value={n.geoChannel} onChange={(e) => set({ geoChannel: e.target.value as NodeConfig["geoChannel"] })}>
+              <option value="ipinfo">ipinfo.io</option>
+              <option value="ipapi">ipapi.co</option>
+              <option value="ip-api">ip-api.com</option>
+            </Select>
+            <Button variant="outline" disabled={checking || !n.host || !n.port} onClick={check}>
+              {checking && <Loader2 className="animate-spin" />}
+              代理检测
+            </Button>
+            <Button variant="ghost" size="icon" aria-label="复制节点字符串（含密码）" title="复制节点字符串（含密码）" disabled={!n.host || !n.port} onClick={copy}>
+              {copied ? <Check className="text-ok" /> : <Copy />}
+            </Button>
+          </Row>
+          <Row label="刷新URL" hint="代理服务商提供的换 IP 链接。点击右侧按钮会直接请求此链接（不经过代理）。">
+            <Input aria-label="刷新URL" className="font-mono text-xs" value={n.refreshUrl} placeholder="https://…" onChange={(e) => set({ refreshUrl: e.target.value })} />
+            <Button variant="ghost" size="icon" aria-label="请求刷新URL" disabled={!n.refreshUrl.trim() || refreshing} onClick={refresh}>
+              <RefreshCw className={cn(refreshing && "animate-spin")} />
+            </Button>
+          </Row>
+          {result && (
+            <div className={cn("selectable px-4 py-2 text-[12px]", result.ok ? "bg-ok-soft/70 text-ok" : "bg-danger-soft/70 text-danger")} role="status">
+              {result.text}
+            </div>
+          )}
+          <div className="flex gap-2.5 px-4 py-3 text-[11.5px] leading-[18px] text-muted">
+            <ShieldCheck className="mt-px h-4 w-4 shrink-0 text-ok" />
+            <p>
+              已自动启用防泄漏：Claude 只连本机中继，由中继带认证转发到节点；域名在节点解析，禁用 QUIC，拒绝 UDP，WebRTC 仅走代理，子进程通过代理环境变量走同一节点。
+              启动前会检测出口，失败则不启动；节点断开或 Hydra 退出时该账号断网，不回退直连。
+            </p>
+          </div>
+        </>
+      )}
 
-    <Row label="时区" hint="通过 TZ 环境变量为该账号设置时区。macOS 上 Claude 窗口与子进程均生效；Windows 上 Claude 窗口可能仍使用系统时区，仅子进程确定生效。">
-      <div className="flex flex-wrap items-center gap-4">
-        <Radio name={`${idPrefix}-tz`} value="proxy" current={tzMode} label="跟随代理 IP" onChange={() => onTimezoneChange("proxy")} />
-        <Radio name={`${idPrefix}-tz`} value="system" current={tzMode} label="跟随系统" onChange={() => onTimezoneChange("system")} />
-        <Radio name={`${idPrefix}-tz`} value="custom" current={tzMode} label="自定义" onChange={() => onTimezoneChange(lastExit?.timezone || "Asia/Tokyo")} />
-      </div>
-    </Row>
-    {tzMode === "custom" && <Row label="">
-      <Input aria-label="自定义时区" list={`${idPrefix}-tz-list`} className="font-mono text-xs" value={timezone} placeholder="IANA 时区，例如 Asia/Tokyo" onChange={e => onTimezoneChange(e.target.value)} />
-      <datalist id={`${idPrefix}-tz-list`}>{COMMON_TIMEZONES.map(t => <option key={t} value={t} />)}</datalist>
-    </Row>}
-    {tzMode === "proxy" && !node && <p className="text-xs text-muted-foreground">未设置代理时，“跟随代理 IP”等同于跟随系统。</p>}
-    {lastExit && <p className="text-xs text-muted-foreground">上次启动检测：{exitText(lastExit)}（{new Date(lastExit.checkedAt).toLocaleString()}）</p>}
-  </div>;
+      <Row label="时区" hint="通过 TZ 环境变量设置。macOS 上窗口与子进程均生效；Windows 上 Claude 窗口可能仍显示系统时区。">
+        <Segmented label="时区" value={tzMode} options={[["proxy", "跟随代理 IP"], ["system", "跟随系统"], ["custom", "自定义"]]}
+          onChange={(v) => onTimezoneChange(v === "custom" ? lastExit?.timezone || "Asia/Tokyo" : v)} />
+      </Row>
+      {tzMode === "custom" && (
+        <Row label="">
+          <Input aria-label="自定义时区" list={`${idPrefix}-tz-list`} className="font-mono text-xs" value={timezone} placeholder="IANA 时区，例如 Asia/Tokyo" onChange={(e) => onTimezoneChange(e.target.value)} />
+          <datalist id={`${idPrefix}-tz-list`}>{COMMON_TIMEZONES.map((t) => <option key={t} value={t} />)}</datalist>
+        </Row>
+      )}
+      {(lastExit || (tzMode === "proxy" && !node)) && (
+        <div className="px-4 py-2 text-[11.5px] text-muted">
+          {tzMode === "proxy" && !node && <p>未设置代理时，“跟随代理 IP”等同于跟随系统。</p>}
+          {lastExit && <p>上次启动检测：{exitText(lastExit)}（{new Date(lastExit.checkedAt).toLocaleString()}）</p>}
+        </div>
+      )}
+    </div>
+  );
 }

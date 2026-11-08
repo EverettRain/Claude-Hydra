@@ -1,36 +1,48 @@
 /** @type {import('tailwindcss').Config} */
+const token = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+
 module.exports = {
   content: ["./src/index.html", "./src/**/*.{ts,tsx}"],
   darkMode: ["selector", ".dark"],
   theme: {
     extend: {
       colors: {
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        card: { DEFAULT: "hsl(var(--card))", foreground: "hsl(var(--card-foreground))" },
-        primary: { DEFAULT: "hsl(var(--primary))", foreground: "hsl(var(--primary-foreground))" },
-        muted: { DEFAULT: "hsl(var(--muted))", foreground: "hsl(var(--muted-foreground))" },
-        accent: { DEFAULT: "hsl(var(--accent))", foreground: "hsl(var(--accent-foreground))" },
-        destructive: { DEFAULT: "hsl(var(--destructive))", foreground: "hsl(var(--destructive-foreground))" },
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
-        blue: { 400: "#409CFF", 500: "#0A84FF", 600: "#0060DF", 700: "#0050BB" },
-        gray: {
-          50: "#fafafa", 100: "#f4f4f5", 200: "#e4e4e7", 300: "#d4d4d8", 400: "#a1a1aa",
-          500: "#71717a", 600: "#636366", 700: "#48484A", 800: "#3A3A3C", 900: "#2C2C2E", 950: "#1C1C1E",
-        },
+        bg: token("bg"),
+        card: { DEFAULT: token("card"), 2: token("card-2") },
+        pill: { DEFAULT: token("pill"), hover: token("pill-hover") },
+        line: { DEFAULT: token("line"), 2: token("line-2") },
+        fg: { DEFAULT: token("fg"), 2: token("fg-2") },
+        muted: token("muted"),
+        faint: token("faint"),
+        brand: { DEFAULT: token("brand"), soft: token("brand-soft"), fg: token("brand-fg") },
+        ok: { DEFAULT: token("ok"), soft: token("ok-soft") },
+        danger: { DEFAULT: token("danger"), soft: token("danger-soft") },
+        warn: { DEFAULT: token("warn"), soft: token("warn-soft") },
       },
-      borderRadius: { sm: "0.375rem", md: "0.5rem", lg: "0.75rem", xl: "0.875rem" },
+      boxShadow: {
+        edge: "var(--edge)",
+        card: "var(--card-edge)",
+        pop: "var(--shadow)",
+      },
+      borderRadius: { sm: "5px", md: "6px", lg: "8px", xl: "12px", "2xl": "14px" },
       fontFamily: {
-        sans: ["-apple-system", "BlinkMacSystemFont", '"Segoe UI"', '"Microsoft YaHei UI"', "Roboto", "Arial", "sans-serif"],
-        mono: ["ui-monospace", "SFMono-Regular", "Consolas", "Menlo", "monospace"],
+        sans: [
+          "-apple-system", "BlinkMacSystemFont", '"SF Pro Text"', '"Segoe UI Variable Text"', '"Segoe UI"',
+          '"PingFang SC"', '"Microsoft YaHei UI"', "system-ui", "sans-serif",
+        ],
+        mono: ["ui-monospace", '"SF Mono"', "Menlo", "Consolas", "monospace"],
       },
+      transitionTimingFunction: { soft: "cubic-bezier(0.2, 0.8, 0.2, 1)" },
       keyframes: {
         fadeIn: { "0%": { opacity: "0" }, "100%": { opacity: "1" } },
-        popIn: { "0%": { opacity: "0", transform: "translateY(6px) scale(0.98)" }, "100%": { opacity: "1", transform: "none" } },
+        popIn: { "0%": { opacity: "0", transform: "translateY(4px) scale(0.985)" }, "100%": { opacity: "1", transform: "none" } },
+        slideIn: { "0%": { opacity: "0", transform: "translateX(16px)" }, "100%": { opacity: "1", transform: "none" } },
       },
-      animation: { "fade-in": "fadeIn 0.15s ease-out", "pop-in": "popIn 0.16s ease-out" },
+      animation: {
+        "fade-in": "fadeIn 0.16s ease-out",
+        "pop-in": "popIn 0.18s cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "slide-in": "slideIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
+      },
     },
   },
   plugins: [],

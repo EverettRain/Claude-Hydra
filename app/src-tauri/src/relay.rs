@@ -67,7 +67,7 @@ pub fn sync_all() {
     let mut wanted = Vec::new();
     let mut ports = Vec::new();
     for (id, acc) in &s.accounts {
-        let Some(node) = acc.node() else { continue };
+        let Some(node) = s.effective(id).node else { continue };
         wanted.push(id.clone());
         match ensure(id, &node, acc.relay_port) {
             Ok(port) if acc.relay_port != Some(port) => ports.push((id.clone(), port)),

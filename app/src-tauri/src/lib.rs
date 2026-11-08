@@ -1,6 +1,7 @@
 //! Claude-Hydra application entry, system tray management, and Tauri IPC commands.
 
 pub mod cli;
+pub mod environment;
 pub mod install;
 pub mod launcher;
 pub mod login;
@@ -117,20 +118,15 @@ fn next_account_name(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn create_configured_account(app: AppHandle, name: String, node: Option<node::NodeConfig>, timezone: String, locale: String) -> Result<Profile, String> {
+async fn create_configured_account(app: AppHandle, name: String, environment: String) -> Result<Profile, String> {
     let a = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let install = current_install(&a)?;
         let name = name.trim();
         profiles::validate_name(&install, name, None)?;
-        let node = node.map(|n| n.validated()).transpose()?;
-        let timezone = profiles::normalize_timezone(&timezone)?;
-        if !["", "en-US", "en-GB", "zh-CN", "zh-TW", "ja-JP", "ko-KR"].contains(&locale.as_str()) {
-            return Err("不支持此语言设置。".to_string());
-        }
+        let environment = profiles::check_environment(&install, &settings::load(), "", &environment)?;
         let p = profiles::create(&install, name)?;
-        let args = if locale.is_empty() { String::new() } else { format!("--lang={locale}") };
-        if let Err(e) = settings::update(|s| { let acc = s.account_mut(&p.id); acc.args = args; acc.set_node(node); acc.timezone = timezone; }) {
+        if let Err(e) = settings::update(|s| s.account_mut(&p.id).environment = environment) {
             let _ = std::fs::remove_dir(&p.path);
             return Err(e);
         }
@@ -140,6 +136,27 @@ async fn create_configured_account(app: AppHandle, name: String, node: Option<no
     }).await.map_err(|e| e.to_string())?;
     after_change(&app);
     result
+}
+
+#[tauri::command]
+fn list_environments() -> Vec<environment::EnvironmentView> {
+    environment::list()
+}
+
+#[tauri::command]
+fn save_environment(app: AppHandle, id: Option<String>, input: environment::EnvironmentInput) -> Result<String, String> {
+    let id = environment::save(&current_install(&app)?, id.as_deref(), &input)?;
+    relay::sync_all();
+    after_change(&app);
+    Ok(id)
+}
+
+#[tauri::command]
+fn delete_environment(app: AppHandle, id: String) -> Result<(), String> {
+    environment::delete(&id)?;
+    relay::sync_all();
+    after_change(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -273,6 +290,23 @@ async fn save_transcript(app: AppHandle, text: String) -> Result<String, String>
     }).await.map_err(|_| "保存任务失败。".to_string())?
 }
 
+/// Shows a chat transcript Hydra saved in the file manager, so it can be dragged into Claude.
+#[tauri::command]
+fn reveal_transcript(app: AppHandle, path: String) -> Result<(), String> {
+    let dir = app.path().download_dir().map_err(|_| "无法定位下载目录。")?;
+    let file = std::path::PathBuf::from(&path);
+    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    // Only files written by `save_transcript`.
+    if file.parent() != Some(dir.as_path()) || !name.starts_with("Claude-chat-") || !name.ends_with(".txt") || !file.is_file() {
+        return Err("只能显示 Hydra 保存的续聊附件。".into());
+    }
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer.exe").arg(format!("/select,{}", file.display())).spawn();
+    #[cfg(not(windows))]
+    let r = std::process::Command::new("open").arg("-R").arg(&file).spawn();
+    r.map(|_| ()).map_err(|e| format!("无法打开文件位置：{e}"))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
@@ -353,7 +387,9 @@ fn show_main(app: &AppHandle) {
     let builder = builder
         .decorations(true)
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true);
+        .hidden_title(true)
+        // Vertically centre the traffic lights on the 48px sidebar header row.
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0));
     if let Ok(w) = builder.build() {
         fit_to_screen(&w);
         let app = app.clone();
@@ -494,6 +530,9 @@ pub fn run(start_in_tray: bool) {
             create_configured_account,
             profile_options,
             check_node,
+            list_environments,
+            save_environment,
+            delete_environment,
             refresh_node_ip,
             save_profile_options,
             delete_profile,
@@ -506,6 +545,7 @@ pub fn run(start_in_tray: bool) {
             copy_sessions,
             profile_quota,
             save_transcript,
+            reveal_transcript,
             app_info,
             set_autostart,
             set_claude_path,
@@ -515,6 +555,7 @@ pub fn run(start_in_tray: bool) {
             let handle = app.handle().clone();
             // This process hosts the per-account proxy relays for as long as it runs.
             relay::set_host();
+            environment::migrate();
             relay::sync_all();
             let list = current_install(&handle).map(|i| profiles::list(&i, true)).unwrap_or_default();
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)

@@ -10,19 +10,30 @@ export interface Profile {
   color: number;
   keepRunning: boolean;
   signedIn: boolean | null;
+  /** Name of the assigned environment config. */
+  environment: string | null;
 }
 
 export interface ProfileOptions {
   name: string;
   color: number;
-  env: string;
-  args: string;
   keepRunning: boolean;
+  /** Assigned environment id; "" = none. */
+  environment: string;
+  lastExit: ExitInfo | null;
+}
+
+export interface EnvironmentInput {
+  name: string;
   node: NodeConfig | null;
   /** "proxy" | "system" | IANA name */
   timezone: string;
-  lastExit: ExitInfo | null;
+  locale: string;
+  args: string;
+  /** One NAME=value per line. */
+  env: string;
 }
+export interface Environment extends EnvironmentInput { id: string; usedBy: string[] }
 
 export type NodeKind = "http" | "https" | "socks5";
 export interface NodeConfig {
@@ -67,8 +78,10 @@ export const api = {
   restart: (id: string) => invoke<string>("restart_profile", { id }),
   addAccount: () => invoke<Profile>("add_account"),
   nextAccountName: () => invoke<string>("next_account_name"),
-  createConfiguredAccount: (name: string, node: NodeConfig | null, timezone: string, locale: string) =>
-    invoke<Profile>("create_configured_account", { name, node, timezone, locale }),
+  createConfiguredAccount: (name: string, environment: string) => invoke<Profile>("create_configured_account", { name, environment }),
+  listEnvironments: () => invoke<Environment[]>("list_environments"),
+  saveEnvironment: (id: string | null, input: EnvironmentInput) => invoke<string>("save_environment", { id, input }),
+  deleteEnvironment: (id: string) => invoke<void>("delete_environment", { id }),
   options: (id: string) => invoke<ProfileOptions>("profile_options", { id }),
   saveOptions: (id: string, options: ProfileOptions) => invoke<void>("save_profile_options", { id, options }),
   remove: (id: string) => invoke<void>("delete_profile", { id }),
@@ -78,6 +91,7 @@ export const api = {
   prepareLogin: (id: string) => invoke<void>("prepare_login", { id }),
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
+  revealTranscript: (path: string) => invoke<void>("reveal_transcript", { path }),
   checkNode: (node: NodeConfig) => invoke<ExitInfo>("check_node", { node }),
   refreshNodeIp: (url: string) => invoke<string>("refresh_node_ip", { url }),
   profileQuota: (id: string) => invoke<Quota>("profile_quota", { id }),

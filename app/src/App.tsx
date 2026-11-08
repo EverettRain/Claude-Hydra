@@ -5,6 +5,7 @@ import { api, errorText, type AppInfo, type Profile } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import { AboutPage } from "@/pages/AboutPage";
 import { AccountsPage } from "@/pages/AccountsPage";
+import { EnvironmentsPage } from "@/pages/EnvironmentsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { UsagePage } from "@/pages/UsagePage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -46,8 +47,10 @@ export default function App() {
   }, [refresh, reloadInfo]);
 
   return (
-    <AppShell activePage={page} onPageChange={setPage} theme={theme} onThemeChange={setTheme}>
+    <AppShell activePage={page} onPageChange={setPage} theme={theme} onThemeChange={setTheme}
+      status={profiles ? { running: profiles.filter((p) => p.pid).length, total: profiles.length } : null}>
       {page === "accounts" && <AccountsPage profiles={profiles} loadError={loadError} refresh={refresh} />}
+      {page === "environments" && <EnvironmentsPage onChanged={refresh} />}
       {page === "usage" && <UsagePage profiles={profiles} />}
       {page === "sessions" && <SessionsPage profiles={profiles} />}
       {page === "settings" && (

@@ -108,7 +108,7 @@ pub fn fetch(profile: &crate::profiles::Profile) -> Result<Quota, String> {
     let credential = token(Path::new(&profile.path))?;
     let settings = crate::settings::load();
     let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none());
-    if let Some(node) = settings.account(&profile.id).node() {
+    if let Some(node) = settings.effective(&profile.id).node {
         // Same exit as the account itself; never a direct connection.
         return query(node.client(Duration::from_secs(15))?, credential);
     }

@@ -21,15 +21,15 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
 
     let s = settings::load();
     let outcome = if running.is_some() { "focused" } else { "started" };
-    let acc = s.account(&p.id);
-    let node = acc.node();
+    let effective = s.effective(&p.id);
+    let node = effective.node.clone();
     let extra = profiles::extra_args(&s, &p.id);
     let mut env = profiles::env_vars(&s, &p.id);
     // Hydra-managed switches; passed as separate arguments (some contain spaces).
     let mut managed: Vec<String> = Vec::new();
-    let mut timezone = match acc.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
+    let mut timezone = match effective.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
     if (node.is_some() || timezone.is_some()) && p.is_default && install.is_msix() {
-        return Err("商店版默认账号无法应用代理节点或时区设置。".into());
+        return Err("商店版默认账号无法应用环境配置中的代理节点或时区。".into());
     }
     if let Some(node) = &node {
         if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
@@ -37,7 +37,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         // Verify the exact route Claude will use: local relay -> node -> internet.
         let client = crate::node::relay_client(port, std::time::Duration::from_secs(15))?;
         let exit = crate::node::inspect(&client, node).map_err(|e| format!("账号未启动：{e}"))?;
-        if matches!(acc.timezone.as_str(), "" | "proxy") {
+        if matches!(effective.timezone.as_str(), "" | "proxy") {
             if exit.timezone.is_empty() {
                 return Err("账号未启动：IP 查询服务没有返回出口时区。请换一个 IP 查询渠道，或在账号设置中手动指定时区。".into());
             }

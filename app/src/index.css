@@ -2,44 +2,65 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design tokens (RGB triplets so Tailwind can apply alpha).
+ * Quiet graphite surfaces, hairline separators, indigo reserved for things that act.
+ */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --primary: 210 100% 56%;
-    --primary-foreground: 0 0% 100%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 210 100% 56%;
-    --sidebar: 240 4.8% 97.6%;
+    --bg: 244 244 246;
+    --card: 255 255 255;
+    --card-2: 249 249 251;
+    --pill: 241 241 244;
+    --pill-hover: 233 233 238;
+    --line: 227 227 232;
+    --line-2: 236 236 240;
+    --fg: 28 28 33;
+    --fg-2: 75 75 83;
+    --muted: 133 133 141;
+    --faint: 185 185 194;
+    --brand: 79 70 229;
+    --brand-soft: 238 237 253;
+    --brand-fg: 255 255 255;
+    --ok: 24 154 88;
+    --ok-soft: 228 246 236;
+    --danger: 214 69 69;
+    --danger-soft: 251 233 233;
+    --warn: 180 83 9;
+    --warn-soft: 251 240 223;
+    --pop: rgba(255, 255, 255, 0.94);
+    --edge: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+    --card-edge: 0 0 0 0.5px rgba(20, 22, 30, 0.08), 0 1px 2px rgba(20, 22, 30, 0.04);
+    --shadow: 0 16px 44px rgba(20, 22, 30, 0.16), 0 2px 8px rgba(20, 22, 30, 0.06), 0 0 0 0.5px rgba(20, 22, 30, 0.1);
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
     color-scheme: light;
   }
 
   .dark {
-    --background: 240 5% 12%;
-    --foreground: 0 0% 98%;
-    --card: 240 5% 16%;
-    --card-foreground: 0 0% 98%;
-    --primary: 210 100% 54%;
-    --primary-foreground: 0 0% 100%;
-    --muted: 240 5% 18%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 5% 18%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 50%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5% 24%;
-    --input: 240 5% 24%;
-    --ring: 210 100% 54%;
-    --sidebar: 240 5% 14%;
+    --bg: 26 26 30;
+    --card: 35 35 39;
+    --card-2: 31 31 35;
+    --pill: 45 45 51;
+    --pill-hover: 54 54 61;
+    --line: 51 51 57;
+    --line-2: 44 44 50;
+    --fg: 237 237 241;
+    --fg-2: 185 185 193;
+    --muted: 139 139 148;
+    --faint: 86 86 95;
+    --brand: 165 180 252;
+    --brand-soft: 43 44 71;
+    --brand-fg: 20 20 42;
+    --ok: 111 217 155;
+    --ok-soft: 28 52 39;
+    --danger: 242 139 130;
+    --danger-soft: 62 33 33;
+    --warn: 242 181 68;
+    --warn-soft: 58 45 22;
+    --pop: rgba(38, 38, 43, 0.96);
+    --edge: inset 0 0.5px 0 rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --card-edge: 0 0 0 0.5px rgba(255, 255, 255, 0.07), 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow: 0 16px 44px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(255, 255, 255, 0.1);
     color-scheme: dark;
   }
 
@@ -52,8 +73,12 @@
   }
 
   body {
-    @apply bg-background text-foreground antialiased;
-    font-size: 14px;
+    background: rgb(var(--bg));
+    color: rgb(var(--fg));
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     -webkit-user-select: none;
     user-select: none;
   }
@@ -66,7 +91,7 @@
   }
 
   * {
-    @apply border-border;
+    @apply border-line;
     scrollbar-width: none;
   }
 
@@ -74,18 +99,87 @@
     display: none;
   }
 
-  button {
+  button,
+  a,
+  input,
+  select,
+  textarea {
     transition-property: color, background-color, border-color, box-shadow, transform, opacity;
-    transition-duration: 160ms;
-    transition-timing-function: cubic-bezier(0.2, 0, 0.2, 1);
+    transition-duration: 140ms;
+    transition-timing-function: var(--ease);
   }
 
   button:not(:disabled):active {
-    transform: scale(0.98);
+    transform: scale(0.97);
   }
 
   :focus-visible {
-    outline: 2px solid hsl(var(--ring));
+    outline: 2px solid rgb(var(--brand));
     outline-offset: 1px;
+  }
+
+  input[type="radio"],
+  input[type="checkbox"] {
+    accent-color: rgb(var(--fg));
+  }
+
+  ::placeholder {
+    color: rgb(var(--faint));
+  }
+}
+
+@layer components {
+  /* Grouped list card: white surface, hairline edge, rows separated by thin lines. */
+  /* No overflow clipping, so row menus can extend past the card; end rows inherit the rounding. */
+  .list-card {
+    @apply rounded-xl bg-card;
+    box-shadow: var(--card-edge);
+  }
+  .list-card > :first-child {
+    border-top-left-radius: inherit;
+    border-top-right-radius: inherit;
+  }
+  .list-card > :last-child {
+    border-bottom-left-radius: inherit;
+    border-bottom-right-radius: inherit;
+  }
+  .list-card > * + * {
+    border-top: 0.5px solid rgb(var(--line-2));
+  }
+  .group-label {
+    @apply px-1 pb-1.5 text-[11px] font-medium uppercase tracking-[0.04em] text-muted;
+  }
+  .field {
+    @apply h-8 w-full rounded-md bg-pill px-2.5 text-[13px] text-fg outline-none;
+  }
+  .field:hover:not(:disabled) {
+    background: rgb(var(--pill-hover));
+  }
+  .field:focus {
+    box-shadow: inset 0 0 0 1px rgb(var(--brand));
+    background: rgb(var(--card));
+  }
+  .field:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+  .view-in {
+    animation: view-in 0.24s var(--ease);
+  }
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-in {
+    animation: none;
   }
 }

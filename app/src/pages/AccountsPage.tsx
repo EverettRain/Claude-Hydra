@@ -9,14 +9,13 @@ import {
   Power,
   RefreshCw,
   RotateCw,
-  ShieldCheck,
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
 import { EditAccountDialog } from "@/components/EditAccountDialog";
 import { CreateAccountPanel } from "@/components/CreateAccountPanel";
 import { Menu } from "@/components/Menu";
-import { PageHeader } from "@/components/PageHeader";
+import { Page, PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
@@ -64,63 +63,67 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
 
   const addAccount = () => setAdding(true);
 
-  const running = profiles?.filter((p) => p.pid).length ?? 0;
-
   return (
-    <div className="pb-8">
+    <Page>
       <PageHeader
         title="账号"
-        subtitle={profiles ? `${profiles.length} 个账号 · ${running} 个运行中` : "读取中…"}
+        subtitle="每个账号使用独立的数据目录与登录态，可同时运行；双击一行即可启动或切到该账号。"
         actions={
           <>
-            <Button variant="outline" size="icon" aria-label="刷新" title="刷新" onClick={() => refresh()}>
-              <RefreshCw className="h-4 w-4" />
+            <Button variant="ghost" size="iconSm" aria-label="刷新" title="刷新" onClick={() => refresh()}>
+              <RefreshCw />
             </Button>
-            <Button onClick={addAccount} disabled={adding}>
-              <Plus className="h-4 w-4" />
+            <Button size="sm" onClick={addAccount} disabled={adding}>
+              <Plus />
               添加账号
             </Button>
           </>
         }
       />
 
-      <div className="space-y-3 px-6">
-        {loadError && (
-          <div className="selectable rounded-lg border border-red-500/40 bg-red-500/5 p-4 text-sm text-red-600 dark:text-red-400">
-            {loadError}
+      <div className="space-y-4 px-5">
+        {loadError && <div className="selectable rounded-xl bg-danger-soft px-4 py-3 text-[13px] text-danger">{loadError}</div>}
+
+        {profiles && profiles.length > 0 && (
+          <div className="list-card">
+            {profiles.map((p) => (
+              <AccountRow
+                key={p.id}
+                p={p}
+                busy={busy[p.id]}
+                onLaunch={() => launch(p)}
+                onClose={() => run(p, "关闭中", () => api.close(p.id), `已关闭 ${p.name}`)}
+                onRestart={() => run(p, "重启中", () => api.restart(p.id), `已重启 ${p.name}`)}
+                onEdit={() => setEditing(p)}
+                onLogin={() => run(p, "准备登录", () => api.prepareLogin(p.id), `已选择 ${p.name}，请在 10 分钟内完成浏览器登录。`)}
+                onFolder={() => api.openFolder(p.id).catch((e) => toast(errorText(e), "error"))}
+                onShortcut={() =>
+                  run(p, "创建中", async () => {
+                    const out = await api.createShortcut(p.id);
+                    toast(out.trim() || "已创建桌面快捷方式。");
+                  })
+                }
+                onDelete={() => setDeleting(p)}
+              />
+            ))}
+            {profiles.length === 1 && (
+              <button onClick={addAccount} className="flex w-full items-center justify-center gap-1.5 py-3 text-[12.5px] text-muted hover:bg-card-2 hover:text-fg active:!scale-100">
+                <Plus className="h-3.5 w-3.5" />
+                添加第二个账号，新建独立数据目录并打开登录界面
+              </button>
+            )}
           </div>
         )}
 
-        {profiles?.map((p) => (
-          <AccountCard
-            key={p.id}
-            p={p}
-            busy={busy[p.id]}
-            onLaunch={() => launch(p)}
-            onClose={() => run(p, "关闭中", () => api.close(p.id), `已关闭 ${p.name}`)}
-            onRestart={() => run(p, "重启中", () => api.restart(p.id), `已重启 ${p.name}`)}
-            onEdit={() => setEditing(p)}
-            onLogin={() => run(p, "准备登录", () => api.prepareLogin(p.id), `已选择 ${p.name}，请在 10 分钟内完成浏览器登录。`)}
-            onFolder={() => api.openFolder(p.id).catch((e) => toast(errorText(e), "error"))}
-            onShortcut={() =>
-              run(p, "创建中", async () => {
-                const out = await api.createShortcut(p.id);
-                toast(out.trim() || "已创建桌面快捷方式。");
-              })
-            }
-            onDelete={() => setDeleting(p)}
-          />
-        ))}
-
-        {profiles && profiles.length === 1 && (
-          <button
-            onClick={addAccount}
-            className="flex w-full flex-col items-center gap-1 rounded-lg border border-dashed border-border px-4 py-8 text-muted-foreground hover:border-blue-500/60 hover:text-foreground"
-          >
-            <Plus className="h-5 w-5" />
-            <span className="text-sm font-medium">添加第二个账号</span>
-            <span className="text-xs">新建一个独立的数据目录，并打开 Claude 的登录界面</span>
-          </button>
+        {profiles === null && !loadError && (
+          <div className="list-card">
+            {[0, 1].map((i) => (
+              <div key={i} className="flex items-center gap-3 px-4 py-3.5">
+                <div className="h-8 w-8 animate-pulse rounded-[9px] bg-pill" />
+                <div className="space-y-1.5"><div className="h-3 w-28 animate-pulse rounded bg-pill" /><div className="h-2.5 w-44 animate-pulse rounded bg-pill" /></div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
@@ -150,15 +153,13 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
           </>
         }
       >
-        <p className="selectable break-all rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground">
-          {deleting?.path}
-        </p>
+        <p className="selectable break-all rounded-lg bg-pill px-3 py-2 font-mono text-[11.5px] text-muted">{deleting?.path}</p>
       </Dialog>
-    </div>
+    </Page>
   );
 }
 
-interface CardProps {
+interface RowProps {
   p: Profile;
   busy?: string;
   onLaunch: () => void;
@@ -171,72 +172,57 @@ interface CardProps {
   onDelete: () => void;
 }
 
-function AccountCard({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, onFolder, onShortcut, onDelete }: CardProps) {
+function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, onFolder, onShortcut, onDelete }: RowProps) {
   const isRunning = !!p.pid;
   return (
-    <div
-      onDoubleClick={onLaunch}
-      className={cn(
-        "group flex items-center gap-4 rounded-lg border bg-card p-4 transition-colors",
-        isRunning ? "border-emerald-500/30" : "border-border hover:border-gray-300 dark:hover:border-gray-700",
-      )}
-    >
-      <div className="relative shrink-0">
-        <div
-          className="flex h-11 w-11 items-center justify-center rounded-xl text-lg font-semibold text-white"
-          style={{ background: PALETTE[p.color % PALETTE.length] }}
-        >
-          {badgeLetter(p.name)}
-        </div>
-        {isRunning && (
-          <span className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-card bg-emerald-500" />
-        )}
+    <div onDoubleClick={onLaunch} className="group flex items-center gap-3 px-4 py-3 hover:bg-card-2">
+      <div
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] text-[13.5px] font-semibold text-white"
+        style={{ background: PALETTE[p.color % PALETTE.length] }}
+      >
+        {badgeLetter(p.name)}
       </div>
 
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-[15px] font-semibold">{p.name}</span>
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-[13.5px] font-medium">{p.name}</span>
           {p.isDefault && <Tag>默认</Tag>}
-          {p.keepRunning && (
-            <Tag className="text-blue-600 dark:text-blue-400">
-              <ShieldCheck className="h-3 w-3" />
-              保持运行
-            </Tag>
-          )}
-          {p.signedIn === false && <Tag className="text-amber-600 dark:text-amber-400">未登录</Tag>}
+          {p.environment && <Tag tone="env">{p.environment}</Tag>}
+          {p.keepRunning && <Tag>保持运行</Tag>}
+          {p.signedIn === false && <Tag tone="warn">未登录</Tag>}
         </div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+        <div className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-muted">
+          <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", isRunning ? "bg-ok shadow-[0_0_0_3px_rgb(var(--ok-soft))]" : "bg-faint")} />
           <span className="shrink-0">{isRunning ? `运行中 · PID ${p.pid}` : `上次使用 ${relativeTime(p.lastUsed)}`}</span>
-          <span className="shrink-0">·</span>
+          <span className="shrink-0 text-faint">·</span>
           <span className="min-w-0 truncate" dir="rtl" title={p.path}>
             <bdi dir="ltr">{p.path}</bdi>
           </span>
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div className="flex shrink-0 items-center gap-1">
         {busy ? (
-          <span className="flex h-9 items-center gap-2 px-3 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
+          <span className="flex h-7 items-center gap-1.5 px-2 text-[12.5px] text-muted">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
             {busy}
           </span>
         ) : (
           <>
             {isRunning && (
-              <Button variant="ghost" size="icon" title="关闭" aria-label="关闭" onClick={onClose}>
-                <Power className="h-4 w-4" />
+              <Button variant="ghost" size="iconSm" title="关闭" aria-label="关闭" onClick={onClose}>
+                <Power />
               </Button>
             )}
-            <Button variant={isRunning ? "outline" : "default"} size="sm" className="h-9 min-w-[84px]" onClick={onLaunch}>
-              <Play className="h-3.5 w-3.5" />
-              {isRunning ? "切换到" : "启动"}
+            <Button variant="outline" size="sm" className="min-w-[72px]" onClick={onLaunch}>
+              {isRunning ? "切换到" : <><Play className="!h-3 !w-3" />启动</>}
             </Button>
           </>
         )}
         <Menu
           trigger={(toggle) => (
-            <Button variant="ghost" size="icon" aria-label="更多" onClick={toggle} disabled={!!busy}>
-              <MoreHorizontal className="h-4 w-4" />
+            <Button variant="ghost" size="iconSm" aria-label="更多" onClick={toggle} disabled={!!busy}>
+              <MoreHorizontal />
             </Button>
           )}
           items={[
@@ -253,12 +239,13 @@ function AccountCard({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, o
   );
 }
 
-function Tag({ children, className }: { children: React.ReactNode; className?: string }) {
+function Tag({ children, tone }: { children: React.ReactNode; tone?: "warn" | "env" }) {
   return (
     <span
+      title={tone === "env" ? "环境配置" : undefined}
       className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium leading-none text-muted-foreground",
-        className,
+        "inline-flex h-[18px] max-w-[160px] shrink-0 items-center truncate rounded-full px-1.5 text-[10.5px] font-medium",
+        tone === "warn" ? "bg-warn-soft text-warn" : tone === "env" ? "bg-brand-soft text-brand" : "bg-pill text-fg-2",
       )}
     >
       {children}

@@ -1,20 +1,13 @@
-import { NodeConfigForm } from "./NodeConfigForm";
-import { Globe2, Loader2, Network, ShieldCheck, Shuffle, X } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, errorText, type NodeConfig, type Profile } from "@/lib/api";
+import { api, errorText, type Profile } from "@/lib/api";
+import { EnvironmentPicker } from "./EnvironmentPicker";
 import { Button } from "./ui/button";
-import { Input, Label } from "./ui/input";
-
-const locales = [
-  ["", "跟随系统"], ["en-US", "英语（美国）"], ["en-GB", "英语（英国）"],
-  ["zh-CN", "简体中文"], ["zh-TW", "繁體中文"], ["ja-JP", "日语"], ["ko-KR", "韩语"],
-];
+import { Input } from "./ui/input";
 
 export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (profile: Profile) => Promise<void> }) {
   const [name, setName] = useState("");
-  const [node, setNode] = useState<NodeConfig | null>(null);
-  const [timezone, setTimezone] = useState("proxy");
-  const [locale, setLocale] = useState("");
+  const [environment, setEnvironment] = useState("");
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
@@ -22,14 +15,14 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    setName(""); setNode(null); setTimezone("proxy"); setLocale(""); setError(""); setReady(false);
+    setName(""); setEnvironment(""); setError(""); setReady(false);
     api.nextAccountName().then((n) => { if (!cancelled) { setName(n); setReady(true); } }).catch((e) => { if (!cancelled) setError(errorText(e)); });
     return () => { cancelled = true; };
   }, [open]);
 
   useEffect(() => {
     if (!open || loading) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !document.querySelector("[data-dialog-layer]")) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, loading, onClose]);
@@ -38,44 +31,48 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
 
   const create = async () => {
     setLoading(true); setError("");
-    try { await onCreated(await api.createConfiguredAccount(name, node, timezone, locale)); }
+    try { await onCreated(await api.createConfiguredAccount(name, environment)); }
     catch (e) { setError(errorText(e)); }
     finally { setLoading(false); }
-  };
-  const randomize = () => {
-    const array = new Uint32Array(1);
-    crypto.getRandomValues(array);
-    setLocale(locales[1 + (array[0] % (locales.length - 1))][0]);
   };
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/40 dark:bg-black/60" onClick={() => !loading && onClose()} />
-      <div role="dialog" aria-modal="true" aria-labelledby="create-account-title" className="relative flex h-full w-full max-w-[590px] flex-col border-l border-border bg-card shadow-2xl">
-        <div className="flex items-center justify-between border-b border-border px-6 py-5">
-          <div><h2 id="create-account-title" className="text-lg font-semibold">创建账号窗口</h2><p className="mt-1 text-xs text-muted-foreground">为这个窗口设置名称和网络配置</p></div>
-          <button aria-label="关闭" disabled={loading} onClick={onClose} className="rounded-md p-2 text-muted-foreground hover:bg-muted"><X className="h-4 w-4" /></button>
+      <div className="absolute inset-0 animate-fade-in bg-black/20 backdrop-blur-[2px] dark:bg-black/45" onClick={() => !loading && onClose()} />
+      <div role="dialog" aria-modal="true" aria-labelledby="create-account-title" className="relative flex h-full w-full max-w-[480px] animate-slide-in flex-col bg-bg shadow-pop">
+        <div data-tauri-drag-region className="flex h-12 shrink-0 items-center justify-between px-5">
+          <h2 id="create-account-title" className="text-[15px] font-semibold tracking-[-0.01em]">添加账号</h2>
+          <button aria-label="关闭" disabled={loading} onClick={onClose} className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] text-muted hover:bg-pill hover:text-fg">
+            <X className="h-4 w-4" />
+          </button>
         </div>
-        <div className="min-h-0 flex-1 space-y-7 overflow-y-auto px-6 py-6">
-          <section className="space-y-4">
-            <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500/10"><ShieldCheck className="h-4 w-4" /></span>基础设置</div>
-            <div className="space-y-2"><Label htmlFor="new-account-name">窗口名称</Label><Input id="new-account-name" value={name} maxLength={40} onChange={(e) => setName(e.target.value)} placeholder="请输入窗口名称" autoFocus /></div>
-            <p className="text-xs leading-5 text-muted-foreground">每个账号使用独立数据目录，登录状态分别保存。</p>
+
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 pb-5">
+          <section>
+            <div className="group-label">名称</div>
+            <div className="list-card">
+              <div className="px-4 py-2.5">
+                <Input id="new-account-name" aria-label="窗口名称" value={name} maxLength={40} onChange={(e) => setName(e.target.value)} placeholder="请输入窗口名称" autoFocus />
+              </div>
+            </div>
+            <p className="mt-1.5 px-1 text-[11.5px] leading-[18px] text-muted">每个账号使用独立的数据目录与登录态。</p>
           </section>
-          <section className="space-y-4 border-t border-border pt-6">
-            <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500/10"><Network className="h-4 w-4" /></span>网络设置</div>
-            <NodeConfigForm idPrefix="new-node" node={node} onNodeChange={setNode} timezone={timezone} onTimezoneChange={setTimezone} />
+
+          <section>
+            <div className="group-label">环境配置</div>
+            <EnvironmentPicker value={environment} onChange={setEnvironment} disabled={loading} />
+            <p className="mt-1.5 px-1 text-[11.5px] leading-[18px] text-muted">代理节点、时区、窗口语言与启动参数都在环境配置里；也可以在左侧“环境配置”中统一管理。</p>
           </section>
-          <section className="space-y-4 border-t border-border pt-6">
-            <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500/10"><Globe2 className="h-4 w-4" /></span>环境设置</div>
-            <div className="space-y-2"><Label htmlFor="new-account-locale">窗口语言</Label><select id="new-account-locale" value={locale} onChange={(e) => setLocale(e.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">{locales.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
-            <p className="text-xs leading-5 text-muted-foreground">随机生成仅选择窗口语言，不会修改设备、浏览器或网络指纹，也不能保证账号不被关联。代理节点与时区请在上方“网络设置”中配置。</p>
-          </section>
-          {error && <p role="alert" className="selectable rounded-md bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+          {error && <p role="alert" className="selectable rounded-xl bg-danger-soft px-4 py-3 text-[12.5px] text-danger">{error}</p>}
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-6 py-4">
-          <Button type="button" variant="outline" onClick={randomize} disabled={loading}><Shuffle className="h-4 w-4" />一键随机生成指纹配置</Button>
-          <div className="flex gap-2"><Button type="button" variant="outline" onClick={onClose} disabled={loading}>取消</Button><Button type="button" onClick={create} disabled={loading || !ready || !name.trim()}>{loading && <Loader2 className="h-4 w-4 animate-spin" />}确定</Button></div>
+
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line-2 px-5 py-3">
+          <Button variant="outline" onClick={onClose} disabled={loading}>取消</Button>
+          <Button onClick={create} disabled={loading || !ready || !name.trim()}>
+            {loading && <Loader2 className="animate-spin" />}
+            创建并打开
+          </Button>
         </div>
       </div>
     </div>

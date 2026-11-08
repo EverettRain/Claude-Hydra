@@ -31,10 +31,13 @@ export function Menu({ trigger, items }: { trigger: (toggle: () => void) => Reac
     <div ref={ref} className="relative">
       {trigger(() => setOpen((v) => !v))}
       {open && (
-        <div className="absolute right-0 top-full z-40 mt-1 min-w-[168px] animate-pop-in rounded-lg border border-border bg-card p-1 shadow-lg">
+        <div
+          style={{ background: "var(--pop)" }}
+          className="absolute right-0 top-full z-40 mt-1.5 min-w-[176px] origin-top-right animate-pop-in rounded-[10px] p-1 shadow-pop backdrop-blur-md"
+        >
           {items.map((item, i) =>
             item === "sep" ? (
-              <div key={i} className="my-1 h-px bg-border" />
+              <div key={i} className="mx-2 my-1 h-px bg-line-2" />
             ) : (
               <button
                 key={item.label}
@@ -44,13 +47,11 @@ export function Menu({ trigger, items }: { trigger: (toggle: () => void) => Reac
                   item.onSelect();
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm disabled:opacity-40",
-                  item.danger
-                    ? "text-red-500 hover:bg-red-500/10"
-                    : "text-foreground hover:bg-gray-100 dark:hover:bg-gray-800",
+                  "flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] disabled:opacity-35",
+                  item.danger ? "text-danger hover:bg-danger-soft" : "text-fg hover:bg-pill",
                 )}
               >
-                {item.icon && <item.icon className="h-4 w-4 shrink-0 opacity-70" />}
+                {item.icon && <item.icon className="h-[15px] w-[15px] shrink-0 opacity-60" />}
                 {item.label}
               </button>
             ),
