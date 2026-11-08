@@ -1,4 +1,4 @@
-import { ProxyField } from "./ProxyField";
+import { NodeConfigForm } from "./NodeConfigForm";
 import { Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, type Profile, type ProfileOptions } from "@/lib/api";
@@ -36,7 +36,7 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
     setError(null);
     try {
       await api.saveOptions(profile.id, opts);
-      toast(profile.pid ? "已保存。启动参数和环境变量在重启该账号后生效。" : "已保存。");
+      toast(profile.pid ? "已保存。代理节点的新连接立即生效；启动参数、时区和环境变量在重启该账号后生效。" : "已保存。");
       onSaved();
       onClose();
     } catch (e) {
@@ -52,7 +52,7 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
       onClose={onClose}
       title="编辑账号"
       description={profile.isDefault ? "默认账号使用 Claude 原有的数据目录。" : `数据目录：${profile.path}`}
-      className="max-w-lg"
+      className="max-w-2xl"
       footer={
         <>
           <Button variant="outline" onClick={onClose}>
@@ -123,14 +123,18 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
             <Switch id="acc-keep" checked={opts.keepRunning} onCheckedChange={(v) => setOpts({ ...opts, keepRunning: v })} />
           </div>
 
-          {!profile.isDefault && <ProxyField value={opts.proxyEndpoint} onChange={proxyEndpoint => setOpts({ ...opts, proxyEndpoint })} />}
+          <div className="space-y-3 rounded-lg border border-border p-3">
+            <Label>代理节点与时区</Label>
+            <NodeConfigForm idPrefix="edit-node" node={opts.node} onNodeChange={node => setOpts({ ...opts, node })}
+              timezone={opts.timezone} onTimezoneChange={timezone => setOpts({ ...opts, timezone })} lastExit={opts.lastExit} />
+          </div>
 
           <div className="space-y-1.5">
             <Label htmlFor="acc-args">额外启动参数</Label>
             <Input
               id="acc-args"
               className="font-mono text-xs"
-              placeholder="--proxy-server=http://127.0.0.1:7890"
+              placeholder="--disable-gpu"
               value={opts.args}
               disabled={profile.isDefault}
               onChange={(e) => setOpts({ ...opts, args: e.target.value })}
@@ -143,7 +147,7 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
             <Textarea
               id="acc-env"
               rows={4}
-              placeholder={"每行一个：名称=值\nHTTPS_PROXY=http://127.0.0.1:7890"}
+              placeholder={"每行一个：名称=值\n设置代理节点后，代理相关变量由 Hydra 管理"}
               value={opts.env}
               onChange={(e) => setOpts({ ...opts, env: e.target.value })}
             />

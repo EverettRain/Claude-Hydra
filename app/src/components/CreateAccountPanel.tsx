@@ -1,7 +1,7 @@
-import { ProxyField } from "./ProxyField";
+import { NodeConfigForm } from "./NodeConfigForm";
 import { Globe2, Loader2, Network, ShieldCheck, Shuffle, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, errorText, type Profile } from "@/lib/api";
+import { api, errorText, type NodeConfig, type Profile } from "@/lib/api";
 import { Button } from "./ui/button";
 import { Input, Label } from "./ui/input";
 
@@ -12,7 +12,8 @@ const locales = [
 
 export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (profile: Profile) => Promise<void> }) {
   const [name, setName] = useState("");
-  const [proxy, setProxy] = useState("");
+  const [node, setNode] = useState<NodeConfig | null>(null);
+  const [timezone, setTimezone] = useState("proxy");
   const [locale, setLocale] = useState("");
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
@@ -21,7 +22,7 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    setName(""); setProxy(""); setLocale(""); setError(""); setReady(false);
+    setName(""); setNode(null); setTimezone("proxy"); setLocale(""); setError(""); setReady(false);
     api.nextAccountName().then((n) => { if (!cancelled) { setName(n); setReady(true); } }).catch((e) => { if (!cancelled) setError(errorText(e)); });
     return () => { cancelled = true; };
   }, [open]);
@@ -37,7 +38,7 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
 
   const create = async () => {
     setLoading(true); setError("");
-    try { await onCreated(await api.createConfiguredAccount(name, proxy, locale)); }
+    try { await onCreated(await api.createConfiguredAccount(name, node, timezone, locale)); }
     catch (e) { setError(errorText(e)); }
     finally { setLoading(false); }
   };
@@ -63,12 +64,12 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
           </section>
           <section className="space-y-4 border-t border-border pt-6">
             <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500/10"><Network className="h-4 w-4" /></span>网络设置</div>
-            <ProxyField value={proxy} onChange={setProxy} />
+            <NodeConfigForm idPrefix="new-node" node={node} onNodeChange={setNode} timezone={timezone} onTimezoneChange={setTimezone} />
           </section>
           <section className="space-y-4 border-t border-border pt-6">
             <div className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500/10"><Globe2 className="h-4 w-4" /></span>环境设置</div>
             <div className="space-y-2"><Label htmlFor="new-account-locale">窗口语言</Label><select id="new-account-locale" value={locale} onChange={(e) => setLocale(e.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">{locales.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
-            <p className="text-xs leading-5 text-muted-foreground">随机生成仅选择窗口语言，不会修改设备、浏览器或网络指纹，也不能保证账号不被关联。代理地址需自行填写。</p>
+            <p className="text-xs leading-5 text-muted-foreground">随机生成仅选择窗口语言，不会修改设备、浏览器或网络指纹，也不能保证账号不被关联。代理节点与时区请在上方“网络设置”中配置。</p>
           </section>
           {error && <p role="alert" className="selectable rounded-md bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
         </div>

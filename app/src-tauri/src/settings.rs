@@ -30,10 +30,40 @@ pub struct AccountConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub args: String,
+    /// Legacy (v3.0) unauthenticated proxy entrance; migrated into `node` on read.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub proxy_endpoint: String,
+    /// Proxy node; its password is stored sealed (see `node::seal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<crate::node::NodeConfig>,
+    /// "" / "proxy" follow the node's exit region, "system" keeps the OS zone, else an IANA name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub timezone: String,
+    /// Stable local relay port so a running Claude keeps working across Hydra restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit: Option<crate::node::ExitInfo>,
     #[serde(default)]
     pub keep_running: bool,
+}
+
+impl AccountConfig {
+    /// The account's node with its password unsealed, including a migrated legacy entrance.
+    pub fn node(&self) -> Option<crate::node::NodeConfig> {
+        if let Some(n) = &self.node {
+            let mut n = n.clone();
+            n.password = crate::node::unseal(&n.password);
+            return n.validated().ok();
+        }
+        (!self.proxy_endpoint.is_empty()).then(|| crate::node::NodeConfig::from_legacy(&self.proxy_endpoint)).flatten()
+    }
+
+    /// Stores a node, sealing its password; `None` removes it.
+    pub fn set_node(&mut self, node: Option<crate::node::NodeConfig>) {
+        self.proxy_endpoint.clear();
+        self.node = node.map(|mut n| { n.password = crate::node::seal(&n.password); n });
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -83,6 +113,12 @@ pub fn save_to(path: &Path, settings: &Settings) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &json).map_err(|e| format!("无法写入设置文件：{e}"))?;
+    // Owner-only: the file may hold proxy credentials.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
     std::fs::rename(&tmp, path).map_err(|e| format!("无法保存设置文件：{e}"))
 }
 
@@ -116,5 +152,16 @@ mod tests {
         assert!(loaded_acc.keep_running);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn node_password_is_sealed_and_legacy_migrates() {
+        let mut acc = AccountConfig { proxy_endpoint: "http://127.0.0.1:8080".into(), ..Default::default() };
+        assert_eq!(acc.node().unwrap().port, 8080);
+        let node = crate::node::NodeConfig { kind: "socks5".into(), host: "h".into(), port: 1, username: "u".into(), password: "secret".into(), ..Default::default() };
+        acc.set_node(Some(node));
+        assert!(acc.proxy_endpoint.is_empty());
+        assert_ne!(acc.node.as_ref().unwrap().password, "secret");
+        assert_eq!(acc.node().unwrap().password, "secret");
     }
 }

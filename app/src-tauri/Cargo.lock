@@ -569,6 +569,7 @@ dependencies = [
  "cc",
  "pbkdf2",
  "reqwest 0.12.28",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -576,6 +577,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "url",
+ "webpki-roots",
  "windows-sys 0.59.0",
 ]
 

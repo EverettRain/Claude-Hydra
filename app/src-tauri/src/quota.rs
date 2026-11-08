@@ -107,20 +107,24 @@ fn token(_dir: &Path) -> Result<String, String> { Err("当前平台暂不支持�
 pub fn fetch(profile: &crate::profiles::Profile) -> Result<Quota, String> {
     let credential = token(Path::new(&profile.path))?;
     let settings = crate::settings::load();
+    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none());
+    if let Some(node) = settings.account(&profile.id).node() {
+        // Same exit as the account itself; never a direct connection.
+        return query(node.client(Duration::from_secs(15))?, credential);
+    }
     let vars = crate::profiles::env_vars(&settings, &profile.id);
     let proxy = ["HTTPS_PROXY", "ALL_PROXY", "HTTP_PROXY"].iter().find_map(|key| vars.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str()));
     let args = crate::profiles::extra_args(&settings, &profile.id);
-    if proxy.is_none() && args.contains("--proxy-server") { return Err("该账号仅通过启动参数配置代理，额度查询无法安全确定代理地址。请在账号环境变量中配置 HTTPS_PROXY。".into()); }
-    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none());
-    let managed = settings.account(&profile.id).proxy_endpoint;
-    if !managed.is_empty() {
-        builder = builder.no_proxy().proxy(crate::proxy::transport(&managed)?);
-    } else if let Some(p) = proxy {
+    if proxy.is_none() && args.contains("--proxy-server") { return Err("该账号仅通过启动参数配置代理，额度查询无法安全确定代理地址。请改用账号的代理节点设置。".into()); }
+    if let Some(p) = proxy {
         let parsed = url::Url::parse(p).map_err(|_| "账号代理地址无效。")?;
         if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") { return Err("账号代理类型不受支持。".into()); }
         builder = builder.no_proxy().proxy(reqwest::Proxy::all(p).map_err(|_| "账号代理地址无效。")?);
     }
-    let client = builder.build().map_err(|_| "无法初始化网络连接。")?;
+    query(builder.build().map_err(|_| "无法初始化网络连接。")?, credential)
+}
+
+fn query(client: reqwest::blocking::Client, credential: String) -> Result<Quota, String> {
     let response = client.get("https://api.anthropic.com/api/oauth/usage").bearer_auth(credential).header("anthropic-beta", "oauth-2025-04-20").send().map_err(|_| "额度查询连接失败，请检查账号代理和网络。")?;
     let status = response.status();
     if !status.is_success() { return Err(match status.as_u16() { 401 | 403 => "登录凭据已过期或没有查询权限；请在 Claude 中重新登录。".into(), 429 => "额度服务暂时限流，请稍后再试。".into(), _ => format!("额度服务返回错误（HTTP {}）。", status.as_u16()) }); }

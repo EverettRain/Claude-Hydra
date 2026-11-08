@@ -258,7 +258,13 @@ pub struct ProfileOptions {
     pub env: String,
     pub args: String,
     #[serde(default)]
-    pub proxy_endpoint: String,
+    pub node: Option<crate::node::NodeConfig>,
+    /// "proxy" (follow node exit), "system", or an IANA timezone name.
+    #[serde(default)]
+    pub timezone: String,
+    /// Last exit seen at launch or check; read-only for the UI.
+    #[serde(default, skip_deserializing)]
+    pub last_exit: Option<crate::node::ExitInfo>,
     pub keep_running: bool,
 }
 
@@ -294,7 +300,9 @@ pub fn options(install: &Install, id: &str) -> Result<ProfileOptions, String> {
     let acc = s.account(id);
     Ok(ProfileOptions {
         name: p.name,
-        proxy_endpoint: acc.proxy_endpoint.clone(),
+        node: acc.node(),
+        timezone: if acc.timezone.is_empty() { "proxy".into() } else { acc.timezone.clone() },
+        last_exit: acc.last_exit.clone(),
         color: acc.custom_color.map(|v| (v % PALETTE_LEN) as i32).unwrap_or(-1),
         env: env_vars(&s, id)
             .iter()
@@ -303,6 +311,17 @@ pub fn options(install: &Install, id: &str) -> Result<ProfileOptions, String> {
             .join("\n"),
         args: extra_args(&s, id),
         keep_running: p.keep_running,
+    })
+}
+
+/// "" / "proxy" → follow the node; "system" → OS zone; otherwise a validated IANA name.
+pub fn normalize_timezone(tz: &str) -> Result<String, String> {
+    let tz = tz.trim();
+    Ok(match tz {
+        "" | "proxy" => String::new(),
+        "system" => "system".into(),
+        _ if crate::node::valid_timezone(tz) => tz.to_string(),
+        _ => return Err(format!("时区“{tz}”无效，请使用 IANA 名称，例如 Asia/Tokyo。")),
     })
 }
 
@@ -334,19 +353,25 @@ pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(
     if name != current.name {
         validate_name(install, name, Some(id))?;
     }
-    let proxy = o.proxy_endpoint.trim();
-    if !proxy.is_empty() {
-        crate::proxy::transport(proxy)?;
-        if current.is_default && install.is_msix() { return Err("商店版默认账号不支持独立代理入口。".into()); }
-        if crate::proxy::args_conflict(&o.args) { return Err("请移除额外启动参数中的代理设置，再使用独立代理入口。".into()); }
+    let node = o.node.as_ref().map(|n| n.validated()).transpose()?;
+    let timezone = normalize_timezone(&o.timezone)?;
+    let store_default = current.is_default && install.is_msix();
+    if node.is_some() {
+        if store_default { return Err("商店版默认账号不支持代理节点。".into()); }
+        if crate::node::args_conflict(&o.args) { return Err("请移除额外启动参数中的代理开关，再使用代理节点。".into()); }
     }
+    if store_default && !matches!(timezone.as_str(), "" | "system") { return Err("商店版默认账号不支持单独的时区设置。".into()); }
     let env = parse_env_lines(&o.env)?;
     settings::update(|s| {
         let acc = s.account_mut(id);
         acc.label = (!name.is_empty() && name != id).then(|| name.to_string());
         acc.custom_color = (o.color >= 0).then(|| (o.color as usize) % PALETTE_LEN);
         acc.env = env;
-        acc.proxy_endpoint = proxy.to_owned();
+        if acc.node.is_some() || node.is_some() || !acc.proxy_endpoint.is_empty() {
+            if node.as_ref() != acc.node().as_ref() { acc.relay_port = acc.relay_port.filter(|_| node.is_some()); acc.last_exit = None; }
+            acc.set_node(node.clone());
+        }
+        acc.timezone = timezone.clone();
         acc.args = o.args.trim().to_string();
         acc.keep_running = o.keep_running;
     })

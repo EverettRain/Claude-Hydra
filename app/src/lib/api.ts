@@ -18,8 +18,18 @@ export interface ProfileOptions {
   env: string;
   args: string;
   keepRunning: boolean;
-  proxyEndpoint: string;
+  node: NodeConfig | null;
+  /** "proxy" | "system" | IANA name */
+  timezone: string;
+  lastExit: ExitInfo | null;
 }
+
+export type NodeKind = "http" | "https" | "socks5";
+export interface NodeConfig {
+  kind: NodeKind; host: string; port: number; username: string; password: string;
+  ipVersion: "ipv4" | "ipv6"; geoChannel: "ipinfo" | "ipapi" | "ip-api"; refreshUrl: string;
+}
+export interface ExitInfo { ip: string; country: string; region: string; city: string; timezone: string; checkedAt: number }
 
 export interface Install {
   kind: string;
@@ -57,7 +67,8 @@ export const api = {
   restart: (id: string) => invoke<string>("restart_profile", { id }),
   addAccount: () => invoke<Profile>("add_account"),
   nextAccountName: () => invoke<string>("next_account_name"),
-  createConfiguredAccount: (name: string, proxy: string, locale: string) => invoke<Profile>("create_configured_account", { name, proxy, locale }),
+  createConfiguredAccount: (name: string, node: NodeConfig | null, timezone: string, locale: string) =>
+    invoke<Profile>("create_configured_account", { name, node, timezone, locale }),
   options: (id: string) => invoke<ProfileOptions>("profile_options", { id }),
   saveOptions: (id: string, options: ProfileOptions) => invoke<void>("save_profile_options", { id, options }),
   remove: (id: string) => invoke<void>("delete_profile", { id }),
@@ -67,7 +78,8 @@ export const api = {
   prepareLogin: (id: string) => invoke<void>("prepare_login", { id }),
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
-  checkProxy: (endpoint: string) => invoke<string>("check_proxy", { endpoint }),
+  checkNode: (node: NodeConfig) => invoke<ExitInfo>("check_node", { node }),
+  refreshNodeIp: (url: string) => invoke<string>("refresh_node_ip", { url }),
   profileQuota: (id: string) => invoke<Quota>("profile_quota", { id }),
   sessionPreview: (source: string, target: string) => invoke<SessionPreview>("session_preview", { source, target }),
   copySessions: (source: string, target: string, ids: string[]) => invoke<TransferResult>("copy_sessions", { source, target, ids }),

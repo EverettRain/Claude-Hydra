@@ -6,8 +6,9 @@ pub mod launcher;
 pub mod login;
 pub mod paths;
 pub mod profiles;
-mod proxy;
+pub mod node;
 pub mod quota;
+pub mod relay;
 pub mod sessions;
 pub mod settings;
 pub mod sys;
@@ -115,43 +116,25 @@ fn next_account_name(app: AppHandle) -> Result<String, String> {
     Ok(profiles::next_account_name(&current_install(&app)?))
 }
 
-fn valid_proxy(proxy: &str) -> bool {
-    let Ok(url) = url::Url::parse(proxy) else { return false };
-    proxy.chars().all(|c| c.is_ascii_alphanumeric() || ":/.-[]".contains(c))
-        && matches!(url.scheme(), "http" | "https" | "socks5") && url.host_str().is_some() && url.port_or_known_default().is_some()
-        && url.username().is_empty() && url.password().is_none() && matches!(url.path(), "" | "/") && url.query().is_none() && url.fragment().is_none()
-}
-
-#[cfg(test)]
-mod proxy_tests {
-    #[test]
-    fn accepts_only_simple_proxy_urls() {
-        for value in ["http://127.0.0.1:7890", "socks5://localhost:1080", "http://[::1]:8080"] { assert!(super::valid_proxy(value), "{value}"); }
-        for value in ["http://user:pass@host:80", "http://host:80/path", "http://host:80\" --no-proxy-server", "socks5://host", "file://host:80"] { assert!(!super::valid_proxy(value), "{value}"); }
-    }
-}
-
 #[tauri::command]
-async fn create_configured_account(app: AppHandle, name: String, proxy: String, locale: String) -> Result<Profile, String> {
+async fn create_configured_account(app: AppHandle, name: String, node: Option<node::NodeConfig>, timezone: String, locale: String) -> Result<Profile, String> {
     let a = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let install = current_install(&a)?;
         let name = name.trim();
         profiles::validate_name(&install, name, None)?;
-        let proxy = proxy.trim();
-        if !proxy.is_empty() && !valid_proxy(proxy) {
-            return Err("请输入不含用户名、密码或路径的 HTTP、HTTPS 或 SOCKS5 代理地址。".to_string());
-        }
+        let node = node.map(|n| n.validated()).transpose()?;
+        let timezone = profiles::normalize_timezone(&timezone)?;
         if !["", "en-US", "en-GB", "zh-CN", "zh-TW", "ja-JP", "ko-KR"].contains(&locale.as_str()) {
             return Err("不支持此语言设置。".to_string());
         }
         let p = profiles::create(&install, name)?;
-        let mut args = Vec::new();
-        if !locale.is_empty() { args.push(format!("--lang={locale}")); }
-        if let Err(e) = settings::update(|s| { let acc = s.account_mut(&p.id); acc.args = args.join(" "); acc.proxy_endpoint = proxy.to_string(); }) {
+        let args = if locale.is_empty() { String::new() } else { format!("--lang={locale}") };
+        if let Err(e) = settings::update(|s| { let acc = s.account_mut(&p.id); acc.args = args; acc.set_node(node); acc.timezone = timezone; }) {
             let _ = std::fs::remove_dir(&p.path);
             return Err(e);
         }
+        relay::sync_all();
         if let Err(e) = launcher::launch(&install, &p) { return Err(format!("账号已创建，但启动失败：{e}")); }
         Ok(p)
     }).await.map_err(|e| e.to_string())?;
@@ -160,8 +143,16 @@ async fn create_configured_account(app: AppHandle, name: String, proxy: String, 
 }
 
 #[tauri::command]
-async fn check_proxy(endpoint: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || proxy::verify(&endpoint)).await.map_err(|_| "检测任务失败。".to_string())?
+async fn check_node(node: node::NodeConfig) -> Result<node::ExitInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let node = node.validated()?;
+        node::inspect(&node.client(Duration::from_secs(15))?, &node)
+    }).await.map_err(|_| "检测任务失败。".to_string())?
+}
+
+#[tauri::command]
+async fn refresh_node_ip(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || node::refresh(&url)).await.map_err(|_| "刷新任务失败。".to_string())?
 }
 
 #[tauri::command]
@@ -172,6 +163,7 @@ fn profile_options(app: AppHandle, id: String) -> Result<ProfileOptions, String>
 #[tauri::command]
 fn save_profile_options(app: AppHandle, id: String, options: ProfileOptions) -> Result<(), String> {
     profiles::save_options(&current_install(&app)?, &id, &options)?;
+    relay::sync_all();
     after_change(&app);
     Ok(())
 }
@@ -179,6 +171,7 @@ fn save_profile_options(app: AppHandle, id: String, options: ProfileOptions) -> 
 #[tauri::command]
 fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     profiles::remove(&current_install(&app)?, &id)?;
+    relay::sync_all();
     after_change(&app);
     Ok(())
 }
@@ -500,7 +493,8 @@ pub fn run(start_in_tray: bool) {
             next_account_name,
             create_configured_account,
             profile_options,
-            check_proxy,
+            check_node,
+            refresh_node_ip,
             save_profile_options,
             delete_profile,
             open_profile_folder,
@@ -519,6 +513,9 @@ pub fn run(start_in_tray: bool) {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            // This process hosts the per-account proxy relays for as long as it runs.
+            relay::set_host();
+            relay::sync_all();
             let list = current_install(&handle).map(|i| profiles::list(&i, true)).unwrap_or_default();
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip("Claude-Hydra")

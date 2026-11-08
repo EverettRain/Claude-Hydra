@@ -21,11 +21,36 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
 
     let s = settings::load();
     let outcome = if running.is_some() { "focused" } else { "started" };
-
-    let endpoint = s.account(&p.id).proxy_endpoint;
-    if !endpoint.is_empty() {
-        if p.is_default && install.is_msix() { return Err("商店版默认账号无法应用独立代理入口。".into()); }
-        crate::proxy::verify(&endpoint).map_err(|e| format!("账号未启动：{e}"))?;
+    let acc = s.account(&p.id);
+    let node = acc.node();
+    let extra = profiles::extra_args(&s, &p.id);
+    let mut env = profiles::env_vars(&s, &p.id);
+    // Hydra-managed switches; passed as separate arguments (some contain spaces).
+    let mut managed: Vec<String> = Vec::new();
+    let mut timezone = match acc.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
+    if (node.is_some() || timezone.is_some()) && p.is_default && install.is_msix() {
+        return Err("商店版默认账号无法应用代理节点或时区设置。".into());
+    }
+    if let Some(node) = &node {
+        if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
+        let port = crate::relay::port_for_launch(&p.id, node).map_err(|e| format!("账号未启动：{e}"))?;
+        // Verify the exact route Claude will use: local relay -> node -> internet.
+        let client = crate::node::relay_client(port, std::time::Duration::from_secs(15))?;
+        let exit = crate::node::inspect(&client, node).map_err(|e| format!("账号未启动：{e}"))?;
+        if matches!(acc.timezone.as_str(), "" | "proxy") {
+            if exit.timezone.is_empty() {
+                return Err("账号未启动：IP 查询服务没有返回出口时区。请换一个 IP 查询渠道，或在账号设置中手动指定时区。".into());
+            }
+            timezone = Some(exit.timezone.clone());
+        }
+        let _ = settings::update(|s| s.account_mut(&p.id).last_exit = Some(exit));
+        managed = crate::node::chromium_args(port);
+        env.retain(|(k, _)| !crate::node::is_proxy_env(k));
+        env.extend(crate::node::child_env(port));
+    }
+    if let Some(tz) = timezone {
+        env.retain(|(k, _)| !k.eq_ignore_ascii_case("TZ"));
+        env.push(("TZ".into(), tz));
     }
     if p.is_default && install.is_msix() {
         let aumid = install.aumid.as_deref().ok_or("缺少商店版应用标识。")?;
@@ -40,16 +65,6 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     if !p.is_default {
         std::fs::create_dir_all(&path).map_err(|e| format!("无法创建账号目录：{e}"))?;
     }
-    let mut extra = profiles::extra_args(&s, &p.id);
-    let mut env = profiles::env_vars(&s, &p.id);
-    if !endpoint.is_empty() {
-        if crate::proxy::args_conflict(&extra) { return Err("额外启动参数与独立代理入口冲突。".into()); }
-        extra = format!("{extra} --proxy-server={endpoint} --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp");
-        for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
-            env.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
-            env.push((key.to_string(), if key == "NO_PROXY" { String::new() } else { endpoint.clone() }));
-        }
-    }
 
     #[cfg(target_os = "macos")]
     {
@@ -63,6 +78,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         if !p.is_default {
             pass.push(format!("--user-data-dir={}", p.path));
         }
+        pass.extend(managed);
         pass.extend(extra.split_whitespace().map(str::to_string));
         if !pass.is_empty() {
             cmd.arg("--args").args(pass);
@@ -81,6 +97,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         if !p.is_default {
             line.push(format!("--user-data-dir=\"{}\"", p.path));
         }
+        line.extend(managed.into_iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a }));
         if !extra.is_empty() {
             line.push(extra);
         }
