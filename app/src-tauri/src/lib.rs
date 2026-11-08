@@ -243,10 +243,10 @@ fn diagnostics(app: AppHandle) -> String {
 }
 
 #[tauri::command]
-async fn session_preview(app: AppHandle, source: String, target: String) -> Result<sessions::Preview, String> {
+async fn session_preview(app: AppHandle, source: String, target: String, trash: Option<bool>) -> Result<sessions::Preview, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (i, s) = find(&app, &source)?;
-        if target.is_empty() { return sessions::source_preview(&i, &s); }
+        if target.is_empty() { return sessions::source_preview(&i, &s, trash.unwrap_or(false)); }
         let (_, t) = find(&app, &target)?;
         sessions::preview(&i, &s, &t)
     }).await.map_err(|_| "读取会话任务失败。".to_string())?
@@ -259,6 +259,30 @@ async fn copy_sessions(app: AppHandle, source: String, target: String, ids: Vec<
         let (_, t) = find(&app, &target)?;
         sessions::copy(&i, &s, &t, &ids)
     }).await.map_err(|_| "迁移任务失败。".to_string())?
+}
+
+#[tauri::command]
+async fn read_import(app: AppHandle, account: String, id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (i, p) = find(&app, &account)?;
+        sessions::read_import(&i, &p, &id)
+    }).await.map_err(|_| "会话操作失败。".to_string())?
+}
+
+#[tauri::command]
+async fn import_chats(app: AppHandle, account: String, raw: String) -> Result<sessions::TransferResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (i, p) = find(&app, &account)?;
+        sessions::import_chats(&i, &p, &raw)
+    }).await.map_err(|_| "会话操作失败。".to_string())?
+}
+
+#[tauri::command]
+async fn recycle_session(app: AppHandle, account: String, action: String, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (i, p) = find(&app, &account)?;
+        sessions::recycle(&i, &p, &action, &id)
+    }).await.map_err(|_| "会话操作失败。".to_string())?
 }
 
 #[tauri::command]
@@ -547,6 +571,9 @@ pub fn run(start_in_tray: bool) {
             prepare_login,
             diagnostics,
             session_preview,
+            read_import,
+            import_chats,
+            recycle_session,
             copy_sessions,
             profile_quota,
             save_transcript,

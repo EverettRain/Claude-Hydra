@@ -67,7 +67,7 @@ export interface QuotaWindow { utilization: number; resetsAt: string | null }
 export interface Quota { fiveHour: QuotaWindow | null; sevenDay: QuotaWindow | null; fetchedAt: number }
 
 export interface CodeSession {
-  id: string; title: string; cwd: string | null; cwdExists: boolean; lastActivityAt: number | null; inTarget: boolean;
+  id: string; title: string; cwd: string | null; cwdExists: boolean; lastActivityAt: number | null; model: string | null; turns: number | null; inTarget: boolean;
 }
 export interface SessionPreview { sessions: CodeSession[]; targetProblem: string | null; running: boolean }
 export interface TransferResult { copied: number; skipped: number; failed: number }
@@ -96,7 +96,10 @@ export const api = {
   checkNode: (node: NodeConfig) => invoke<[ExitInfo, string | null, string]>("check_node", { node }),
   refreshNodeIp: (url: string) => invoke<string>("refresh_node_ip", { url }),
   profileQuota: (id: string) => invoke<Quota>("profile_quota", { id }),
-  sessionPreview: (source: string, target: string) => invoke<SessionPreview>("session_preview", { source, target }),
+  recycleSession: (account: string, action: "delete" | "restore" | "empty", id = "") => invoke<void>("recycle_session", { account, action, id }),
+  importChats: (account: string, raw: string) => invoke<TransferResult>("import_chats", { account, raw }),
+  readImport: (account: string, id: string) => invoke<string>("read_import", { account, id }),
+  sessionPreview: (source: string, target: string, trash = false) => invoke<SessionPreview>("session_preview", { source, target, trash }),
   copySessions: (source: string, target: string, ids: string[]) => invoke<TransferResult>("copy_sessions", { source, target, ids }),
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),

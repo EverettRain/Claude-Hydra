@@ -1,175 +1,173 @@
-import { CheckCircle2, ClipboardCopy, FileJson, FolderSearch, Loader2, Search, Upload } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown, Folder, Search, Trash2, Upload } from "lucide-react";
 import { AccountPicker } from "@/components/AccountPicker";
-import { CodeSessionMigration } from "@/components/CodeSessionMigration";
-import { Group, Page, PageHeader } from "@/components/PageHeader";
+import { Page } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
-import { api, errorText, type Profile } from "@/lib/api";
+import { Dialog } from "@/components/ui/dialog";
+import { useToast } from "@/components/ui/toast";
+import { api, errorText, type CodeSession, type Profile, type TransferResult } from "@/lib/api";
 import { readChats } from "@/lib/chatExport";
-import { cn } from "@/lib/utils";
 
-const PROMPT = "请阅读附件中的旧对话，理解上下文后从最后一个未完成的问题继续。";
-
-type Chat = ReturnType<typeof readChats>[number];
-interface Done { path: string; account: string; title: string }
-
-/** Turns one exported chat into an attachment, then opens the chosen account ready to continue it. */
-function ChatImport({ profiles }: { profiles: Profile[] | null }) {
-  const [chats, setChats] = useState<Chat[]>([]);
-  const [fileName, setFileName] = useState("");
-  const [query, setQuery] = useState("");
-  const [index, setIndex] = useState<number | null>(null);
-  const [target, setTarget] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [done, setDone] = useState<Done | null>(null);
-  const input = useRef<HTMLInputElement>(null);
-
-  const shown = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return chats.map((c, i) => ({ c, i })).filter(({ c }) => !q || c.title.toLowerCase().includes(q));
-  }, [chats, query]);
-  const chat = index === null ? null : chats[index];
-  const targetName = profiles?.find((p) => p.id === target)?.name;
-
-  async function read(file?: File) {
-    setChats([]); setIndex(null); setError(""); setDone(null); setQuery(""); setFileName(file?.name ?? "");
-    if (!file) return;
-    setBusy(true);
-    try {
-      const list = readChats(await file.text());
-      setChats(list);
-      if (list.length === 1) setIndex(0);
-    } catch (e) {
-      setError(e instanceof SyntaxError ? "JSON 文件无法读取。请解压导出包并选择 conversations.json。" : errorText(e));
-    } finally {
-      setBusy(false);
-      if (input.current) input.current.value = "";
-    }
-  }
-
-  async function importChat() {
-    if (!chat || !target) return;
-    setBusy(true); setError(""); setDone(null);
-    try {
-      const path = await api.saveTranscript([`# ${chat.title}`, ...chat.turns].join("\n\n"));
-      await navigator.clipboard.writeText(PROMPT).catch(() => undefined);
-      await api.launch(target);
-      await api.revealTranscript(path).catch(() => undefined);
-      setDone({ path, account: targetName ?? target, title: chat.title });
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Group label="普通聊天续聊">
-      <div className="px-4 py-3">
-        <input ref={input} aria-label="选择普通聊天导出文件" type="file" accept=".json,application/json" className="hidden" disabled={busy} onChange={(e) => void read(e.target.files?.[0])} />
-        <button
-          onClick={() => input.current?.click()}
-          disabled={busy}
-          className="flex w-full items-center gap-3 rounded-lg border border-dashed border-line bg-card-2 px-3.5 py-3 text-left hover:border-faint hover:bg-pill active:!scale-100"
-        >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-card text-fg-2 shadow-card">
-            {fileName ? <FileJson className="h-4 w-4" /> : <Upload className="h-4 w-4" />}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13px] font-medium">{fileName ? fileName : "选择 conversations.json"}</span>
-            <span className="block truncate text-[11.5px] text-muted">
-              {fileName && chats.length ? `${chats.length} 个可续聊的聊天 · 点击更换文件` : "在来源账号的 Claude 中打开“设置 → 隐私 → 导出数据”，解压后选择其中的 conversations.json"}
-            </span>
-          </span>
-        </button>
-      </div>
-
-      {chats.length > 0 && (
-        <div className="px-4 py-3">
-          {chats.length > 6 && (
-            <div className="relative mb-2">
-              <Search className="pointer-events-none absolute left-2.5 top-2 h-4 w-4 text-faint" />
-              <input aria-label="搜索聊天" className="field pl-8" placeholder="搜索聊天标题" value={query} onChange={(e) => setQuery(e.target.value)} />
-            </div>
-          )}
-          <div role="radiogroup" aria-label="选择聊天" className="max-h-56 space-y-0.5 overflow-y-auto">
-            {shown.map(({ c, i }) => (
-              <button
-                key={i}
-                role="radio"
-                aria-checked={index === i}
-                onClick={() => { setIndex(i); setDone(null); }}
-                className={cn("flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left active:!scale-100", index === i ? "bg-pill" : "hover:bg-card-2")}
-              >
-                <span className={cn("flex h-4 w-4 shrink-0 items-center justify-center rounded-full border", index === i ? "border-fg bg-fg" : "border-faint")}>
-                  {index === i && <span className="h-1.5 w-1.5 rounded-full bg-card" />}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[13px]">{c.title}</span>
-                <span className="shrink-0 text-[11px] tabular-nums text-muted">{c.turns.length} 条</span>
-              </button>
-            ))}
-            {!shown.length && <p className="px-2.5 py-2 text-[12px] text-muted">没有匹配的聊天。</p>}
-          </div>
-        </div>
-      )}
-
-      {chat && (
-        <div className="grid grid-cols-[56px_1fr] items-start gap-3 px-4 py-3">
-          <span className="pt-1.5 text-[12.5px] text-fg-2">导入到</span>
-          <AccountPicker label="导入到账号" profiles={profiles} value={target} disabled={busy} onChange={(id) => { setTarget(id); setDone(null); }} />
-        </div>
-      )}
-
-      {chat && (
-        <div className="flex items-center gap-3 px-4 py-3">
-          <p className="min-w-0 flex-1 text-[11.5px] leading-[18px] text-muted">
-            将保存所选聊天的文本到下载目录、复制续聊提示，并打开目标账号；原上传的文件需另行添加。
-          </p>
-          <Button disabled={busy || !target} onClick={importChat}>
-            {busy && <Loader2 className="animate-spin" />}
-            {targetName ? `导入到 ${targetName}` : "选择目标账号"}
-          </Button>
-        </div>
-      )}
-
-      {done && (
-        <div className="space-y-2.5 bg-ok-soft/50 px-4 py-3">
-          <div className="flex items-center gap-2 text-[13px] font-medium text-ok">
-            <CheckCircle2 className="h-4 w-4" />
-            已打开 {done.account}，还差两步
-          </div>
-          <ol className="list-decimal space-y-1 pl-9 text-[12.5px] leading-5 text-fg-2">
-            <li>在 Claude 中新建聊天，把文件管理器里选中的附件拖进去。</li>
-            <li>粘贴已复制的续聊提示（{navigator.userAgent.includes("Mac") ? "⌘V" : "Ctrl+V"}）并发送。</li>
-          </ol>
-          <div className="flex flex-wrap gap-1.5 pl-6">
-            <Button variant="outline" size="sm" onClick={() => api.revealTranscript(done.path).catch((e) => setError(errorText(e)))}>
-              <FolderSearch />
-              再次显示附件
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(PROMPT).catch(() => setError("无法写入剪贴板。"))}>
-              <ClipboardCopy />
-              重新复制提示
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {error && <p role="alert" className="selectable px-4 py-2.5 text-[12.5px] text-danger">{error}</p>}
-    </Group>
-  );
-}
+type Action = { type: "move"; ids: string[] } | { type: "import" } | { type: "empty" };
+const imported = (id: string) => id.startsWith("import/") && id.split("/").length === 4;
+const directory = (s: CodeSession) => imported(s.id) ? "导入的聊天" : s.cwd || "未记录工作目录";
+const leaf = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() || path;
+const summary = (r: TransferResult) => `完成 ${r.copied} 条，已存在 ${r.skipped} 条，失败 ${r.failed} 条。`;
 
 export function SessionsPage({ profiles }: { profiles: Profile[] | null }) {
-  const [source, setSource] = useState("");
-  return (
-    <Page>
-      <PageHeader title="会话迁移" subtitle="在账号之间复制本地 Claude Code 会话，或把普通聊天带到另一个账号继续。" />
-      <div className="space-y-5 px-5">
-        <CodeSessionMigration profiles={profiles} source={source} setSource={setSource} />
-        {!source && <ChatImport profiles={profiles} />}
-      </div>
-    </Page>
-  );
+  const [selected, setSelected] = useState("");
+  const account = profiles?.find(p => p.id === selected) ?? profiles?.[0];
+  return <Page><div className="space-y-3 px-5">
+    {account ? <Library key={account.id} account={account} profiles={profiles ?? []} select={setSelected} />
+      : <p className="text-sm text-muted">{profiles ? "还没有账号。" : "正在读取账号…"}</p>}
+  </div></Page>;
+}
+
+function Library({ account, profiles, select }: { account: Profile; profiles: Profile[]; select: (id: string) => void }) {
+  const toast = useToast();
+  const [trash, setTrash] = useState(false);
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<CodeSession[] | null>(null);
+  const [error, setError] = useState("");
+  const [revision, refresh] = useState(0);
+  const [collapsed, setCollapsed] = useState(new Set<string>());
+  const [picking, setPicking] = useState(false);
+  const [picked, setPicked] = useState(new Set<string>());
+  const [action, setAction] = useState<Action | null>(null);
+  const [target, setTarget] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [chat, setChat] = useState<{ title: string; turns: string[] } | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    let current = true;
+    setRows(null); setError("");
+    api.sessionPreview(account.id, "", trash).then(v => { if (current) setRows(v.sessions); })
+      .catch(e => { if (current) setError(errorText(e)); });
+    return () => { current = false; };
+  }, [account.id, trash, revision]);
+
+  const groups = new Map<string, CodeSession[]>();
+  for (const row of rows ?? []) {
+    const key = directory(row);
+    const group = groups.get(key) ?? [];
+    group.push(row); groups.set(key, group);
+  }
+  const needle = query.trim().toLocaleLowerCase();
+  const matches = (s: CodeSession) => (s.title + " " + directory(s)).toLocaleLowerCase().includes(needle);
+  const shown = (rows ?? []).filter(matches);
+  const toggle = (ids: string[]) => setPicked(old => {
+    const next = new Set(old), remove = ids.every(id => next.has(id));
+    for (const id of ids) { if (remove) next.delete(id); else next.add(id); }
+    return next;
+  });
+  const open = (next: Action) => {
+    setAction(next);
+    setTarget(next.type === "import" ? account.id : "");
+  };
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    try { await fn(); refresh(n => n + 1); }
+    catch (e) { toast(errorText(e), "error"); }
+    finally { setBusy(false); }
+  };
+  const submit = () => run(async () => {
+    if (action?.type === "move") {
+      toast(summary(await api.copySessions(account.id, target, action.ids)));
+      setPicked(new Set());
+    } else if (action?.type === "import" && file) {
+      toast(summary(await api.importChats(target, await file.text())));
+      select(target); setTrash(false); setQuery("");
+    } else if (action?.type === "empty") {
+      await api.recycleSession(account.id, "empty"); toast("回收站已清空");
+    }
+    setAction(null);
+  });
+  const read = (s: CodeSession) => run(async () => {
+    const raw = await api.readImport(account.id, s.id);
+    setChat(readChats("[" + raw + "]")[0]);
+  });
+  return <>
+    <div className="flex flex-wrap items-center gap-2">
+      <select aria-label="切换账号" className="field w-auto max-w-48" value={account.id} disabled={busy} onChange={e => select(e.target.value)}>
+        {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      <label className="relative ml-auto min-w-32 flex-1">
+        <Search className="absolute left-2.5 top-2 h-4 w-4 text-muted" />
+        <input className="field pl-8" aria-label="搜索会话" placeholder="搜索会话或工作目录" value={query} onChange={e => setQuery(e.target.value)} />
+      </label>
+      {!trash && <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setPicking(!picking); setPicked(new Set()); }}>{picking ? "取消选择" : "选择"}</Button>}
+      <Button size="sm" variant={trash ? "outline" : "ghost"} disabled={busy} onClick={() => { setRows(null); setTrash(!trash); setPicking(false); setPicked(new Set()); setQuery(""); }}>
+        <Trash2 />{trash ? "返回会话" : "回收站"}
+      </Button>
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => input.current?.click()}><Upload />导入聊天JSON</Button>
+      <input ref={input} type="file" accept=".json,application/json" hidden onChange={e => {
+        const chosen = e.currentTarget.files?.[0];
+        e.currentTarget.value = "";
+        if (chosen) { setFile(chosen); open({ type: "import" }); }
+      }} />
+    </div>
+    {trash && <div className="flex items-center justify-between"><strong>回收站 · {account.name}</strong>
+      <Button size="sm" variant="outline" disabled={busy || !rows?.length} onClick={() => open({ type: "empty" })}>彻底清空</Button></div>}
+    {picking && <div className="flex items-center gap-3 text-sm">
+      <Button size="sm" variant="ghost" disabled={!shown.length || busy} onClick={() => toggle(shown.map(s => s.id))}>全选搜索结果</Button>
+      <Button size="sm" disabled={!picked.size || busy} onClick={() => open({ type: "move", ids: [...picked] })}>迁移所选（{picked.size}）</Button>
+    </div>}
+    {error && <p role="alert" className="text-sm text-danger">{error} <button onClick={() => refresh(n => n + 1)}>重试</button></p>}
+    {!error && (!rows || !shown.length) && <p className="py-6 text-center text-sm text-muted">{!rows ? "正在读取会话…" : needle ? "没有匹配的会话。" : trash ? "回收站为空。" : "此账号暂无本地会话。"}</p>}
+    {[...groups].map(([path, all]) => {
+      const list = all.filter(matches);
+      if (!list.length) return null;
+      const folded = collapsed.has(path) && !needle;
+      return <section key={path} className="list-card">
+        <div className="flex items-center gap-2 bg-card-2 px-3 py-2">
+          <button className="flex min-w-0 flex-1 items-center gap-2 text-left" aria-expanded={!folded} onClick={() => {
+            const next = new Set(collapsed); if (next.has(path)) next.delete(path); else next.add(path); setCollapsed(next);
+          }}>
+            <ChevronDown className={`h-3 w-3 shrink-0 ${folded ? "-rotate-90" : ""}`} /><Folder className="h-4 w-4 shrink-0 text-muted" />
+            <span className="min-w-0"><strong className="block truncate text-sm">{leaf(path)}</strong>
+              <span className="block truncate text-xs text-muted" title={path}>{path !== leaf(path) ? path + " · " : ""}{all.length} 个会话</span></span>
+          </button>
+          {!trash && <Button size="sm" variant="ghost" disabled={busy} onClick={() => open({ type: "move", ids: all.map(s => s.id) })}>迁移整组</Button>}
+        </div>
+        {!folded && list.map(s => <div key={s.id} className="flex items-center gap-2 px-4 py-2">
+          {picking && <input aria-label={`选择 ${s.title}`} type="checkbox" checked={picked.has(s.id)} onChange={() => toggle([s.id])} />}
+          <div className="min-w-0 flex-1"><div className="truncate text-[13px]" title={s.title}>{imported(s.id) && !trash
+            ? <button onClick={() => read(s)} className="hover:underline">{s.title}</button> : s.title}</div>
+            <small className="block truncate text-muted" title={s.model ?? undefined}>
+              {s.lastActivityAt != null ? new Date(s.lastActivityAt).toLocaleString("zh-CN", {month:"2-digit", day:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit"}) : "时间未知"}
+              {" · "}{s.model || "模型未知"}{" · "}{s.turns == null ? "轮数未知" : `${s.turns} 轮`}
+            </small></div>
+          {!trash && <Button size="sm" variant="outline" disabled={busy} onClick={() => open({ type: "move", ids: [s.id] })}>迁移</Button>}
+          <Button size={trash ? "sm" : "iconSm"} variant="ghost" aria-label={trash ? "还原" : "删除"} title={trash ? "还原" : "移入回收站"} disabled={busy} onClick={() => run(async () => {
+            await api.recycleSession(account.id, trash ? "restore" : "delete", s.id);
+            setPicked(old => { const next = new Set(old); next.delete(s.id); return next; });
+            toast(trash ? "已还原会话" : "已移入回收站");
+          })}>{trash ? "还原" : <Trash2 />}</Button>
+        </div>)}
+      </section>;
+    })}
+    <Dialog open={!!action} onClose={() => { if (!busy) setAction(null); }}
+      title={action?.type === "empty" ? "彻底清空回收站？" : action?.type === "move" ? `迁移 ${action.ids.length} 个会话` : "导入聊天 JSON"}
+      description={action?.type === "empty" ? `将永久删除「${account.name}」回收站中的全部会话，无法还原。` : action?.type === "move"
+        ? "选择目标账号。复制后保留来源会话，目标中已有的会话会跳过。" : "将 Claude 导出的聊天保存到所选账号的本地会话列表。"}
+      footer={<><Button variant="ghost" disabled={busy} onClick={() => setAction(null)}>取消</Button>
+        <Button variant={action?.type === "empty" ? "destructive" : "default"} disabled={busy || (action?.type !== "empty" && !target) || (action?.type === "import" && !file)} onClick={submit}>
+          {busy ? "处理中…" : action?.type === "empty" ? "永久删除" : action?.type === "move" ? "迁移" : "导入"}</Button></>}>
+      {action && action.type !== "empty" && <div className="space-y-3">
+        <AccountPicker label="目标账号" profiles={profiles} disabled={busy} value={target} onChange={setTarget} exclude={action.type === "move" ? account.id : undefined} />
+        {action.type === "move" && profiles.length < 2 && <p className="text-sm text-muted">请先添加另一个账号。</p>}
+        {action.type === "import" && <p className="break-all text-sm text-muted">已选择：{file?.name}</p>}
+      </div>}
+    </Dialog>
+    <Dialog open={!!chat} title={chat?.title ?? ""} onClose={() => setChat(null)}
+      footer={<Button disabled={busy} onClick={() => run(async () => {
+        if (!chat) return;
+        const path = await api.saveTranscript([chat.title, ...chat.turns].join("\n\n"));
+        await api.launch(account.id); await api.revealTranscript(path);
+        toast("将文本附件添加到 Claude 新聊天即可续聊。");
+      })}>在此账号续聊</Button>}>
+      <div className="selectable whitespace-pre-wrap text-sm">{chat?.turns.join("\n\n")}</div>
+    </Dialog>
+  </>;
 }

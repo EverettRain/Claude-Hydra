@@ -4,6 +4,8 @@
 //! transcripts themselves stay where Claude Code wrote them. Originals are never moved or
 //! overwritten, and both accounts must be closed so no index is copied mid-write.
 use crate::{install::Install, profiles::{self, Profile}};
+#[path = "session_metrics.rs"]
+mod metrics;
 use serde::Serialize;
 use serde_json::Value;
 use std::{fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}};
@@ -16,6 +18,10 @@ pub struct Session {
     cwd: Option<String>,
     cwd_exists: bool,
     last_activity_at: Option<u64>,
+    model: Option<String>,
+    turns: Option<u64>,
+    #[serde(skip)]
+    transcript_id: Option<String>,
     /// Whether the target account already has an index with the same file name.
     in_target: bool,
 }
@@ -84,13 +90,17 @@ fn collect(path: &Path) -> Result<Vec<Entry>, String> {
             if !name.starts_with("local_") || !name.ends_with(".json") { continue; }
             let json = fs::read(entry.path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
             let cwd = text(&json, &["cwd", "originCwd"]);
+            let stats = metrics::index_metrics(&json);
             out.push(Entry {
                 session: Session {
                     id: format!("{account}/{org}/{name}"),
                     title: text(&json, &["title", "name", "summary", "customTitle", "displayName"]).unwrap_or_else(|| name.clone()),
                     cwd_exists: cwd.as_deref().map(|c| Path::new(c).is_dir()).unwrap_or(false),
                     cwd,
-                    last_activity_at: json.get("lastActivityAt").and_then(Value::as_u64),
+                    last_activity_at: stats.time,
+                    model: stats.model,
+                    turns: stats.turns,
+                    transcript_id: text(&json, &["cliSessionId"]),
                     in_target: false,
                 },
                 path: entry.path(),
@@ -118,9 +128,111 @@ fn is_running(install: &Install, profiles: &[&Profile]) -> bool {
     profiles.iter().any(|p| running.contains_key(&profiles::path_key(&p.path)))
 }
 
-pub fn source_preview(install: &Install, source: &Profile) -> Result<Preview, String> {
-    let sessions = collect(&root(install, source))?.into_iter().map(|e| e.session).collect();
+// Imported chats belong to the selected Hydra profile. Keep them outside Claude's
+// native index directory so Desktop never tries to open an export as a Code session.
+fn library(install: &Install, p: &Profile, trash: bool, imported: bool) -> PathBuf {
+    let native = root(install, p);
+    if !trash && !imported { return native; }
+    let kind = if imported { "chats" } else { "code" };
+    native.with_file_name("hydra-session-library").join(if trash { "trash" } else { "active" }).join(kind)
+}
+
+fn entries(install: &Install, p: &Profile, trash: bool) -> Result<Vec<Entry>, String> {
+    let mut native = collect(&library(install, p, trash, false))?;
+    let mut imports = collect(&library(install, p, trash, true))?;
+    for entry in &mut imports { entry.session.id = format!("import/{}", entry.session.id); }
+    native.extend(imports);
+    Ok(native)
+}
+
+pub fn source_preview(install: &Install, source: &Profile, trash: bool) -> Result<Preview, String> {
+    let mut sessions: Vec<_> = entries(install, source, trash)?.into_iter().map(|e| e.session).collect();
+    let ids = sessions.iter().filter(|s| s.id.split('/').count() == 3).filter_map(|s| s.transcript_id.clone()).collect();
+    let logs = metrics::lookup(&ids);
+    for session in &mut sessions {
+        if session.id.split('/').count() != 3 { continue; }
+        if let Some(stats) = session.transcript_id.as_ref().and_then(|id| logs.get(id)) {
+            session.turns = stats.turns.or(session.turns);
+            session.model = stats.model.clone().or(session.model.take());
+            session.last_activity_at = session.last_activity_at.max(stats.time);
+        }
+    }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity_at));
     Ok(Preview { sessions, target_problem: None, running: is_running(install, &[source]) })
+}
+
+fn insert_file(dest: &Path, bytes: &[u8]) -> Result<bool, String> {
+    let mut file = match OpenOptions::new().create_new(true).write(true).open(dest) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => return Err(err.to_string()),
+    };
+    if let Err(err) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(dest);
+        return Err(err.to_string());
+    }
+    Ok(true)
+}
+
+fn store_dir(root: &Path, account: &str, org: &str) -> Result<PathBuf, String> {
+    let mut dir = root.to_path_buf();
+    for part in [None, Some(account), Some(org)] {
+        if let Some(part) = part { dir.push(part); }
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        if !fs::symlink_metadata(&dir).map_err(|e| e.to_string())?.file_type().is_dir() {
+            return Err("会话目录不是普通目录。".into());
+        }
+    }
+    Ok(dir)
+}
+
+pub fn recycle(install: &Install, p: &Profile, action: &str, id: &str) -> Result<(), String> {
+    let trash = action != "delete";
+    let items = entries(install, p, trash)?;
+    if action == "empty" {
+        for e in items { fs::remove_file(e.path).map_err(|e| e.to_string())?; }
+        return Ok(());
+    }
+    if !matches!(action, "delete" | "restore") { return Err("未知操作。".into()); }
+    let item = items.iter().find(|e| e.session.id == id).ok_or("会话已变更，请刷新。")?;
+    let imported = item.session.id.starts_with("import/") && item.session.id.split('/').count() == 4;
+    if !imported && is_running(install, &[p]) { return Err("请先退出该 Claude 账号，再修改本地会话。".into()); }
+    let dest = store_dir(&library(install, p, !trash, imported), &item.account, &item.org)?
+        .join(item.path.file_name().ok_or("无效会话文件名")?);
+    // Refuse to replace an existing entry on both delete and restore.
+    fs::hard_link(&item.path, &dest).map_err(|e| format!("无法移动会话（目标可能已存在）：{e}"))?;
+    if let Err(err) = fs::remove_file(&item.path) {
+        let _ = fs::remove_file(dest);
+        return Err(err.to_string());
+    }
+    Ok(())
+}
+
+pub fn import_chats(install: &Install, p: &Profile, raw: &str) -> Result<TransferResult, String> {
+    use sha2::{Digest, Sha256};
+    let json: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}')).map_err(|_| "JSON 格式无效。")?;
+    let rows = match json { Value::Array(rows) => rows, row => vec![row] };
+    if rows.is_empty() || rows.iter().any(|r| r.get("chat_messages").and_then(Value::as_array).is_none()) {
+        return Err("请选择 Claude 导出的 conversations.json 或单个含 chat_messages 的聊天。".into());
+    }
+    let dir = store_dir(&library(install, p, false, true), "archive", "chats")?;
+    let mut result = TransferResult { copied: 0, skipped: 0, failed: 0 };
+    for row in rows {
+        let bytes = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
+        let digest = Sha256::digest(row.get("uuid").and_then(Value::as_str).filter(|s| !s.is_empty())
+            .map(str::as_bytes).unwrap_or(&bytes));
+        match insert_file(&dir.join(format!("local_{digest:x}.json")), &bytes) {
+            Ok(true) => result.copied += 1, Ok(false) => result.skipped += 1, Err(_) => result.failed += 1,
+        }
+    }
+    Ok(result)
+}
+
+pub fn read_import(install: &Install, p: &Profile, id: &str) -> Result<String, String> {
+    let item = entries(install, p, false)?.into_iter().find(|e| e.session.id == id && id.split('/').count() == 4)
+        .ok_or("找不到导入的聊天。")?;
+    fs::read_to_string(item.path).map_err(|e| e.to_string())
 }
 
 pub fn preview(install: &Install, source: &Profile, target: &Profile) -> Result<Preview, String> {
@@ -171,11 +283,25 @@ fn copy_into(available: &[Entry], dest: &Path, ids: &[String]) -> Result<Transfe
 pub fn copy(install: &Install, source: &Profile, target: &Profile, ids: &[String]) -> Result<TransferResult, String> {
     if source.id == target.id { return Err("来源和目标账号不能相同。".into()); }
     if ids.is_empty() { return Err("请选择会话。".into()); }
-    if is_running(install, &[source, target]) {
-        return Err("为避免正在写入的会话损坏，请先自行关闭来源和目标账号再迁移。Hydra 不会自动关闭它们。".into());
+    let items = entries(install, source, false)?;
+    let (imports, native): (Vec<_>, Vec<_>) = ids.iter().cloned()
+        .partition(|id| id.starts_with("import/") && id.split('/').count() == 4);
+    let mut result = TransferResult { copied: 0, skipped: 0, failed: 0 };
+    if !native.is_empty() {
+        if is_running(install, &[source, target]) { return Err("请先关闭来源和目标 Claude 账号，再迁移本地会话。".into()); }
+        result = copy_into(&items, &target_store(install, target)?, &native)?;
     }
-    let dest = target_store(install, target)?;
-    copy_into(&collect(&root(install, source))?, &dest, ids)
+    if !imports.is_empty() {
+        let dest = store_dir(&library(install, target, false, true), "archive", "chats")?;
+        for id in imports {
+            let Some(item) = items.iter().find(|e| e.session.id == id) else { result.failed += 1; continue };
+            let bytes = fs::read(&item.path).map_err(|e| e.to_string())?;
+            match insert_file(&dest.join(item.path.file_name().ok_or("无效文件名")?), &bytes) {
+                Ok(true) => result.copied += 1, Ok(false) => result.skipped += 1, Err(_) => result.failed += 1,
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -186,6 +312,57 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hydra-session-{name}-{}-{}", std::process::id(), crate::paths::now_millis()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    fn fixture(path: &Path, id: &str) -> Profile {
+        Profile {
+            id: id.into(), name: id.into(), badge: id.into(), path: path.join(id).to_string_lossy().into(),
+            is_default: false, pid: None, last_used: None, color: 0, keep_running: false, signed_in: None, environment: None,
+        }
+    }
+
+    #[test]
+    fn import_migrate_restore_and_empty_are_account_scoped() {
+        let dir = temp("library");
+        let install = Install { kind: "Classic".into(), exe: None, version: None, family: None, aumid: None, default_profile: dir.clone() };
+        let a = fixture(&dir, "a");
+        let b = fixture(&dir, "b");
+        let raw = r#"[{"uuid":"1","name":"Demo","chat_messages":[{"sender":"human","text":"Hi"}]}]"#;
+        assert_eq!(import_chats(&install, &a, raw).unwrap().copied, 1);
+        assert_eq!(import_chats(&install, &a, raw).unwrap().skipped, 1);
+        let id = source_preview(&install, &a, false).unwrap().sessions.remove(0).id;
+        assert_eq!(copy(&install, &a, &b, std::slice::from_ref(&id)).unwrap().copied, 1);
+        assert_eq!(copy(&install, &a, &b, std::slice::from_ref(&id)).unwrap().skipped, 1);
+        recycle(&install, &a, "delete", &id).unwrap();
+        assert!(entries(&install, &a, false).unwrap().is_empty());
+        recycle(&install, &a, "restore", &id).unwrap();
+        assert!(read_import(&install, &a, &id).unwrap().contains("Hi"));
+        recycle(&install, &a, "delete", &id).unwrap();
+        import_chats(&install, &a, raw).unwrap();
+        assert!(recycle(&install, &a, "restore", &id).is_err());
+        recycle(&install, &b, "delete", &id).unwrap();
+        recycle(&install, &a, "empty", "").unwrap();
+        assert!(entries(&install, &a, true).unwrap().is_empty());
+        assert_eq!(entries(&install, &a, false).unwrap().len(), 1);
+        assert_eq!(entries(&install, &b, true).unwrap().len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recycling_a_native_index_preserves_original_bytes_and_directory() {
+        let dir = temp("native-trash");
+        let install = Install { kind: "Classic".into(), exe: None, version: None, family: None, aumid: None, default_profile: dir.clone() };
+        let p = fixture(&dir, "src");
+        let store = store_dir(&root(&install, &p), "user", "org").unwrap();
+        let path = store.join("local_demo.json");
+        let raw = br#"{"title":"Demo","cwd":"project"}"#;
+        fs::write(&path, raw).unwrap();
+        let id = "user/org/local_demo.json";
+        recycle(&install, &p, "delete", id).unwrap();
+        assert!(!path.exists());
+        recycle(&install, &p, "restore", id).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
