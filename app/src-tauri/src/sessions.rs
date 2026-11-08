@@ -2,7 +2,9 @@
 //!
 //! Only `claude-code-sessions/<account>/<org>/local_*.json` index files are copied; the
 //! transcripts themselves stay where Claude Code wrote them. Originals are never moved or
-//! overwritten, and both accounts must be closed so no index is copied mid-write.
+//! overwritten. The source may keep running (indexes are only read, with a retry for a
+//! half-written file); the target must be closed because Desktop loads its session list
+//! once at startup, so Hydra closes it, copies, and launches it again.
 use crate::{install::Install, profiles::{self, Profile}};
 #[path = "session_metrics.rs"]
 mod metrics;
@@ -245,7 +247,7 @@ pub fn preview(install: &Install, source: &Profile, target: &Profile) -> Result<
             s.in_target = dest.join(name).exists();
         }
     }
-    Ok(Preview { sessions, target_problem: store.err(), running: is_running(install, &[source, target]) })
+    Ok(Preview { sessions, target_problem: store.err(), running: is_running(install, &[target]) })
 }
 
 fn replace_values(v: &mut Value, old_account: &str, old_org: &str, account: &str, org: &str) {
@@ -257,6 +259,20 @@ fn replace_values(v: &mut Value, old_account: &str, old_org: &str, account: &str
     }
 }
 
+/// Read and parse an index; Desktop may be rewriting it right now, so retry a torn read.
+fn read_index(path: &Path) -> Option<Value> {
+    for attempt in 0..3 {
+        if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(150)); }
+        if let Some(v) = fs::read(path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) { return Some(v); }
+    }
+    None
+}
+
+/// Whether copying `ids` writes native indexes the target's running Desktop would miss.
+pub fn needs_closed_target(install: &Install, target: &Profile, ids: &[String]) -> bool {
+    ids.iter().any(|id| !(id.starts_with("import/") && id.split('/').count() == 4)) && is_running(install, &[target])
+}
+
 fn copy_into(available: &[Entry], dest: &Path, ids: &[String]) -> Result<TransferResult, String> {
     let account = dest.parent().and_then(Path::file_name).and_then(|v| v.to_str()).ok_or("目标账号路径无效。")?;
     let org = dest.file_name().and_then(|v| v.to_str()).ok_or("目标组织路径无效。")?;
@@ -264,8 +280,7 @@ fn copy_into(available: &[Entry], dest: &Path, ids: &[String]) -> Result<Transfe
     for id in ids {
         let Some(entry) = available.iter().find(|x| &x.session.id == id) else { result.failed += 1; continue };
         let Some(name) = entry.path.file_name() else { result.failed += 1; continue };
-        let Ok(bytes) = fs::read(&entry.path) else { result.failed += 1; continue };
-        let Ok(mut json) = serde_json::from_slice::<Value>(&bytes) else { result.failed += 1; continue };
+        let Some(mut json) = read_index(&entry.path) else { result.failed += 1; continue };
         replace_values(&mut json, &entry.account, &entry.org, account, org);
         let Ok(data) = serde_json::to_vec_pretty(&json) else { result.failed += 1; continue };
         let file = dest.join(name);
@@ -288,7 +303,7 @@ pub fn copy(install: &Install, source: &Profile, target: &Profile, ids: &[String
         .partition(|id| id.starts_with("import/") && id.split('/').count() == 4);
     let mut result = TransferResult { copied: 0, skipped: 0, failed: 0 };
     if !native.is_empty() {
-        if is_running(install, &[source, target]) { return Err("请先关闭来源和目标 Claude 账号，再迁移本地会话。".into()); }
+        if is_running(install, &[target]) { return Err(format!("目标账号「{}」正在运行，需要重启后才能迁移本地会话。", target.name)); }
         result = copy_into(&items, &target_store(install, target)?, &native)?;
     }
     if !imports.is_empty() {

@@ -269,12 +269,28 @@ async fn session_preview(app: AppHandle, source: String, target: String, trash: 
 }
 
 #[tauri::command]
-async fn copy_sessions(app: AppHandle, source: String, target: String, ids: Vec<String>) -> Result<sessions::TransferResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let (i, s) = find(&app, &source)?;
-        let (_, t) = find(&app, &target)?;
-        sessions::copy(&i, &s, &t, &ids)
-    }).await.map_err(|_| "迁移任务失败。".to_string())?
+async fn copy_sessions(app: AppHandle, source: String, target: String, ids: Vec<String>, restart: Option<bool>) -> Result<sessions::TransferResult, String> {
+    let a = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let (i, s) = find(&a, &source)?;
+        let (_, t) = find(&a, &target)?;
+        // Desktop reads its session list only at startup: close the target, copy, relaunch.
+        let restart = restart.unwrap_or(false) && sessions::needs_closed_target(&i, &t, &ids);
+        if restart { launcher::close(&i, &t)?; }
+        let copied = sessions::copy(&i, &s, &t, &ids);
+        if restart {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if let Err(e) = launcher::launch(&i, &t) {
+                return Err(match copied {
+                    Ok(_) => format!("会话已迁移，但重新启动「{}」失败：{e}", t.name),
+                    Err(c) => format!("{c}（重新启动「{}」也失败：{e}）", t.name),
+                });
+            }
+        }
+        copied
+    }).await.map_err(|_| "迁移任务失败。".to_string())?;
+    after_change(&app);
+    r
 }
 
 #[tauri::command]

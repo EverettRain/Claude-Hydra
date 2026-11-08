@@ -108,7 +108,7 @@ export const api = {
   importChats: (account: string, raw: string) => invoke<TransferResult>("import_chats", { account, raw }),
   readImport: (account: string, id: string) => invoke<string>("read_import", { account, id }),
   sessionPreview: (source: string, target: string, trash = false) => invoke<SessionPreview>("session_preview", { source, target, trash }),
-  copySessions: (source: string, target: string, ids: string[]) => invoke<TransferResult>("copy_sessions", { source, target, ids }),
+  copySessions: (source: string, target: string, ids: string[], restart = false) => invoke<TransferResult>("copy_sessions", { source, target, ids, restart }),
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   setClaudePath: (path: string | null) => invoke<void>("set_claude_path", { path }),

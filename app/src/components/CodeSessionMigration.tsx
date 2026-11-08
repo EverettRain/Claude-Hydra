@@ -62,7 +62,7 @@ export function CodeSessionMigration({ profiles, source, setSource }: { profiles
         <>
           {(preview.running || preview.targetProblem) && (
             <div className="space-y-1 bg-warn-soft/60 px-4 py-2.5 text-[12px] text-warn">
-              {preview.running && <p>来源或目标账号正在运行。请先自行退出这两个账号，再点“重新读取”。Hydra 不会自动关闭它们。</p>}
+              {preview.running && <p>目标账号正在运行。请先退出目标账号，再点“重新读取”。</p>}
               {preview.targetProblem && <p>{preview.targetProblem}</p>}
             </div>
           )}

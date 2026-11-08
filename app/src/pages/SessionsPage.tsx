@@ -38,6 +38,7 @@ function Library({ account, profiles, select }: { account: Profile; profiles: Pr
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [chat, setChat] = useState<{ title: string; turns: string[] } | null>(null);
+  const [confirmRestart, setConfirmRestart] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     let current = true;
@@ -71,9 +72,13 @@ function Library({ account, profiles, select }: { account: Profile; profiles: Pr
     catch (e) { toast(errorText(e), "error"); }
     finally { setBusy(false); }
   };
-  const submit = () => run(async () => {
+  const targetProfile = profiles.find(p => p.id === target);
+  // Desktop loads its session list at startup, so a running target must restart to see new sessions.
+  const needsRestart = action?.type === "move" && !!targetProfile?.pid && action.ids.some(id => !imported(id));
+  const submit = (restart = false) => run(async () => {
     if (action?.type === "move") {
-      toast(summary(await api.copySessions(account.id, target, action.ids)));
+      setConfirmRestart(false);
+      toast(summary(await api.copySessions(account.id, target, action.ids, restart)) + (restart ? `已重启「${targetProfile?.name}」。` : ""));
       setPicked(new Set());
     } else if (action?.type === "import" && file) {
       toast(summary(await api.importChats(target, await file.text())));
@@ -152,7 +157,8 @@ function Library({ account, profiles, select }: { account: Profile; profiles: Pr
       description={action?.type === "empty" ? `将永久删除「${account.name}」回收站中的全部会话，无法还原。` : action?.type === "move"
         ? "选择目标账号。复制后保留来源会话，目标中已有的会话会跳过。" : "将 Claude 导出的聊天保存到所选账号的本地会话列表。"}
       footer={<><Button variant="ghost" disabled={busy} onClick={() => setAction(null)}>取消</Button>
-        <Button variant={action?.type === "empty" ? "destructive" : "default"} disabled={busy || (action?.type !== "empty" && !target) || (action?.type === "import" && !file)} onClick={submit}>
+        <Button variant={action?.type === "empty" ? "destructive" : "default"} disabled={busy || (action?.type !== "empty" && !target) || (action?.type === "import" && !file)}
+          onClick={() => needsRestart ? setConfirmRestart(true) : submit()}>
           {busy ? "处理中…" : action?.type === "empty" ? "永久删除" : action?.type === "move" ? "迁移" : "导入"}</Button></>}>
       {action && action.type !== "empty" && <div className="space-y-3">
         <AccountPicker label="目标账号" profiles={profiles} disabled={busy} value={target} onChange={setTarget} exclude={action.type === "move" ? account.id : undefined} />
@@ -160,6 +166,11 @@ function Library({ account, profiles, select }: { account: Profile; profiles: Pr
         {action.type === "import" && <p className="break-all text-sm text-muted">已选择：{file?.name}</p>}
       </div>}
     </Dialog>
+    <Dialog open={confirmRestart && !!action} onClose={() => { if (!busy) setConfirmRestart(false); }}
+      title={`需要重启「${targetProfile?.name ?? ""}」`}
+      description={`迁移成功后需要重启「${targetProfile?.name ?? ""}」账号，迁移的会话才会显示。重启会关闭该账号当前的窗口和正在运行的任务。`}
+      footer={<><Button variant="ghost" disabled={busy} onClick={() => setConfirmRestart(false)}>取消</Button>
+        <Button disabled={busy} onClick={() => submit(true)}>{busy ? "处理中…" : "立即重启"}</Button></>} />
     <Dialog open={!!chat} title={chat?.title ?? ""} onClose={() => setChat(null)}
       footer={<Button disabled={busy} onClick={() => run(async () => {
         if (!chat) return;
