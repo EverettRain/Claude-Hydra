@@ -71,6 +71,53 @@ impl Install {
         }
         self.exe.clone()
     }
+
+    /// The folder that really holds the data of a profile launched with `path`.
+    ///
+    /// Store builds may virtualize `%APPDATA%` / `%LOCALAPPDATA%` writes into the package's
+    /// `LocalCache`, or not (a folder that existed before the package was installed stays
+    /// real, and newer builds exclude their data folders from virtualization). The two views
+    /// can even be split, with a few files mirrored into `LocalCache` and the rest in the real
+    /// folder. So every place the data could be is checked and the one Claude used is taken.
+    pub fn data_dir(&self, path: &Path) -> PathBuf {
+        let mut candidates = vec![path.to_path_buf()];
+        #[cfg(windows)]
+        if let Some(cache) = self.package_cache() {
+            for (var, sub) in [("APPDATA", "Roaming"), ("LOCALAPPDATA", "Local")] {
+                let Some(base) = std::env::var_os(var).map(PathBuf::from) else { continue };
+                if let Ok(rel) = path.strip_prefix(&base) {
+                    candidates.push(cache.join(sub).join(rel));
+                }
+            }
+        }
+        best_data_dir(candidates).unwrap_or_else(|| path.to_path_buf())
+    }
+
+    /// `%LOCALAPPDATA%\Packages\<family>\LocalCache` of a Store build.
+    #[cfg(windows)]
+    fn package_cache(&self) -> Option<PathBuf> {
+        if !self.is_msix() {
+            return None;
+        }
+        Some(local_app_data()?.join("Packages").join(self.family.as_ref()?).join("LocalCache"))
+    }
+}
+
+/// Of the folders that hold Claude data, the one Claude used last. A full Chromium profile
+/// (`Local State`) wins over a folder holding only a few mirrored files.
+pub fn best_data_dir(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    const MARKERS: [&str; 5] = ["Local State", "config.json", "Preferences", "Network/Cookies", "window-state.json"];
+    candidates
+        .into_iter()
+        .filter_map(|dir| {
+            let newest = MARKERS
+                .iter()
+                .filter_map(|m| std::fs::metadata(dir.join(m)).ok()?.modified().ok())
+                .max()?;
+            Some(((dir.join("Local State").is_file(), newest), dir))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, dir)| dir)
 }
 
 #[cfg(windows)]
@@ -78,7 +125,33 @@ fn local_app_data() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
 }
 
+#[cfg(windows)]
+fn roaming_app_data() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(PathBuf::from)
+}
+
+/// Every place the default profile of a Windows build can live, preferred first when none
+/// holds data yet: `%APPDATA%\Claude` (classic builds, and Store builds on machines that had it
+/// before), the Store package's virtualized copy of it, and `%LOCALAPPDATA%\Claude-Data`,
+/// where newer builds move their data out of the package.
+#[cfg(windows)]
+fn default_candidates(package: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(pkg) = package {
+        out.push(pkg.join("LocalCache\\Roaming\\Claude"));
+    }
+    out.extend(roaming_app_data().map(|d| d.join("Claude")));
+    out.extend(local_app_data().map(|d| d.join("Claude-Data")));
+    out
+}
+
 fn classic(exe: PathBuf) -> Install {
+    #[cfg(windows)]
+    let default_profile = {
+        let candidates = default_candidates(None);
+        best_data_dir(candidates.clone()).unwrap_or_else(|| candidates[0].clone())
+    };
+    #[cfg(not(windows))]
     let default_profile = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_default()
@@ -100,13 +173,14 @@ fn msix(family: &str, version: Option<String>, exe: Option<PathBuf>) -> Option<I
     if !pkg.is_dir() {
         return None;
     }
+    let candidates = default_candidates(Some(&pkg));
     Some(Install {
         kind: "Msix".into(),
         exe: exe.filter(|e| e.exists()),
         version,
         family: Some(family.to_string()),
         aumid: Some(format!("{family}!Claude")),
-        default_profile: pkg.join("LocalCache\\Roaming\\Claude"),
+        default_profile: best_data_dir(candidates.clone()).unwrap_or_else(|| candidates[0].clone()),
     })
 }
 
@@ -269,6 +343,27 @@ mod tests {
         assert!(i.is_desktop_exe(r"C:\Program Files\WindowsApps\Claude_4.30000.0.0_x64__pzs8sxrjxfjjc\app\claude.exe"));
         assert!(!i.is_desktop_exe(r"C:\Users\u\AppData\Roaming\Claude\claude-code\2.1.0\claude.exe"));
         assert!(!i.is_desktop_exe(r"C:\Program Files\WindowsApps\Claude_4.1.0.0_x64__otherpublisher\app\Claude.exe"));
+    }
+
+    #[test]
+    fn data_dir_prefers_the_full_profile_over_mirrored_files() {
+        let root = std::env::temp_dir().join(format!("hydra-datadir-{}", crate::paths::now_millis()));
+        let (mirror, real, empty) = (root.join("cache"), root.join("real"), root.join("empty"));
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::create_dir_all(real.join("Network")).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(real.join("Local State"), "{}").unwrap();
+        std::fs::write(real.join("config.json"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        // The Store's partial mirror is newer but holds only a few files.
+        std::fs::write(mirror.join("config.json"), "{}").unwrap();
+        let picked = best_data_dir(vec![empty.clone(), mirror.clone(), real.clone()]);
+        assert_eq!(picked.as_deref(), Some(real.as_path()));
+        // Two full profiles: the one used last wins.
+        std::fs::write(mirror.join("Local State"), "{}").unwrap();
+        assert_eq!(best_data_dir(vec![real.clone(), mirror.clone()]).as_deref(), Some(mirror.as_path()));
+        assert_eq!(best_data_dir(vec![empty]), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

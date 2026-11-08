@@ -39,8 +39,8 @@ pub fn exit_kind(tail: &[&str]) -> ExitKind {
     ExitKind::Unknown
 }
 
-fn log_tail(p: &Profile) -> String {
-    let Ok(bytes) = std::fs::read(PathBuf::from(&p.path).join("logs").join("main.log")) else {
+fn log_tail(install: &Install, p: &Profile) -> String {
+    let Ok(bytes) = std::fs::read(install.data_dir(&PathBuf::from(&p.path)).join("logs").join("main.log")) else {
         return String::new();
     };
     let start = bytes.len().saturating_sub(16 * 1024);
@@ -61,7 +61,7 @@ pub fn run_once(install: &Install) -> Vec<String> {
         if !p.keep_running || p.pid.is_some() {
             continue;
         }
-        let tail = log_tail(&p);
+        let tail = log_tail(install, &p);
         let lines: Vec<&str> = tail.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect();
         if exit_kind(&lines) != ExitKind::Forced {
             continue;

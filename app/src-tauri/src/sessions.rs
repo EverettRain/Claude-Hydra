@@ -44,19 +44,7 @@ pub struct TransferResult { copied: usize, skipped: usize, failed: usize }
 struct Entry { session: Session, path: PathBuf, account: String, org: String }
 
 fn root(install: &Install, p: &Profile) -> PathBuf {
-    let path = PathBuf::from(&p.path);
-    #[cfg(windows)]
-    if install.is_msix() {
-        // Store builds redirect %LOCALAPPDATA% writes into the package's LocalCache.
-        if let (Some(local), Some(cache)) = (std::env::var_os("LOCALAPPDATA"), install.default_profile.parent().and_then(Path::parent)) {
-            if let Ok(relative) = path.strip_prefix(local) {
-                let redirected = cache.join("Local").join(relative).join("claude-code-sessions");
-                if redirected.is_dir() { return redirected; }
-            }
-        }
-    }
-    let _ = install;
-    path.join("claude-code-sessions")
+    install.data_dir(Path::new(&p.path)).join("claude-code-sessions")
 }
 
 fn dirs(path: &Path) -> Result<Vec<PathBuf>, String> {

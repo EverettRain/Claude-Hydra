@@ -24,7 +24,8 @@ mod win {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Registry::{
-        RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
+        RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ,
+        RRF_RT_REG_SZ,
     };
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
@@ -262,6 +263,37 @@ mod win {
         unsafe { MessageBoxW(null_mut(), t.as_ptr(), c.as_ptr(), MB_OK | MB_ICONERROR) };
     }
 
+    /// A REG_SZ value from HKCU (`machine == false`) or HKLM.
+    pub fn reg_string(machine: bool, key: &str, value: &str) -> Option<String> {
+        let (k, v) = (wide(key), wide(value));
+        let hive = if machine { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+        let mut size = 0u32;
+        unsafe {
+            if RegGetValueW(hive, k.as_ptr(), v.as_ptr(), RRF_RT_REG_SZ, null_mut(), null_mut(), &mut size) != 0 || size < 2 {
+                return None;
+            }
+            let mut buf = vec![0u16; size as usize / 2];
+            if RegGetValueW(hive, k.as_ptr(), v.as_ptr(), RRF_RT_REG_SZ, null_mut(), buf.as_mut_ptr().cast(), &mut size) != 0 {
+                return None;
+            }
+            buf.truncate(size as usize / 2);
+            while buf.last() == Some(&0) {
+                buf.pop();
+            }
+            Some(String::from_utf16_lossy(&buf))
+        }
+    }
+
+    /// Claude's managed egress proxy (`egressProxyUrl` under `Software\Policies\Claude`, machine
+    /// policy first). Claude pins every profile to it and ignores the OS proxy settings.
+    pub fn claude_egress_policy() -> Option<String> {
+        [true, false]
+            .into_iter()
+            .find_map(|machine| reg_string(machine, "Software\\Policies\\Claude", "egressProxyUrl"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
     const RUN_VALUE: &str = "Claude Hydra";
 
@@ -476,6 +508,10 @@ mod unix {
         let _ = Command::new("/usr/bin/osascript")
             .args(["-e", "on run argv", "-e", "display alert \"Claude-Hydra\" message (item 1 of argv) as warning", "-e", "end run", text])
             .spawn();
+    }
+
+    pub fn claude_egress_policy() -> Option<String> {
+        None
     }
 
     pub fn autostart_enabled() -> bool {

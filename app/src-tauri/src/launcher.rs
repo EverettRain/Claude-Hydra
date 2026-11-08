@@ -36,6 +36,13 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     }
     if let Some(node) = &node {
         if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
+        // Claude pins itself to a managed egress proxy over `--proxy-server`, so the account
+        // would leave through that proxy (e.g. a local Clash port) instead of its node.
+        if let Some(policy) = crate::sys::claude_egress_policy() {
+            return Err(format!(
+                "账号未启动：系统策略为 Claude 固定了出口代理 {policy}（注册表 HKCU 或 HKLM 下 Software\\Policies\\Claude 的 egressProxyUrl）。Claude 会忽略 Hydra 的代理节点、改走这个代理。请删除该策略值后重试；不使用代理节点的账号不受影响。"
+            ));
+        }
         let port = crate::relay::port_for_launch(&p.id, node).map_err(|e| format!("账号未启动：{e}"))?;
         // Verify the exact route Claude will use: local relay -> node -> internet.
         let client = crate::node::relay_client(port, std::time::Duration::from_secs(15))?;
@@ -231,6 +238,10 @@ pub fn diagnostics(install_res: Result<Install, String>) -> String {
     lines.push(format!("Claude-Hydra v{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
     lines.push(format!("Storage Root: {}", redact_user(&paths::storage_root().to_string_lossy())));
     lines.push(format!("Settings File: {}", redact_user(&paths::settings_path().to_string_lossy())));
+    lines.push(format!(
+        "Claude Egress Policy: {}",
+        sys::claude_egress_policy().unwrap_or_else(|| "none".into())
+    ));
     match install_res {
         Ok(inst) => {
             lines.push(format!("Claude Install Kind: {}", inst.kind));

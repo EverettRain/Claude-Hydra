@@ -321,8 +321,8 @@ async fn recycle_session(app: AppHandle, account: String, action: String, id: St
 #[tauri::command]
 async fn profile_quota(app: AppHandle, id: String) -> Result<quota::Quota, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (_, profile) = find(&app, &id)?;
-        quota::fetch(&profile)
+        let (install, profile) = find(&app, &id)?;
+        quota::fetch(&install, &profile)
     }).await.map_err(|_| "额度查询任务失败。".to_string())?
 }
 
@@ -628,7 +628,8 @@ pub fn run(start_in_tray: bool) {
             // This process hosts the per-account proxy relays for as long as it runs.
             relay::set_host();
             environment::migrate();
-            relay::sync_all();
+            // Starting Clash-node relays waits for each Mihomo core; keep the window responsive.
+            std::thread::spawn(relay::sync_all);
             let list = current_install(&handle).map(|i| profiles::list(&i, true)).unwrap_or_default();
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip("Claude-Hydra")

@@ -217,8 +217,8 @@ fn token(dir: &Path) -> Result<Found, String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn token(_dir: &Path) -> Result<Found, String> { Err("当前平台暂不支持读取桌面端额度。".into()) }
 
-pub fn fetch(profile: &crate::profiles::Profile) -> Result<Quota, String> {
-    let found = token(Path::new(&profile.path))?;
+pub fn fetch(install: &crate::install::Install, profile: &crate::profiles::Profile) -> Result<Quota, String> {
+    let found = token(&install.data_dir(Path::new(&profile.path)))?;
     // Hydra only reads credentials; refreshing them is Claude's job while it runs.
     if found.expires.is_some_and(|e| e <= crate::paths::now_millis()) {
         return Err("该账号的登录凭据已过期。Hydra 不会自行刷新凭据：打开一次该账号的 Claude，等它自动刷新后再点“刷新”。".into());
@@ -232,7 +232,9 @@ pub fn fetch(profile: &crate::profiles::Profile) -> Result<Quota, String> {
         return query(node.client(Duration::from_secs(15))?, credential);
     }
     let vars = crate::profiles::env_vars(&settings, &profile.id);
-    let proxy = ["HTTPS_PROXY", "ALL_PROXY", "HTTP_PROXY"].iter().find_map(|key| vars.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str()));
+    // Claude's managed egress proxy pins all of its traffic, so the query takes the same exit.
+    let policy = crate::sys::claude_egress_policy();
+    let proxy = policy.as_deref().or_else(|| ["HTTPS_PROXY", "ALL_PROXY", "HTTP_PROXY"].iter().find_map(|key| vars.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str())));
     let args = crate::profiles::extra_args(&settings, &profile.id);
     if proxy.is_none() && args.contains("--proxy-server") { return Err("该账号仅通过启动参数配置代理，额度查询无法安全确定代理地址。请改用账号的代理节点设置。".into()); }
     if let Some(p) = proxy {
