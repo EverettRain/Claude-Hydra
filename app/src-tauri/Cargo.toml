@@ -1,6 +1,6 @@
 [package]
 name = "claude-hydra"
-version = "3.0.0"
+version = "1.0.0"
 description = "Claude-Hydra - run several Claude desktop accounts side by side"
 license = "MIT"
 edition = "2021"
@@ -16,6 +16,8 @@ cc = "1"
 tauri-build = { version = "2.4.0", features = [] }
 
 [dependencies]
+tauri-plugin-updater = "2"
+uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["parsing"] }
 tauri = { version = "2.8.2", features = ["tray-icon", "image-png"] }

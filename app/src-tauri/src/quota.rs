@@ -110,6 +110,7 @@ pub fn fetch(profile: &crate::profiles::Profile) -> Result<Quota, String> {
     let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none());
     if let Some(node) = settings.effective(&profile.id).node {
         // Same exit as the account itself; never a direct connection.
+        let (node, _core) = crate::clash::resolve(&node)?;
         return query(node.client(Duration::from_secs(15))?, credential);
     }
     let vars = crate::profiles::env_vars(&settings, &profile.id);

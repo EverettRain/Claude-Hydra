@@ -1,3 +1,4 @@
+import { ClashImport } from "./ClashImport";
 import { Check, Copy, Info, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { api, errorText, type ExitInfo, type NodeConfig } from "@/lib/api";
@@ -98,8 +99,10 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
           onChange={(v) => { setResult(null); onNodeChange(v === "custom" ? n : null); }} />
       </Row>
 
+      <ClashImport node={node} choose={n => { setResult(null); onNodeChange(n); }} />
       {node && (
         <>
+          {node.kind !== "clash" && <>
           <Row label="代理类型" required>
             <Select aria-label="代理类型" className="w-36" value={n.kind} onChange={(e) => set({ kind: e.target.value as NodeConfig["kind"] })}>
               <option value="socks5">SOCKS5</option>
@@ -121,6 +124,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
             <Input aria-label="代理账号" value={n.username} maxLength={200} placeholder="账号（选填）" autoComplete="off" onChange={(e) => set({ username: e.target.value })} />
             <Input aria-label="代理密码" type="password" value={n.password} maxLength={200} placeholder="密码（选填）" autoComplete="new-password" onChange={(e) => set({ password: e.target.value })} />
           </Row>
+          </>}
           <Row label="出口检测" hint="经节点访问所选服务，检测出口 IP、地区与时区。IP 协议选 IPv6 时节点须提供 IPv6 出口。">
             <Select aria-label="IP查询渠道" value={n.geoChannel} onChange={(e) => set({ geoChannel: e.target.value as NodeConfig["geoChannel"] })}>
               <option value="ipinfo">ipinfo.io</option>
@@ -131,9 +135,9 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
               {checking && <Loader2 className="animate-spin" />}
               连通检测
             </Button>
-            <Button variant="ghost" size="icon" aria-label="复制节点字符串（含密码）" title="复制节点字符串（含密码）" disabled={!n.host || !n.port} onClick={copy}>
+            {node.kind !== "clash" && <Button variant="ghost" size="icon" aria-label="复制节点字符串（含密码）" title="复制节点字符串（含密码）" disabled={!n.host || !n.port} onClick={copy}>
               {copied ? <Check className="text-ok" /> : <Copy />}
-            </Button>
+            </Button>}
           </Row>
           <Row label="刷新URL" hint="代理服务商提供的换 IP 链接。点击右侧按钮会直接请求此链接（不经过代理）。">
             <Input aria-label="刷新URL" className="font-mono text-xs" value={n.refreshUrl} placeholder="https://…" onChange={(e) => set({ refreshUrl: e.target.value })} />

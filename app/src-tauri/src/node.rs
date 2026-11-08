@@ -54,6 +54,13 @@ impl NodeConfig {
         n.host = n.host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
         n.username = n.username.trim().to_string();
         n.refresh_url = n.refresh_url.trim().to_string();
+        if n.kind == "clash" {
+            let proxy: Value = serde_json::from_str(&n.password).map_err(|_| "Clash 节点无效。")?;
+            if proxy.get("server").and_then(Value::as_str) != Some(&n.host) || n.port == 0 || proxy["type"].as_str().is_none() {
+                return Err("Clash 节点缺少类型、服务器或端口。".into());
+            }
+            return Ok(n);
+        }
         if !matches!(n.kind.as_str(), "http" | "https" | "socks5") { return Err("代理类型只支持 HTTP、HTTPS 或 SOCKS5。".into()); }
         if n.host.is_empty() || n.host.len() > 253 || !n.host.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:".contains(c)) {
             return Err("代理主机无效。".into());

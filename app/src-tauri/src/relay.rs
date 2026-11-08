@@ -19,6 +19,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Relay {
+    original: NodeConfig,
+    core: Option<crate::clash::Core>,
     port: u16,
     node: Arc<RwLock<NodeConfig>>,
     stop: Arc<AtomicBool>,
@@ -36,8 +38,17 @@ pub fn set_host() { HOST.store(true, Ordering::SeqCst); }
 /// Starts or updates the relay for an account in this process and returns its port.
 fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, String> {
     let mut map = relays().lock().map_err(|_| "中继状态错误。")?;
-    if let Some(r) = map.get(id) {
-        if let Ok(mut n) = r.node.write() { *n = node.clone(); }
+    if let Some(r) = map.get_mut(id) {
+        if r.original != *node || r.core.as_mut().is_some_and(|c| !c.alive()) {
+            let resolved = crate::clash::resolve(node);
+            let mut route = r.node.write().map_err(|_| "中继状态错误。")?;
+            r.core = None;
+            *route = NodeConfig::default();
+            r.original = NodeConfig::default();
+            let (upstream, core) = resolved?;
+            *route = upstream;
+            r.original = node.clone(); r.core = core;
+        }
         return Ok(r.port);
     }
     let listener = preferred
@@ -46,12 +57,15 @@ fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, St
         .unwrap_or_else(|| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
         .map_err(|e| format!("无法启动本地代理中继：{e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    let relay = Relay { port, node: Arc::new(RwLock::new(node.clone())), stop: Arc::new(AtomicBool::new(false)) };
+    let (upstream, core) = crate::clash::resolve(node)?;
+    let relay = Relay { original: node.clone(), core, port, node: Arc::new(RwLock::new(upstream)), stop: Arc::new(AtomicBool::new(false)) };
     let (cfg, stop) = (relay.node.clone(), relay.stop.clone());
     std::thread::Builder::new().name(format!("relay-{port}")).spawn(move || serve(listener, cfg, stop)).map_err(|e| e.to_string())?;
     map.insert(id.to_string(), relay);
     Ok(port)
 }
+
+pub fn shutdown() { if let Ok(mut map) = relays().lock() { map.clear(); } }
 
 fn stop(id: &str) {
     if let Some(r) = relays().lock().ok().and_then(|mut m| m.remove(id)) {

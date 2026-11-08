@@ -9,7 +9,8 @@ pub mod paths;
 pub mod profiles;
 pub mod node;
 pub mod quota;
-pub mod relay;
+pub mod clash;
+mod relay;
 pub mod sessions;
 pub mod settings;
 pub mod sys;
@@ -163,6 +164,7 @@ fn delete_environment(app: AppHandle, id: String) -> Result<(), String> {
 async fn check_node(node: node::NodeConfig) -> Result<(node::ExitInfo, Option<String>, String), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let node = node.validated()?;
+        let (node, _core) = clash::resolve(&node)?;
         let client = node.client(Duration::from_secs(15))?;
         let exit = node::inspect(&client, &node)?;
         let quality = node::network_quality(&client, &exit.ip);
@@ -547,6 +549,7 @@ fn start_background(app: AppHandle) {
 
 pub fn run(start_in_tray: bool) {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
@@ -559,6 +562,7 @@ pub fn run(start_in_tray: bool) {
             create_configured_account,
             profile_options,
             check_node,
+            clash::clash_subscription,
             list_environments,
             save_environment,
             delete_environment,
@@ -618,6 +622,7 @@ pub fn run(start_in_tray: bool) {
         .build(tauri::generate_context!())
         .expect("error while building Claude-Hydra")
         .run(|_app, event| {
+            if matches!(event, RunEvent::Exit) { relay::shutdown(); }
             if let RunEvent::ExitRequested { code: None, api, .. } = event {
                 api.prevent_exit();
             }

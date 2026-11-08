@@ -1,3 +1,4 @@
+import { UpdateNotice } from "./UpdateNotice";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowRightLeft, ChartNoAxesColumn, Globe2, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
 import type React from "react";
@@ -121,6 +122,7 @@ export function AppShell({ activePage, onPageChange, theme, onThemeChange, statu
         <header data-tauri-drag-region className="flex h-12 shrink-0 items-center justify-between gap-3 pl-5 pr-3">
           <div data-tauri-drag-region className="pointer-events-none min-w-0 truncate text-[13.5px] font-semibold">{titles[activePage]}</div>
           <div className="flex items-center gap-1">
+            <UpdateNotice />
             <button
               onClick={() => onThemeChange(nextTheme[theme])}
               title={`主题：${themeLabel[theme]}（点击切换）`}

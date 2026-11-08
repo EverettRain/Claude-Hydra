@@ -36,7 +36,7 @@ export interface EnvironmentInput {
 }
 export interface Environment extends EnvironmentInput { id: string; usedBy: string[] }
 
-export type NodeKind = "http" | "https" | "socks5";
+export type NodeKind = "clash" | "http" | "https" | "socks5";
 export interface NodeConfig {
   kind: NodeKind; host: string; port: number; username: string; password: string;
   ipVersion: "ipv4" | "ipv6"; geoChannel: "ipinfo" | "ipapi" | "ip-api"; refreshUrl: string;
