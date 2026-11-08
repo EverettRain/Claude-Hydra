@@ -37,11 +37,13 @@ module.exports = {
         fadeIn: { "0%": { opacity: "0" }, "100%": { opacity: "1" } },
         popIn: { "0%": { opacity: "0", transform: "translateY(4px) scale(0.985)" }, "100%": { opacity: "1", transform: "none" } },
         slideIn: { "0%": { opacity: "0", transform: "translateX(16px)" }, "100%": { opacity: "1", transform: "none" } },
+        updateIn: { "0%": { opacity: "0", maxWidth: "0" }, "100%": { opacity: "1", maxWidth: "20em" } },
       },
       animation: {
         "fade-in": "fadeIn 0.16s ease-out",
         "pop-in": "popIn 0.18s cubic-bezier(0.2, 0.8, 0.2, 1)",
         "slide-in": "slideIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "update-in": "updateIn 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)",
       },
     },
   },

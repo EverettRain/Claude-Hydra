@@ -45,7 +45,7 @@ export function ClashImport({ node, choose }: { node: NodeConfig | null; choose:
       {list.map((n,i) => <option key={i} value={i}>{name(n)} · {JSON.parse(n.password).type}</option>)}
     </Select>}
     {node?.kind === "clash" && <p className="text-xs">已绑定：{name(node)} · {node.host}:{node.port}</p>}
-    {node?.kind === "clash" && <p className="text-xs text-muted">保存环境后，在“账号 → 编辑”中绑定此环境。运行节点需要 Mihomo 内核。</p>}
+    {node?.kind === "clash" && <p className="text-xs text-muted">保存环境后，在“账号 → 编辑”中绑定此环境。</p>}
     {error && <p role="alert" className="text-xs text-danger">{error}</p>}
   </div>;
 }

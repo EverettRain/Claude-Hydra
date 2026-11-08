@@ -49,6 +49,8 @@ export interface NodeConfig {
   ipVersion: "ipv4" | "ipv6"; geoChannel: "ipinfo" | "ipapi" | "ip-api"; refreshUrl: string;
 }
 export interface NodeCheck { exit: ExitInfo; quality: string | null; risk: string }
+/** A published release and its markdown notes. */
+export interface ReleaseNote { version: string; date: string; body: string }
 export interface ExitInfo { ip: string; country: string; region: string; city: string; timezone: string; checkedAt: number }
 
 export interface Install {
@@ -109,6 +111,9 @@ export const api = {
   readImport: (account: string, id: string) => invoke<string>("read_import", { account, id }),
   sessionPreview: (source: string, target: string, trash = false) => invoke<SessionPreview>("session_preview", { source, target, trash }),
   copySessions: (source: string, target: string, ids: string[], restart = false) => invoke<TransferResult>("copy_sessions", { source, target, ids, restart }),
+  releaseNotes: (after: string, upto: string) => invoke<ReleaseNote[]>("release_notes", { after, upto }),
+  openReleasePage: (version: string) => invoke<void>("open_release_page", { version }),
+  restartApp: () => invoke<void>("restart_app"),
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   setClaudePath: (path: string | null) => invoke<void>("set_claude_path", { path }),

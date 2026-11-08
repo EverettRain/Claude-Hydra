@@ -11,6 +11,7 @@ pub mod paths;
 pub mod profiles;
 pub mod node;
 pub mod quota;
+mod releases;
 pub mod clash;
 mod relay;
 pub mod sessions;
@@ -612,6 +613,9 @@ pub fn run(start_in_tray: bool) {
             recycle_session,
             copy_sessions,
             profile_quota,
+            releases::release_notes,
+            releases::open_release_page,
+            releases::restart_app,
             save_transcript,
             reveal_transcript,
             app_info,
