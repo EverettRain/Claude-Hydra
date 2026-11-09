@@ -189,3 +189,9 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 ## 许可证
 
 本项目基于 [MIT License](LICENSE) 开源。
+
+
+
+## 社区
+
+- **[linux.do](https://linux.do)** - 学AI，上L站.
