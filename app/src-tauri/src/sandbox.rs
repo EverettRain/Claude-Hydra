@@ -169,6 +169,17 @@ fn ini(dir: &Path, args: &[&str]) -> Result<(), String> {
     if status.success() { Ok(()) } else { Err(format!("Sandboxie 拒绝了配置 {}（可能限制了只有管理员才能修改配置）。", args.get(2).unwrap_or(&""))) }
 }
 
+/// Sandboxie resolves UserSettings_ to the calling user's settings section.
+/// Apply once on explicit request, since controller auto-start is shared by all boxes.
+pub fn configure_quiet_start() -> Result<(), String> {
+    let dir = available()?;
+    let section = "UserSettings_";
+    let detail = "2205,ConsoleInit (C00000D4)";
+    ini(&dir, &["set", section, "SbieCtrl_EnableAutoStart", "n"])?;
+    ini(&dir, &["delete", section, "SbieCtrl_HideMessage", detail])?;
+    ini(&dir, &["append", section, "SbieCtrl_HideMessage", detail])
+}
+
 /// Creates or updates the account's box. `relay_port` = the only address the box may reach;
 /// `None` (no node) leaves the network unrestricted.
 pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<String, String> {
@@ -201,7 +212,7 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<St
     let mut reload = Command::new(dir.join("Start.exe"));
     #[cfg(windows)]
     reload.creation_flags(0x0800_0000);
-    if !reload.arg("/reload").status().map_err(|e| format!("无法让 Sandboxie 重新加载配置：{e}"))?.success() {
+    if !reload.args(["/silent", "/reload"]).status().map_err(|e| format!("无法让 Sandboxie 重新加载配置：{e}"))?.success() {
         return Err("Sandboxie 未能重新加载账号配置。".into());
     }
     #[cfg(windows)]
@@ -288,7 +299,7 @@ pub fn command(id: &str, exe: &Path, raw_args: &str, env: &[(String, String)]) -
         .collect();
     let line = format!("/box:{} /silent{switches} \"{}\" {raw_args}", box_name(id), exe.display());
     #[cfg(windows)]
-    cmd.raw_arg(line);
+    cmd.creation_flags(0x0800_0000).raw_arg(line);
     #[cfg(not(windows))]
     cmd.arg(line);
     cmd.envs(env.iter().cloned());

@@ -291,6 +291,11 @@ fn sandbox_status() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn configure_quiet_sandbox() -> Result<(), String> {
+    sandbox::configure_quiet_start()
+}
+
+#[tauri::command]
 fn diagnostics(app: AppHandle) -> String {
     launcher::diagnostics(current_install(&app))
 }
@@ -647,6 +652,7 @@ pub fn run(start_in_tray: bool) {
             resume_account,
             rebind_exit,
             sandbox_status,
+            configure_quiet_sandbox,
             diagnostics,
             session_preview,
             read_import,

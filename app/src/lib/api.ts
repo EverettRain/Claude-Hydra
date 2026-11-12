@@ -118,6 +118,7 @@ export const api = {
   resumeAccount: (id: string) => invoke<string>("resume_account", { id }),
   rebindExit: (id: string) => invoke<string>("rebind_exit", { id }),
   sandboxStatus: () => invoke<string>("sandbox_status"),
+  configureQuietSandbox: () => invoke<void>("configure_quiet_sandbox"),
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
   revealTranscript: (path: string) => invoke<void>("reveal_transcript", { path }),

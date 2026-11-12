@@ -35,6 +35,7 @@ const place = (x: ExitInfo) => [x.country, x.region, x.city].filter(Boolean).joi
 export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBaseline, onClose, onSaved }: Props) {
   const [env, setEnv] = useState<EnvironmentInput>(emptyEnvironment);
   const [saving, setSaving] = useState(false);
+  const [quietStatus, setQuietStatus] = useState<"idle" | "applying" | "done">("idle");
   const [error, setError] = useState("");
   const [sandbox, setSandbox] = useState<{ ok: boolean; text: string } | null>(null);
   const [baseline, setBaseline] = useState<string | null>(null);
@@ -42,6 +43,7 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
 
   useEffect(() => {
     if (!open) return;
+    setQuietStatus("idle");
     setEnv(initial ? { ...emptyEnvironment(), ...structuredClone(initial) } : emptyEnvironment());
     setError("");
     setBaseline(exitBaseline ? `${exitBaseline.ip}${place(exitBaseline) ? `（${place(exitBaseline)}）` : ""}` : null);
@@ -137,6 +139,14 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
               <span className="text-[11.5px] text-muted">{env.isolation === "sandboxie" ? "在 Sandboxie-Plus 沙箱中运行" : "不使用沙箱"}</span>
             </Line>
             <p className="px-4 pb-3 text-[11.5px] leading-relaxed text-muted">
+              {env.isolation === "sandboxie" && sandbox?.ok && <span className="mb-2 block">
+                <Button variant="outline" disabled={quietStatus !== "idle"} onClick={async () => {
+                  setQuietStatus("applying");
+                  try { await api.configureQuietSandbox(); setQuietStatus("done"); }
+                  catch (e) { setError(errorText(e)); setQuietStatus("idle"); }
+                }}>{quietStatus === "done" ? "已应用静默启动" : quietStatus === "applying" ? "正在应用…" : "启用沙箱静默启动"}</Button>
+                <span className="mt-1 block">立即应用到当前 Windows 用户的所有沙箱。启动时不自动打开 Sandboxie Control，并隐藏 ConsoleInit (C00000D4) 提示。</span>
+              </span>}
               {env.isolation === "sandboxie"
                 ? "沙箱中只允许连接本账号的本地中继，任何绕过代理的进程都会断网；文件和注册表写入留在沙箱内（账号数据目录除外）。沙箱内无法经本机 DNS 解析外部域名，域名只经代理解析。商店版会先复制一份到 Hydra 数据目录再装入沙箱（首次较慢）；系统默认账号不能使用环境。启动后会核实 Claude 确实在沙箱中运行，否则立即关闭。"
                 : "不用沙箱时：Claude 与它启动的工具都经本地中继出网（无直连回退），出口不合规则时会自动断网；但忽略代理设置的程序仍可能直连。"}
