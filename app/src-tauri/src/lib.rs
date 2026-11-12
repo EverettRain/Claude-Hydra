@@ -17,6 +17,7 @@ mod relay;
 pub mod sessions;
 pub mod settings;
 pub mod sys;
+pub mod third_party;
 #[cfg(windows)]
 mod taskbar;
 pub mod watchdog;

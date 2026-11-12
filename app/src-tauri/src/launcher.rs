@@ -62,6 +62,17 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         env.retain(|(k, _)| !k.eq_ignore_ascii_case("TZ"));
         env.push(("TZ".into(), tz));
     }
+    // With Claude's third-party (API/gateway) mode set up, Claude decides 1P vs 3P from
+    // machine-wide state and can ignore `--user-data-dir` (see `third_party`).
+    if !p.is_default {
+        match crate::third_party::mode() {
+            crate::third_party::Mode::NotConfigured => {}
+            crate::third_party::Mode::FirstParty => managed.push(crate::third_party::KEEP_FIRST_PARTY_SWITCH.into()),
+            crate::third_party::Mode::ThirdParty => {
+                return Err("账号未启动：本机 Claude 处于第三方推理（API / 网关）模式。此模式下 Claude 会忽略账号目录，所有账号都改用共享的 Claude-3p 数据目录，额外账号会直接退出。请打开默认 Claude，在登录页选择用 Claude 账号登录（切回第一方模式）后重试；或在 Claude 中移除第三方推理配置。".into());
+            }
+        }
+    }
     if p.is_default && install.is_msix() {
         let aumid = install.aumid.as_deref().ok_or("缺少商店版应用标识。")?;
         Command::new("explorer.exe")
@@ -119,8 +130,14 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         cmd.raw_arg(line.join(" "));
         #[cfg(not(windows))]
         cmd.args(line);
-        cmd.envs(env).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        let child = cmd.spawn().map_err(|e| format!("无法启动 Claude（{}）：{e}", exe.display()))?;
+        // Claude explains an immediate exit on stderr (e.g. "refusing to start — ..."), so keep it.
+        let stderr_path = paths::logs_dir().join(format!("launch-{}.log", safe_file_name(&p.id)));
+        let stderr = std::fs::create_dir_all(paths::logs_dir())
+            .and_then(|_| std::fs::File::create(&stderr_path))
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
+        cmd.envs(env).stdin(Stdio::null()).stdout(Stdio::null()).stderr(stderr);
+        let mut child = cmd.spawn().map_err(|e| format!("无法启动 Claude（{}）：{e}", exe.display()))?;
         #[cfg(windows)]
         if !p.is_default {
             for _ in 0..20 {
@@ -128,9 +145,73 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
         }
-        drop(child);
-        Ok(outcome)
+        let result = confirm_started(install, p, &mut child, &stderr_path);
+        if let Err(e) = &result {
+            paths::append_log("hydra-error.log", &format!("launch {}: {e}", p.id));
+        }
+        result.map(|_| outcome)
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn safe_file_name(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// Waits for the account's Claude main process to appear and survive a moment. Store builds
+/// are started through an app execution alias whose own process exits right away, so the
+/// spawned child's exit alone proves nothing; only its non-zero exit code is used as a hint.
+#[cfg(not(target_os = "macos"))]
+fn confirm_started(
+    install: &Install,
+    p: &Profile,
+    child: &mut std::process::Child,
+    stderr_path: &std::path::Path,
+) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    let key = path_key(&p.path);
+    let pid = || profiles::running_map(install).get(&key).copied();
+    let started = Instant::now();
+    let mut code: Option<i32> = None;
+    while started.elapsed() < Duration::from_secs(15) {
+        if code.is_none() {
+            if let Ok(Some(st)) = child.try_wait() {
+                code = Some(st.code().unwrap_or(-1));
+            }
+        }
+        if pid().is_some() {
+            std::thread::sleep(Duration::from_millis(1500));
+            if pid().is_some() {
+                return Ok(());
+            }
+            break;
+        }
+        // A failing direct child (classic builds, or an alias that could not start the app)
+        // needs no further waiting once a little grace time for the real process has passed.
+        if matches!(code, Some(c) if c != 0) && started.elapsed() > Duration::from_secs(2) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    if code.is_none() {
+        if let Ok(Some(st)) = child.try_wait() {
+            code = Some(st.code().unwrap_or(-1));
+        }
+    }
+    let said = std::fs::read(stderr_path)
+        .map(|b| String::from_utf8_lossy(&b).trim().chars().take(600).collect::<String>())
+        .unwrap_or_default();
+    let mut msg = String::from("Claude 启动后立即退出了");
+    if let Some(c) = code.filter(|c| *c != 0) {
+        msg.push_str(&format!("（退出码 {c}）"));
+    }
+    msg.push('。');
+    if !said.is_empty() {
+        msg.push_str(&format!("Claude 输出：{}", redact_user(&said)));
+    } else {
+        msg.push_str("请检查环境配置中的额外启动参数，或先完全退出 Claude（含托盘）后重试；详情见该账号数据目录下 logs\\main.log。");
+    }
+    Err(msg)
 }
 
 fn family(main: u32) -> Vec<u32> {
