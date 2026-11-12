@@ -30,6 +30,19 @@ pub struct Environment {
     /// Result of the last manual connectivity check, shown again when the environment is edited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check: Option<NodeCheck>,
+    /// Exit rule enforced at launch and while running (see `guard`): "" = only the region
+    /// block, "static" | "city" | "region" | "country" = must stay like `exit_baseline`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub exit_rule: String,
+    /// Mainland-China exits are refused unless this is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_cn: bool,
+    /// The exit the rule compares against: the first verified exit, until the user rebinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_baseline: Option<node::ExitInfo>,
+    /// "" = run Claude directly, "sandboxie" = inside a Sandboxie-Plus box (see `sandbox`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub isolation: String,
 }
 
 /// A successful connectivity check: exit info plus the residential/datacenter and risk notes.
@@ -79,6 +92,12 @@ pub struct EnvironmentInput {
     pub env: String,
     #[serde(default)]
     pub last_check: Option<NodeCheck>,
+    #[serde(default)]
+    pub exit_rule: String,
+    #[serde(default)]
+    pub allow_cn: bool,
+    #[serde(default)]
+    pub isolation: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -92,6 +111,8 @@ pub struct EnvironmentView {
     /// Exit timezone last confirmed for this environment's node, from its own connectivity
     /// check or an account's launch check, whichever is newer. `None` without a node.
     pub detected_timezone: Option<String>,
+    /// Exit the rule is bound to (read-only; set by the first verified check).
+    pub exit_baseline: Option<node::ExitInfo>,
 }
 
 fn account_name(s: &Settings, id: &str) -> String {
@@ -109,9 +130,13 @@ fn view(s: &Settings, id: &str, e: &Environment) -> EnvironmentView {
             args: e.args.clone(),
             env: e.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n"),
             last_check: e.last_check.clone(),
+            exit_rule: e.exit_rule.clone(),
+            allow_cn: e.allow_cn,
+            isolation: e.isolation.clone(),
         },
         used_by: s.accounts.iter().filter(|(_, a)| a.environment.as_deref() == Some(id)).map(|(aid, _)| account_name(s, aid)).collect(),
         detected_timezone: detected_timezone(s, id, e),
+        exit_baseline: e.exit_baseline.clone(),
     }
 }
 
@@ -154,12 +179,19 @@ fn build(input: &EnvironmentInput) -> Result<Environment, String> {
     let env = profiles::parse_env_lines(&input.env)?;
     // A check result only describes a node; drop it when the environment has none.
     let last_check = node.as_ref().and(input.last_check.clone());
-    Ok(Environment { name: name.to_string(), node: node.map(|mut n| { n.password = node::seal(&n.password); n }), timezone, locale: input.locale.clone(), args, env, last_check })
+    if !crate::guard::RULES.contains(&input.exit_rule.as_str()) { return Err("不支持此出口规则。".into()); }
+    if !matches!(input.isolation.as_str(), "" | "sandboxie") { return Err("不支持此隔离方式。".into()); }
+    if !input.exit_rule.is_empty() && node.is_none() { return Err("出口规则需要先设置代理节点。".into()); }
+    Ok(Environment {
+        name: name.to_string(), node: node.map(|mut n| { n.password = node::seal(&n.password); n }), timezone, locale: input.locale.clone(), args, env, last_check,
+        exit_rule: input.exit_rule.clone(), allow_cn: input.allow_cn, exit_baseline: None, isolation: input.isolation.clone(),
+    })
 }
 
 /// Creates (`id` = None) or updates an environment and returns its id.
 pub fn save(install: &crate::install::Install, id: Option<&str>, input: &EnvironmentInput) -> Result<String, String> {
-    let env = build(input)?;
+    let mut env = build(input)?;
+    if env.isolation == "sandboxie" { crate::sandbox::available()?; }
     let mut s = settings::load();
     if let Some(id) = id { if !s.environments.contains_key(id) { return Err("这个环境配置已不存在。".into()); } }
     if s.environments.iter().any(|(k, e)| Some(k.as_str()) != id && e.name == env.name) { return Err(format!("已有名为“{}”的环境配置。", env.name)); }
@@ -171,6 +203,12 @@ pub fn save(install: &crate::install::Install, id: Option<&str>, input: &Environ
     let node_changed = s.environments.get(&id).map(|old| old.node() != env.node()).unwrap_or(false);
     if node_changed {
         for acc in s.accounts.values_mut().filter(|a| a.environment.as_deref() == Some(id.as_str())) { acc.last_exit = None; }
+    } else {
+        // Same node: keep the bound exit; a fresh check of it may seed one.
+        env.exit_baseline = s.environments.get(&id).and_then(|old| old.exit_baseline.clone());
+    }
+    if env.exit_baseline.is_none() && !env.exit_rule.is_empty() {
+        env.exit_baseline = env.last_check.as_ref().map(|c| c.exit.clone()).filter(|x| crate::guard::check(&env, x).is_ok());
     }
     s.environments.insert(id.clone(), env);
     settings::save(&s)?;
@@ -206,7 +244,7 @@ pub fn migrate() {
         }).collect();
         let mut name = format!("{} 的环境", account_name(&s, &id));
         while s.environments.values().any(|e| e.name == name) { name.push('′'); }
-        let env = Environment { name, node, timezone: acc.timezone.clone(), locale, args: args.join(" "), env: acc.env.clone(), last_check: None };
+        let env = Environment { name, node, timezone: acc.timezone.clone(), locale, args: args.join(" "), env: acc.env.clone(), ..Default::default() };
         let env_id = new_id(&s);
         s.environments.insert(env_id.clone(), env);
         let a = s.account_mut(&id);
@@ -232,7 +270,7 @@ mod tests {
             name: "东京".into(),
             node: Some(NodeConfig { kind: "socks5".into(), host: "jp.example".into(), port: 1080, password: node::seal("pw"), username: "u".into(), ..Default::default() }),
             timezone: "Asia/Tokyo".into(), locale: "ja-JP".into(), args: "--disable-gpu".into(),
-            env: BTreeMap::from([("FOO".into(), "1".into())]), last_check: None,
+            env: BTreeMap::from([("FOO".into(), "1".into())]), ..Default::default()
         });
         s.accounts.insert("a".into(), AccountConfig { environment: Some("e1".into()), args: "--ignored".into(), ..Default::default() });
         let e = s.effective("a");

@@ -7,23 +7,63 @@
 //!   is unreachable, or Hydra is not running, the account has no network.
 //! - Relays live in the long-running Hydra tray process. Other Hydra processes (CLI, watchdog)
 //!   start the tray process when they need a relay.
+//! - Kill switch: `block` pauses a relay (new connections are dropped, open ones are closed),
+//!   persisted in `settings.json` so it survives restarts. While accounts use their relay, the
+//!   host re-checks each exit against the environment's rules (see `guard`) and blocks on a
+//!   confirmed violation.
 use crate::node::NodeConfig;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How often an active account's exit is re-checked, and how recently it must have used its
+/// relay to be checked at all.
+const MONITOR_EVERY: Duration = Duration::from_secs(300);
+const ACTIVE_WITHIN_MS: u64 = 15 * 60 * 1000;
+
+/// Open client connections of one relay, so a block can close them.
+#[derive(Default)]
+struct Conns { next: AtomicU64, open: Mutex<HashMap<u64, TcpStream>> }
+
+impl Conns {
+    fn add(&self, s: &TcpStream) -> Option<u64> {
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        self.open.lock().ok()?.insert(id, s.try_clone().ok()?);
+        Some(id)
+    }
+    fn remove(&self, id: u64) { if let Ok(mut m) = self.open.lock() { m.remove(&id); } }
+    fn close_all(&self) {
+        if let Ok(mut m) = self.open.lock() { for (_, s) in m.drain() { let _ = s.shutdown(Shutdown::Both); } }
+    }
+}
+
+/// Shared state of a running relay's accept loop.
+#[derive(Clone)]
+struct Gate {
+    node: Arc<RwLock<NodeConfig>>,
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    conns: Arc<Conns>,
+    /// Last time (ms) a client connected.
+    active: Arc<AtomicU64>,
+}
+
+impl Gate {
+    fn new(node: NodeConfig, paused: bool) -> Gate {
+        Gate { node: Arc::new(RwLock::new(node)), stop: Default::default(), paused: Arc::new(AtomicBool::new(paused)), conns: Default::default(), active: Default::default() }
+    }
+}
 
 struct Relay {
     original: NodeConfig,
     core: Option<crate::clash::Core>,
     port: u16,
-    node: Arc<RwLock<NodeConfig>>,
-    stop: Arc<AtomicBool>,
+    gate: Gate,
 }
 
 static HOST: AtomicBool = AtomicBool::new(false);
@@ -41,7 +81,7 @@ fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, St
     if let Some(r) = map.get_mut(id) {
         if r.original != *node || r.core.as_mut().is_some_and(|c| !c.alive()) {
             let resolved = crate::clash::resolve(node);
-            let mut route = r.node.write().map_err(|_| "中继状态错误。")?;
+            let mut route = r.gate.node.write().map_err(|_| "中继状态错误。")?;
             r.core = None;
             *route = NodeConfig::default();
             r.original = NodeConfig::default();
@@ -58,9 +98,10 @@ fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, St
         .map_err(|e| format!("无法启动本地代理中继：{e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let (upstream, core) = crate::clash::resolve(node)?;
-    let relay = Relay { original: node.clone(), core, port, node: Arc::new(RwLock::new(upstream)), stop: Arc::new(AtomicBool::new(false)) };
-    let (cfg, stop) = (relay.node.clone(), relay.stop.clone());
-    std::thread::Builder::new().name(format!("relay-{port}")).spawn(move || serve(listener, cfg, stop)).map_err(|e| e.to_string())?;
+    let blocked = crate::settings::load().account(id).blocked.is_some();
+    let relay = Relay { original: node.clone(), core, port, gate: Gate::new(upstream, blocked) };
+    let gate = relay.gate.clone();
+    std::thread::Builder::new().name(format!("relay-{port}")).spawn(move || serve(listener, gate)).map_err(|e| e.to_string())?;
     map.insert(id.to_string(), relay);
     Ok(port)
 }
@@ -69,7 +110,8 @@ pub fn shutdown() { if let Ok(mut map) = relays().lock() { map.clear(); } }
 
 fn stop(id: &str) {
     if let Some(r) = relays().lock().ok().and_then(|mut m| m.remove(id)) {
-        r.stop.store(true, Ordering::SeqCst);
+        r.gate.stop.store(true, Ordering::SeqCst);
+        r.gate.conns.close_all();
         let _ = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, r.port)), Duration::from_millis(200));
     }
 }
@@ -94,6 +136,49 @@ pub fn sync_all() {
     if !ports.is_empty() {
         let _ = crate::settings::update(|s| for (id, port) in &ports { s.account_mut(id).relay_port = Some(*port); });
     }
+}
+
+/// Kill switch: cuts the account off the network until `unblock`. Host process only.
+pub fn block(id: &str, reason: &str) {
+    if let Some(gate) = relays().lock().ok().and_then(|m| m.get(id).map(|r| r.gate.clone())) {
+        gate.paused.store(true, Ordering::SeqCst);
+        gate.conns.close_all();
+    }
+    let _ = crate::settings::update(|s| s.account_mut(id).blocked = Some(reason.to_string()));
+    crate::paths::append_log("hydra-error.log", &format!("guard {id}: network cut: {reason}"));
+    crate::guard::notify(id, reason);
+}
+
+pub fn unblock(id: &str) {
+    if let Some(gate) = relays().lock().ok().and_then(|m| m.get(id).map(|r| r.gate.clone())) {
+        gate.paused.store(false, Ordering::SeqCst);
+    }
+    let _ = crate::settings::update(|s| s.account_mut(id).blocked = None);
+}
+
+/// Checks an account's current exit over its node, bypassing the (possibly paused) relay.
+pub fn probe(id: &str) -> Result<crate::node::ExitInfo, String> {
+    let (original, upstream) = relays().lock().ok()
+        .and_then(|m| m.get(id).map(|r| (r.original.clone(), r.gate.node.read().map(|n| n.clone()).unwrap_or_default())))
+        .ok_or("这个账号的代理中继没有运行。")?;
+    crate::node::inspect(&upstream.client(Duration::from_secs(15))?, &original)
+}
+
+/// Host process: periodically re-checks the exit of every account that recently used its relay.
+pub fn start_monitor() {
+    let _ = std::thread::Builder::new().name("exit-guard".into()).spawn(|| loop {
+        std::thread::sleep(MONITOR_EVERY);
+        let now = crate::paths::now_millis();
+        let due: Vec<String> = relays().lock().map(|m| m.iter()
+            .filter(|(_, r)| !r.gate.paused.load(Ordering::SeqCst) && now.saturating_sub(r.gate.active.load(Ordering::SeqCst)) < ACTIVE_WITHIN_MS)
+            .map(|(id, _)| id.clone()).collect()).unwrap_or_default();
+        for id in due {
+            // A failed lookup is not a violation: without its node the account has no network anyway.
+            let Ok(exit) = probe(&id) else { continue };
+            let env = crate::settings::load().effective(&id).environment;
+            if let Err(reason) = crate::guard::verify(env.as_deref(), &exit) { block(&id, &reason); }
+        }
+    });
 }
 
 pub fn reachable(port: u16) -> bool {
@@ -124,14 +209,22 @@ pub fn port_for_launch(id: &str, node: &NodeConfig) -> Result<u16, String> {
 
 // ---- server ---------------------------------------------------------------------------
 
-fn serve(listener: TcpListener, node: Arc<RwLock<NodeConfig>>, stop: Arc<AtomicBool>) {
+fn serve(listener: TcpListener, gate: Gate) {
     for conn in listener.incoming() {
-        if stop.load(Ordering::SeqCst) { break; }
+        if gate.stop.load(Ordering::SeqCst) { break; }
         let Ok(client) = conn else { continue };
         // Only loopback clients; the listener is bound to 127.0.0.1 but be explicit.
         if !client.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false) { continue; }
-        let node = node.read().map(|n| n.clone()).unwrap_or_default();
-        let _ = std::thread::Builder::new().name("relay-conn".into()).spawn(move || { let _ = handle(client, &node); });
+        // Blocked: refuse instead of forwarding (the caller sees a failed connection).
+        if gate.paused.load(Ordering::SeqCst) { let _ = client.shutdown(Shutdown::Both); continue; }
+        gate.active.store(crate::paths::now_millis(), Ordering::SeqCst);
+        let node = gate.node.read().map(|n| n.clone()).unwrap_or_default();
+        let conns = gate.conns.clone();
+        let _ = std::thread::Builder::new().name("relay-conn".into()).spawn(move || {
+            let slot = conns.add(&client);
+            let _ = handle(client, &node);
+            if let Some(slot) = slot { conns.remove(slot); }
+        });
     }
 }
 
@@ -502,8 +595,32 @@ mod tests {
     fn start(node: NodeConfig) -> u16 {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        std::thread::spawn(move || serve(l, Arc::new(RwLock::new(node)), Arc::new(AtomicBool::new(false))));
+        std::thread::spawn(move || serve(l, Gate::new(node, false)));
         port
+    }
+
+    #[test]
+    fn paused_relay_refuses_and_closes_connections() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let gate = Gate::new(node("socks5", fake_socks("u", "p"), "u", "p"), false);
+        let g = gate.clone();
+        std::thread::spawn(move || serve(l, g));
+        // An open tunnel is closed when the relay is paused.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(&[5, 1, 0]).unwrap();
+        let mut sel = [0u8; 2]; c.read_exact(&mut sel).unwrap();
+        c.write_all(&[5, 1, 0, 1, 1, 1, 1, 1, 0, 80]).unwrap();
+        let mut rep = [0u8; 10]; c.read_exact(&mut rep).unwrap();
+        assert_eq!(rep[1], 0);
+        let mut banner = [0u8; 15]; c.read_exact(&mut banner).unwrap();
+        gate.paused.store(true, Ordering::SeqCst);
+        gate.conns.close_all();
+        assert_eq!(read_all(&mut c), "", "tunnel must end when the relay is blocked");
+        // New connections are refused.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let _ = c.write_all(&[5, 1, 0]);
+        assert_eq!(read_all(&mut c), "", "a blocked relay must not answer");
     }
 
     fn read_all(s: &mut TcpStream) -> String {

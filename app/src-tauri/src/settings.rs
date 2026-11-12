@@ -49,6 +49,9 @@ pub struct AccountConfig {
     pub environment: Option<String>,
     #[serde(default)]
     pub keep_running: bool,
+    /// Set when the exit guard cut this account's network; cleared by resume / rebind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
 }
 
 /// The launch configuration that actually applies to an account.
@@ -58,6 +61,10 @@ pub struct Effective {
     pub timezone: String,
     pub args: String,
     pub env: BTreeMap<String, String>,
+    /// Assigned environment id (exit rule, isolation); `None` for legacy per-account settings.
+    pub environment: Option<String>,
+    /// "" or "sandboxie".
+    pub isolation: String,
 }
 
 impl AccountConfig {
@@ -89,6 +96,9 @@ pub struct Settings {
     pub accounts: BTreeMap<String, AccountConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environments: BTreeMap<String, crate::environment::Environment>,
+    /// ProgId of the browser that handled https before Hydra (gets every non-Claude link).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_browser: Option<String>,
 }
 
 impl Settings {
@@ -105,11 +115,11 @@ impl Settings {
         let acc = self.account(id);
         if let Some(env_id) = &acc.environment {
             return match self.environments.get(env_id) {
-                Some(e) => Effective { node: e.node(), timezone: e.timezone.clone(), args: e.launch_args(), env: e.env.clone() },
+                Some(e) => Effective { node: e.node(), timezone: e.timezone.clone(), args: e.launch_args(), env: e.env.clone(), environment: Some(env_id.clone()), isolation: e.isolation.clone() },
                 None => Effective::default(),
             };
         }
-        Effective { node: acc.node(), timezone: acc.timezone.clone(), args: acc.args.replace(['\r', '\n'], " ").trim().to_string(), env: acc.env.clone() }
+        Effective { node: acc.node(), timezone: acc.timezone.clone(), args: acc.args.replace(['\r', '\n'], " ").trim().to_string(), env: acc.env.clone(), ..Default::default() }
     }
 
     pub fn environment_name(&self, id: &str) -> Option<String> {

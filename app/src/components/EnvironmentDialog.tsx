@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { api, errorText, type EnvironmentInput } from "@/lib/api";
-import { LOCALES, emptyEnvironment } from "@/lib/environment";
+import { api, errorText, type EnvironmentInput, type ExitInfo, type ExitRule } from "@/lib/api";
+import { EXIT_RULES, LOCALES, emptyEnvironment } from "@/lib/environment";
+import { Switch } from "./ui/switch";
 import { NodeConfigForm } from "./NodeConfigForm";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
@@ -13,6 +14,8 @@ interface Props {
   initial?: EnvironmentInput;
   /** Exit timezone already confirmed for the saved node, if any. */
   detectedTimezone?: string | null;
+  /** Exit the saved rule is bound to. */
+  exitBaseline?: ExitInfo | null;
   onClose: () => void;
   onSaved: (id: string) => void;
 }
@@ -27,16 +30,36 @@ function Line({ label, children }: { label: string; children: React.ReactNode })
 }
 
 /** Create or edit a reusable environment: network, timezone, language and advanced launch options. */
-export function EnvironmentDialog({ open, id, initial, detectedTimezone, onClose, onSaved }: Props) {
+const place = (x: ExitInfo) => [x.country, x.region, x.city].filter(Boolean).join(" ");
+
+export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBaseline, onClose, onSaved }: Props) {
   const [env, setEnv] = useState<EnvironmentInput>(emptyEnvironment);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [sandbox, setSandbox] = useState<{ ok: boolean; text: string } | null>(null);
+  const [baseline, setBaseline] = useState<string | null>(null);
+  const [rebinding, setRebinding] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    setEnv(initial ? structuredClone(initial) : emptyEnvironment());
+    setEnv(initial ? { ...emptyEnvironment(), ...structuredClone(initial) } : emptyEnvironment());
     setError("");
-  }, [open, initial]);
+    setBaseline(exitBaseline ? `${exitBaseline.ip}${place(exitBaseline) ? `（${place(exitBaseline)}）` : ""}` : null);
+    api.sandboxStatus().then((dir) => setSandbox({ ok: true, text: `已检测到 Sandboxie-Plus：${dir}` }), (e) => setSandbox({ ok: false, text: errorText(e) }));
+  }, [open, initial, exitBaseline]);
+
+  const rebind = async () => {
+    if (!id) return;
+    setRebinding(true);
+    setError("");
+    try {
+      setBaseline(await api.rebindExit(id));
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setRebinding(false);
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -85,6 +108,41 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, onClose
             timezone={env.timezone} onTimezoneChange={(timezone) => setEnv({ ...env, timezone })}
             detectedTimezone={JSON.stringify(env.node) === JSON.stringify(initial?.node ?? null) ? detectedTimezone : null}
             lastCheck={env.lastCheck} onLastCheckChange={(lastCheck) => setEnv((e) => ({ ...e, lastCheck }))} />
+        </section>
+
+        <section>
+          <div className="group-label">出口保护与隔离</div>
+          <div className="list-card">
+            <Line label="出口规则">
+              <Select aria-label="出口规则" value={env.exitRule} disabled={!env.node} onChange={(e) => setEnv({ ...env, exitRule: e.target.value as ExitRule })}>
+                {EXIT_RULES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+              </Select>
+            </Line>
+            {env.node && env.exitRule && (
+              <div className="flex items-center gap-2 px-4 pb-2 pl-[116px] text-[11.5px] text-muted">
+                <span className="min-w-0 flex-1">{baseline ? `已绑定出口 ${baseline}` : "尚未绑定：第一次通过检测的出口会成为基准。"}</span>
+                {id && JSON.stringify(env.node) === JSON.stringify(initial?.node ?? null) && (
+                  <Button variant="outline" size="sm" disabled={rebinding} onClick={rebind} title="以节点当前出口为新基准，并恢复被切断的账号">
+                    {rebinding ? "检测中…" : "重新绑定"}
+                  </Button>
+                )}
+              </div>
+            )}
+            <Line label="中国大陆出口">
+              <Switch checked={env.allowCn} onCheckedChange={(allowCn) => setEnv({ ...env, allowCn })} label="允许中国大陆出口" />
+              <span className="text-[11.5px] text-muted">{env.allowCn ? "允许" : "拦截（推荐）"}</span>
+            </Line>
+            <Line label="沙箱隔离">
+              <Switch checked={env.isolation === "sandboxie"} disabled={!sandbox?.ok && env.isolation !== "sandboxie"} onCheckedChange={(v) => setEnv({ ...env, isolation: v ? "sandboxie" : "" })} label="在 Sandboxie-Plus 沙箱中运行" />
+              <span className="text-[11.5px] text-muted">{env.isolation === "sandboxie" ? "在 Sandboxie-Plus 沙箱中运行" : "不使用沙箱"}</span>
+            </Line>
+            <p className="px-4 pb-3 text-[11.5px] leading-relaxed text-muted">
+              {env.isolation === "sandboxie"
+                ? "沙箱中只允许连接本账号的本地中继，任何绕过代理的进程都会断网；文件和注册表写入留在沙箱内（账号数据目录除外）。沙箱内无法经本机 DNS 解析外部域名，域名只经代理解析。商店版会先复制一份到 Hydra 数据目录再装入沙箱（首次较慢）；系统默认账号不能使用环境。启动后会核实 Claude 确实在沙箱中运行，否则立即关闭。"
+                : "不用沙箱时：Claude 与它启动的工具都经本地中继出网（无直连回退），出口不合规则时会自动断网；但忽略代理设置的程序仍可能直连。"}
+              {sandbox && !sandbox.ok && <span className="block text-warn">{sandbox.text}</span>}
+            </p>
+          </div>
         </section>
 
         <section>

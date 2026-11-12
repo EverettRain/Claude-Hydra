@@ -14,6 +14,23 @@ pub fn arm(id: &str, signed_in: bool) -> Result<(), String> {
     std::fs::write(marker(), data.to_string()).map_err(|e| format!("无法准备登录：{e}"))
 }
 
+/// The account a sign-in is pending for, without consuming it.
+pub fn pending() -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(marker()).ok()?).ok()?;
+    (v["expires"].as_u64()? >= paths::now_secs()).then(|| v["id"].as_str().map(str::to_owned)).flatten()
+}
+
+/// Hands a `claude://` link straight to account `id` (from its account browser), dropping a
+/// sign-in pending for it.
+#[cfg(not(target_os = "macos"))]
+pub fn deliver(id: &str, url: &str) -> Result<(), String> {
+    if !valid_url(url) { return Err("无效的 Claude 回调地址。".into()); }
+    let i = install::resolve()?;
+    let p = profiles::resolve(&i, id, false).ok_or("登录目标账号已不存在。")?;
+    if pending().as_deref() == Some(id) { let _ = std::fs::remove_file(marker()); }
+    relaunch_with_url(&i, &p, url)
+}
+
 fn valid_url(url: &str) -> bool {
     url.starts_with("claude://") && url.len() <= 16384 && !url.chars().any(|c| c.is_control() || c.is_whitespace() || c == '"')
 }
@@ -45,40 +62,79 @@ pub fn route(url: &str) -> Result<(), String> {
 
 /// Windows: a second Claude process with the same data dir hands its argv (with the URL) to
 /// the running instance through Electron's single-instance lock.
+/// Only a running instance is targeted: a fresh start from here would miss the account's
+/// proxy switches.
 #[cfg(not(target_os = "macos"))]
 fn relaunch_with_url(i: &install::Install, p: &profiles::Profile, url: &str) -> Result<(), String> {
-    let exe = i.launch_exe().ok_or("找不到 Claude 启动程序。")?;
-    let mut cmd = Command::new(exe);
-    if !p.is_default { cmd.arg(format!("--user-data-dir={}", p.path)); }
+    if !profiles::running_map(i).contains_key(&profiles::path_key(&p.path)) {
+        return Err(format!("“{}”的 Claude 没有在运行。请先启动这个账号，再重新登录。", p.name));
+    }
     let settings = crate::settings::load();
+    let sandboxed = settings.effective(&p.id).isolation == "sandboxie";
+    let exe = if sandboxed { crate::sandbox::launch_exe(i)? } else { i.launch_exe().ok_or("找不到 Claude 启动程序。")? };
+    let mut line = Vec::new();
+    if !p.is_default { line.push(format!("--user-data-dir=\"{}\"", p.path)); }
     let extra = profiles::extra_args(&settings, &p.id);
-    #[cfg(windows)]
-    if !extra.is_empty() { cmd.raw_arg(extra); }
-    #[cfg(not(windows))]
-    if !extra.is_empty() { cmd.args(extra.split_whitespace()); }
-    cmd.envs(profiles::env_vars(&settings, &p.id));
-    cmd.arg(url).spawn().map_err(|e| format!("无法转发登录回调：{e}"))?;
+    if !extra.is_empty() { line.push(extra); }
+    line.push(format!("\"{url}\""));
+    let env = profiles::env_vars(&settings, &p.id);
+    // A sandboxed account's Claude only sees a second instance started in the same box.
+    let mut cmd = if sandboxed {
+        crate::sandbox::command(&p.id, &exe, &line.join(" "), &env)?
+    } else {
+        let mut cmd = Command::new(exe);
+        #[cfg(windows)]
+        cmd.raw_arg(line.join(" "));
+        #[cfg(not(windows))]
+        cmd.args(line.iter().map(|a| a.trim_matches('"')));
+        cmd.envs(env);
+        cmd
+    };
+    cmd.spawn().map_err(|e| format!("无法转发登录回调：{e}"))?;
     Ok(())
 }
 
+/// Registers Hydra for `claude://` (sign-in callbacks) and as a browser for http/https, so the
+/// links Claude opens (Google sign-in) reach the account browser on the account's own exit.
+/// Windows only lets the user pick the defaults, so the Default Apps page is opened. The
+/// current https browser is remembered and receives every link that is not for Claude.
 #[cfg(windows)]
 pub fn register() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    crate::browser::remember_fallback();
     let base = r"HKCU\Software\Classes\ClaudeHydra.Callback";
+    let url_class = r"HKCU\Software\Classes\ClaudeHydra.URL";
     let capabilities = r"Software\ClaudeHydra\Capabilities";
+    let client = r"HKCU\Software\Clients\StartMenuInternet\ClaudeHydra";
     let command = format!("\"{}\" --login-callback \"%1\"", exe.display());
-    let entries = [
+    let open_url = format!("\"{}\" --open-url \"%1\"", exe.display());
+    let mut entries = vec![
         (base.to_string(), "/ve", "Claude-Hydra 登录回调".to_string()),
         (base.to_string(), "/v URL Protocol", String::new()),
         (format!(r"{base}\shell\open\command"), "/ve", command),
-        (format!(r"HKCU\{capabilities}"), "/v ApplicationName", "Claude-Hydra 登录回调".into()),
+        (url_class.to_string(), "/ve", "Claude-Hydra 链接".to_string()),
+        (url_class.to_string(), "/v URL Protocol", String::new()),
+        (format!(r"{url_class}\DefaultIcon"), "/ve", format!("\"{}\",0", exe.display())),
+        (format!(r"{url_class}\shell\open\command"), "/ve", open_url),
+        (format!(r"HKCU\{capabilities}"), "/v ApplicationName", "Claude-Hydra".into()),
+        (format!(r"HKCU\{capabilities}"), "/v ApplicationDescription", "把 Claude 打开的登录链接交给对应账号的专属浏览器，其余链接转给原来的浏览器。".into()),
         (format!(r"HKCU\{capabilities}\URLAssociations"), "/v claude", "ClaudeHydra.Callback".into()),
         (r"HKCU\Software\RegisteredApplications".into(), "/v ClaudeHydra", capabilities.into()),
+        (client.to_string(), "/ve", "Claude-Hydra".into()),
+        (format!(r"{client}\DefaultIcon"), "/ve", format!("\"{}\",0", exe.display())),
+        (format!(r"{client}\shell\open\command"), "/ve", format!("\"{}\"", exe.display())),
+        (format!(r"{client}\Capabilities"), "/v ApplicationName", "Claude-Hydra".into()),
+        (format!(r"{client}\Capabilities"), "/v ApplicationDescription", "Claude-Hydra 账号浏览器路由".into()),
     ];
+    for scheme in ["http", "https"] {
+        entries.push((format!(r"HKCU\{capabilities}\URLAssociations"), if scheme == "http" { "/v http" } else { "/v https" }, "ClaudeHydra.URL".into()));
+        entries.push((format!(r"{client}\Capabilities\URLAssociations"), if scheme == "http" { "/v http" } else { "/v https" }, "ClaudeHydra.URL".into()));
+    }
     for (key, name, value) in entries {
         let mut cmd = Command::new("reg.exe");
         cmd.arg("add").arg(key);
         if name == "/ve" { cmd.arg("/ve"); } else { cmd.args(["/v", name.trim_start_matches("/v ")]); }
+        cmd.creation_flags(0x0800_0000);
         let status = cmd.args(["/t", "REG_SZ", "/d", &value, "/f"]).status().map_err(|e| e.to_string())?;
         if !status.success() { return Err("无法注册登录回调程序。".into()); }
     }

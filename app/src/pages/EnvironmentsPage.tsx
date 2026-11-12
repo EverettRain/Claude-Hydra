@@ -6,10 +6,10 @@ import { Page, PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
-import { api, errorText, type Environment, type EnvironmentInput } from "@/lib/api";
+import { api, errorText, type Environment, type EnvironmentInput, type ExitInfo } from "@/lib/api";
 import { environmentSummary, toInput } from "@/lib/environment";
 
-type Editing = { id: string | null; initial?: EnvironmentInput; detectedTimezone?: string | null } | null;
+type Editing = { id: string | null; initial?: EnvironmentInput; detectedTimezone?: string | null; exitBaseline?: ExitInfo | null } | null;
 
 export function EnvironmentsPage({ onChanged }: { onChanged: () => void }) {
   const toast = useToast();
@@ -62,7 +62,7 @@ export function EnvironmentsPage({ onChanged }: { onChanged: () => void }) {
         {envs && envs.length > 0 && (
           <div className="list-card">
             {envs.map((e) => (
-              <div key={e.id} onDoubleClick={() => setEditing({ id: e.id, initial: toInput(e), detectedTimezone: e.detectedTimezone })} className="group flex items-center gap-3 px-4 py-3 hover:bg-card-2">
+              <div key={e.id} onDoubleClick={() => setEditing({ id: e.id, initial: toInput(e), detectedTimezone: e.detectedTimezone, exitBaseline: e.exitBaseline })} className="group flex items-center gap-3 px-4 py-3 hover:bg-card-2">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-pill text-fg-2">
                   {e.node ? <Globe2 className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
                 </span>
@@ -73,7 +73,7 @@ export function EnvironmentsPage({ onChanged }: { onChanged: () => void }) {
                 <span className="hidden shrink-0 text-[11.5px] text-muted min-[820px]:inline" title={e.usedBy.join("、")}>
                   {e.usedBy.length ? `${e.usedBy.length} 个账号使用` : "未使用"}
                 </span>
-                <Button variant="outline" size="sm" onClick={() => setEditing({ id: e.id, initial: toInput(e), detectedTimezone: e.detectedTimezone })}>编辑</Button>
+                <Button variant="outline" size="sm" onClick={() => setEditing({ id: e.id, initial: toInput(e), detectedTimezone: e.detectedTimezone, exitBaseline: e.exitBaseline })}>编辑</Button>
                 <Menu
                   trigger={(toggle) => (
                     <Button variant="ghost" size="iconSm" aria-label="更多" onClick={toggle}>
@@ -81,7 +81,7 @@ export function EnvironmentsPage({ onChanged }: { onChanged: () => void }) {
                     </Button>
                   )}
                   items={[
-                    { label: "编辑…", icon: Pencil, onSelect: () => setEditing({ id: e.id, initial: toInput(e), detectedTimezone: e.detectedTimezone }) },
+                    { label: "编辑…", icon: Pencil, onSelect: () => setEditing({ id: e.id, initial: toInput(e), detectedTimezone: e.detectedTimezone, exitBaseline: e.exitBaseline }) },
                     { label: "复制为新环境", icon: Copy, onSelect: () => setEditing({ id: null, initial: { ...toInput(e), name: `${e.name} 副本` } }) },
                     "sep",
                     { label: "删除…", icon: Trash2, danger: true, onSelect: () => setDeleting(e) },
@@ -98,6 +98,7 @@ export function EnvironmentsPage({ onChanged }: { onChanged: () => void }) {
         id={editing?.id ?? null}
         initial={editing?.initial}
         detectedTimezone={editing?.detectedTimezone}
+        exitBaseline={editing?.exitBaseline}
         onClose={() => setEditing(null)}
         onSaved={async () => {
           const created = !editing?.id;

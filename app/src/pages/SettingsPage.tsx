@@ -86,8 +86,8 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
             />
           </Row>
           {info?.platform === "windows" && (
-            <Row label="浏览器登录回调" hint="注册后在 Windows 默认应用中将 claude 链接设为 Claude-Hydra，再在账号菜单选择“准备浏览器登录”。未准备的链接不会转发。">
-              <Button variant="outline" size="sm" disabled={busy === "router"} onClick={() => act("router", () => api.setupLoginRouter(), "已注册。请在系统设置中选择 Claude-Hydra 登录回调。")}>
+            <Row label="登录与链接路由" hint="注册后在 Windows 默认应用中把 Claude-Hydra 设为默认浏览器（以及 claude 链接）。之后 Claude 打开的谷歌登录等链接会进入该账号的专属浏览器，与账号同一出口 IP 和时区；其他链接仍交给你原来的浏览器。">
+              <Button variant="outline" size="sm" disabled={busy === "router"} onClick={() => act("router", () => api.setupLoginRouter(), "已注册。请在系统设置中把 Claude-Hydra 设为默认浏览器。")}>
                 设置
               </Button>
             </Row>

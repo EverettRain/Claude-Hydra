@@ -29,7 +29,9 @@ impl Install {
             let Some(family) = &self.family else { return false };
             let family = family.to_lowercase();
             let Some((name, publisher)) = family.split_once('_') else { return false };
-            return lower.contains(&format!("\\windowsapps\\{name}_"))
+            // The package itself, or the copy sandboxed accounts run (see `sandbox::launch_exe`).
+            let copies = format!("{}\\", crate::sandbox::apps_dir().to_string_lossy().trim_end_matches('\\').to_lowercase());
+            return (lower.contains(&format!("\\windowsapps\\{name}_")) || lower.starts_with(&copies))
                 && lower.contains(&format!("__{publisher}\\"))
                 && lower.ends_with("\\claude.exe");
         }
@@ -343,6 +345,9 @@ mod tests {
         assert!(i.is_desktop_exe(r"C:\Program Files\WindowsApps\Claude_4.30000.0.0_x64__pzs8sxrjxfjjc\app\claude.exe"));
         assert!(!i.is_desktop_exe(r"C:\Users\u\AppData\Roaming\Claude\claude-code\2.1.0\claude.exe"));
         assert!(!i.is_desktop_exe(r"C:\Program Files\WindowsApps\Claude_4.1.0.0_x64__otherpublisher\app\Claude.exe"));
+        let copy = crate::sandbox::apps_dir().join("Claude_5.1231.2.0_x64__pzs8sxrjxfjjc").join("Claude.exe");
+        assert!(i.is_desktop_exe(&copy.to_string_lossy()));
+        assert!(!i.is_desktop_exe(r"D:\elsewhere\Claude_5.1231.2.0_x64__pzs8sxrjxfjjc\Claude.exe"));
     }
 
     #[test]

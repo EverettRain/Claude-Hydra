@@ -25,6 +25,13 @@ pub fn run(args: &[String]) -> Option<i32> {
             Err(e) => { sys::error_box(&e); 1 }
         });
     }
+    if first == "--open-url" {
+        let result = args.get(1).ok_or("缺少链接地址。".to_string()).and_then(|url| crate::browser::route_external(url));
+        return Some(match result {
+            Ok(()) => 0,
+            Err(e) => { sys::error_box(&e); 1 }
+        });
+    }
     if first == "--tray" {
         return None;
     }

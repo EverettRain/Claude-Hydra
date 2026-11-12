@@ -1,7 +1,9 @@
 //! Claude-Hydra application entry, system tray management, and Tauri IPC commands.
 
+pub mod browser;
 pub mod cli;
 pub mod environment;
+pub mod guard;
 pub mod install;
 pub mod launcher;
 pub mod login;
@@ -12,6 +14,7 @@ pub mod profiles;
 pub mod node;
 pub mod quota;
 mod releases;
+pub mod sandbox;
 pub mod clash;
 mod relay;
 pub mod sessions;
@@ -253,6 +256,38 @@ async fn prepare_login(app: AppHandle, id: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     after_change(&app);
     r
+}
+
+/// Opens the account's own browser on its exit IP and time zone (`url` defaults to sign-in).
+#[tauri::command]
+async fn open_account_browser(app: AppHandle, id: String, url: Option<String>) -> Result<(), String> {
+    let a = app.clone();
+    tauri::async_runtime::spawn_blocking(move || browser::open(&a, browser::plan(&id, url.as_deref())?))
+        .await.map_err(|e| e.to_string())?
+}
+
+/// Re-checks a blocked account's exit and restores its network when it complies again.
+#[tauri::command]
+async fn resume_account(app: AppHandle, id: String) -> Result<String, String> {
+    let r = tauri::async_runtime::spawn_blocking(move || guard::resume(&id).map(|x| guard::describe(&x)))
+        .await.map_err(|e| e.to_string())?;
+    after_change(&app);
+    r
+}
+
+/// Binds an environment's exit rule to the node's current exit and unblocks its accounts.
+#[tauri::command]
+async fn rebind_exit(app: AppHandle, id: String) -> Result<String, String> {
+    let r = tauri::async_runtime::spawn_blocking(move || guard::rebind(&id).map(|x| guard::describe(&x)))
+        .await.map_err(|e| e.to_string())?;
+    after_change(&app);
+    r
+}
+
+/// Sandboxie-Plus install folder, or why sandbox isolation is unavailable.
+#[tauri::command]
+fn sandbox_status() -> Result<String, String> {
+    sandbox::available().map(|p| p.display().to_string())
 }
 
 #[tauri::command]
@@ -584,7 +619,8 @@ fn start_background(app: AppHandle) {
 pub fn run(start_in_tray: bool) {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // `--tray` instances are started only to make sure a host runs (e.g. by link routing).
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| if !args.iter().any(|a| a == "--tray") { show_main(app) }))
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_profiles,
@@ -607,6 +643,10 @@ pub fn run(start_in_tray: bool) {
             create_shortcut,
             setup_login_router,
             prepare_login,
+            open_account_browser,
+            resume_account,
+            rebind_exit,
+            sandbox_status,
             diagnostics,
             session_preview,
             read_import,
@@ -628,6 +668,16 @@ pub fn run(start_in_tray: bool) {
             let handle = app.handle().clone();
             // This process hosts the per-account proxy relays for as long as it runs.
             relay::set_host();
+            let notify = handle.clone();
+            guard::on_block(move |id, reason| {
+                let _ = notify.emit_to("main", "guard-blocked", (id, reason));
+                after_change(&notify);
+                let text = format!("出口保护已切断账号“{id}”的网络。\n\n{reason}\n\n在账号菜单中选择“恢复网络”可重新检测。");
+                std::thread::spawn(move || sys::error_box(&text));
+            });
+            relay::start_monitor();
+            browser::start_watcher(handle.clone());
+            browser::remember_fallback();
             environment::migrate();
             // Starting Clash-node relays waits for each Mihomo core; keep the window responsive.
             std::thread::spawn(relay::sync_all);

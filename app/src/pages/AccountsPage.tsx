@@ -1,6 +1,7 @@
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 import {
   FolderOpen,
+  Globe,
   Link2,
   Loader2,
   MoreHorizontal,
@@ -10,6 +11,7 @@ import {
   Power,
   RefreshCw,
   RotateCw,
+  ShieldAlert,
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
@@ -98,6 +100,8 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
                 onRestart={() => run(p, "重启中", () => api.restart(p.id), `已重启 ${p.name}`)}
                 onEdit={() => setEditing(p)}
                 onLogin={() => run(p, "准备登录", () => api.prepareLogin(p.id), `已选择 ${p.name}，请在 10 分钟内完成浏览器登录。`)}
+                onBrowser={() => run(p, "检测出口", () => api.openAccountBrowser(p.id))}
+                onResume={() => run(p, "检测出口", async () => toast(`已恢复 ${p.name} 的网络，当前出口 ${await api.resumeAccount(p.id)}`))}
                 onFolder={() => api.openFolder(p.id).catch((e) => toast(errorText(e), "error"))}
                 onShortcut={() =>
                   run(p, "创建中", async () => {
@@ -169,12 +173,14 @@ interface RowProps {
   onRestart: () => void;
   onEdit: () => void;
   onLogin: () => void;
+  onBrowser: () => void;
+  onResume: () => void;
   onFolder: () => void;
   onShortcut: () => void;
   onDelete: () => void;
 }
 
-function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, onFolder, onShortcut, onDelete }: RowProps) {
+function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, onBrowser, onResume, onFolder, onShortcut, onDelete }: RowProps) {
   const isRunning = !!p.pid;
   return (
     <div onDoubleClick={onLaunch} className="group flex items-center gap-3 px-4 py-3 hover:bg-card-2">
@@ -187,7 +193,9 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
           {p.environment && <Tag tone="env">{p.environment}</Tag>}
           {p.keepRunning && <Tag>保持运行</Tag>}
           {p.signedIn === false && <Tag tone="warn">未登录</Tag>}
+          {p.blocked && <Tag tone="danger" title={p.blocked}>已断网</Tag>}
         </div>
+        {p.blocked && <div className="mt-0.5 truncate text-[11.5px] text-danger" title={p.blocked}>出口保护：{p.blocked}</div>}
         <div className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-muted">
           <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", isRunning ? "bg-ok shadow-[0_0_0_3px_rgb(var(--ok-soft))]" : "bg-faint")} />
           <span className="shrink-0">{isRunning ? `运行中 · PID ${p.pid}` : `上次使用 ${relativeTime(p.lastUsed)}`}</span>
@@ -219,6 +227,8 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
           )}
           items={[
             { label: "编辑…", icon: Pencil, onSelect: onEdit },
+            ...(p.blocked ? [{ label: "恢复网络（重新检测出口）", icon: ShieldAlert, onSelect: onResume }] : []),
+            ...(IS_WINDOWS && p.environment ? [{ label: "打开账号浏览器", icon: Globe, onSelect: onBrowser }] : []),
             ...(IS_WINDOWS || (IS_MAC && !p.isDefault) ? [{ label: "准备浏览器登录", icon: Link2, onSelect: onLogin }] : []),
             { label: "重启", icon: RotateCw, onSelect: onRestart, disabled: !isRunning },
             { label: "打开数据目录", icon: FolderOpen, onSelect: onFolder },
@@ -231,13 +241,13 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
   );
 }
 
-function Tag({ children, tone }: { children: React.ReactNode; tone?: "warn" | "env" }) {
+function Tag({ children, tone, title }: { children: React.ReactNode; tone?: "warn" | "env" | "danger"; title?: string }) {
   return (
     <span
-      title={tone === "env" ? "环境配置" : undefined}
+      title={title ?? (tone === "env" ? "环境配置" : undefined)}
       className={cn(
         "inline-flex h-[18px] max-w-[160px] shrink-0 items-center truncate rounded-full px-1.5 text-[10.5px] font-medium",
-        tone === "warn" ? "bg-warn-soft text-warn" : tone === "env" ? "bg-brand-soft text-brand" : "bg-pill text-fg-2",
+        tone === "danger" ? "bg-danger-soft text-danger" : tone === "warn" ? "bg-warn-soft text-warn" : tone === "env" ? "bg-brand-soft text-brand" : "bg-pill text-fg-2",
       )}
     >
       {children}

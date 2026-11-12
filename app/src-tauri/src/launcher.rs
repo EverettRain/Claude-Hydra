@@ -31,9 +31,14 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     // Hydra-managed switches; passed as separate arguments (some contain spaces).
     let mut managed: Vec<String> = Vec::new();
     let mut timezone = match effective.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
-    if (node.is_some() || timezone.is_some()) && p.is_default && install.is_msix() {
-        return Err("商店版默认账号无法应用环境配置中的代理节点或时区。".into());
+    let sandboxed = effective.isolation == "sandboxie";
+    if (node.is_some() || timezone.is_some() || sandboxed) && p.is_default && install.is_msix() {
+        return Err("商店版默认账号无法应用环境配置中的代理节点、时区或沙箱隔离。".into());
     }
+    if let Some(reason) = s.account(&p.id).blocked {
+        return Err(format!("账号未启动：出口保护已切断这个账号的网络——{reason}\n请在账号菜单中选择“恢复网络”重新检测，或在环境配置中重新绑定出口。"));
+    }
+    let mut relay_port = None;
     if let Some(node) = &node {
         if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
         // Claude pins itself to a managed egress proxy over `--proxy-server`, so the account
@@ -47,6 +52,8 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         // Verify the exact route Claude will use: local relay -> node -> internet.
         let client = crate::node::relay_client(port, std::time::Duration::from_secs(15))?;
         let exit = crate::node::inspect(&client, node).map_err(|e| format!("账号未启动：{e}"))?;
+        crate::guard::verify(effective.environment.as_deref(), &exit).map_err(|e| format!("账号未启动：{e}"))?;
+        relay_port = Some(port);
         if matches!(effective.timezone.as_str(), "" | "proxy") {
             if exit.timezone.is_empty() {
                 return Err("账号未启动：IP 查询服务没有返回出口时区。请换一个 IP 查询渠道，或在账号设置中手动指定时区。".into());
@@ -114,9 +121,11 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let exe = install
-            .launch_exe()
-            .ok_or("找不到 Claude 的启动程序。Claude 可能正在更新，请稍后再试。")?;
+        let exe = if sandboxed {
+            crate::sandbox::launch_exe(install).map_err(|e| format!("账号未启动：{e}"))?
+        } else {
+            install.launch_exe().ok_or("找不到 Claude 的启动程序。Claude 可能正在更新，请稍后再试。")?
+        };
         let mut line = Vec::new();
         if !p.is_default {
             line.push(format!("--user-data-dir=\"{}\"", p.path));
@@ -125,11 +134,17 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         if !extra.is_empty() {
             line.push(extra);
         }
-        let mut cmd = Command::new(&exe);
-        #[cfg(windows)]
-        cmd.raw_arg(line.join(" "));
-        #[cfg(not(windows))]
-        cmd.args(line);
+        let mut cmd = if sandboxed {
+            crate::sandbox::configure(&p.id, &p.path, relay_port).map_err(|e| format!("账号未启动：{e}"))?;
+            crate::sandbox::command(&p.id, &exe, &line.join(" "), &env)?
+        } else {
+            let mut cmd = Command::new(&exe);
+            #[cfg(windows)]
+            cmd.raw_arg(line.join(" "));
+            #[cfg(not(windows))]
+            cmd.args(line);
+            cmd
+        };
         // Claude explains an immediate exit on stderr (e.g. "refusing to start — ..."), so keep it.
         let stderr_path = paths::logs_dir().join(format!("launch-{}.log", safe_file_name(&p.id)));
         let stderr = std::fs::create_dir_all(paths::logs_dir())
@@ -145,12 +160,28 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
         }
-        let result = confirm_started(install, p, &mut child, &stderr_path);
+        let mut result = confirm_started(install, p, &mut child, &stderr_path);
+        if sandboxed && result.is_ok() { result = confirm_boxed(install, p); }
         if let Err(e) = &result {
             paths::append_log("hydra-error.log", &format!("launch {}: {e}", p.id));
         }
         result.map(|_| outcome)
     }
+}
+
+/// Sandboxed launch: the account's Claude must really run in its box, or it is closed again.
+#[cfg(not(target_os = "macos"))]
+fn confirm_boxed(install: &Install, p: &Profile) -> Result<(), String> {
+    let expected = crate::sandbox::box_name(&p.id);
+    let pid = profiles::running_map(install).get(&path_key(&p.path)).copied();
+    let actual = pid.and_then(crate::sandbox::box_of);
+    if actual.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(&expected)) { return Ok(()); }
+    let _ = close(install, p);
+    if let Some(pid) = pid { if sys::is_alive(pid) { sys::terminate(pid); } }
+    Err(format!(
+        "账号未启动：Claude 没有运行在沙箱 {expected} 中（{}），为避免在沙箱外联网已将其关闭。请确认 Sandboxie-Plus 服务正在运行，或关闭此环境的沙箱隔离。",
+        actual.map(|b| format!("实际所在：{b}")).unwrap_or_else(|| "不在任何沙箱中".into())
+    ))
 }
 
 #[cfg(not(target_os = "macos"))]

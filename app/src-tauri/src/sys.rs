@@ -24,8 +24,8 @@ mod win {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Registry::{
-        RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ,
-        RRF_RT_REG_SZ,
+        RegCloseKey, RegDeleteKeyValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY,
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RRF_RT_REG_SZ,
     };
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
@@ -282,6 +282,25 @@ mod win {
             }
             Some(String::from_utf16_lossy(&buf))
         }
+    }
+
+    /// Names of the direct subkeys of `key` (empty if it cannot be opened).
+    pub fn reg_subkeys(machine: bool, key: &str) -> Vec<String> {
+        let k = wide(key);
+        let hive = if machine { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+        let mut out = Vec::new();
+        unsafe {
+            let mut h: HKEY = null_mut();
+            if RegOpenKeyExW(hive, k.as_ptr(), 0, KEY_READ, &mut h) != 0 { return out; }
+            let mut buf = [0u16; 256];
+            for i in 0.. {
+                let mut len = buf.len() as u32;
+                if RegEnumKeyExW(h, i, buf.as_mut_ptr(), &mut len, null_mut(), null_mut(), null_mut(), null_mut()) != 0 { break; }
+                out.push(String::from_utf16_lossy(&buf[..len as usize]));
+            }
+            RegCloseKey(h);
+        }
+        out
     }
 
     /// Claude's managed egress proxy (`egressProxyUrl` under `Software\Policies\Claude`, machine

@@ -26,6 +26,8 @@ pub struct Profile {
     pub signed_in: Option<bool>,
     /// Name of the assigned environment config.
     pub environment: Option<String>,
+    /// Why the exit guard cut this account's network, while it is cut.
+    pub blocked: Option<String>,
 }
 
 pub fn profile_path(install: &Install, id: &str) -> PathBuf {
@@ -205,6 +207,7 @@ pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
                 color: colors.get(&id).copied().unwrap_or(0),
                 keep_running: acc.keep_running,
                 environment: s.environment_name(&id),
+                blocked: acc.blocked.clone(),
                 name,
                 path: pstr,
                 id,

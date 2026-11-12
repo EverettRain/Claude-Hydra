@@ -13,6 +13,8 @@ export interface Profile {
   signedIn: boolean | null;
   /** Name of the assigned environment config. */
   environment: string | null;
+  /** Why the exit guard cut this account's network, while it is cut. */
+  blocked: string | null;
 }
 
 export interface ProfileOptions {
@@ -35,12 +37,21 @@ export interface EnvironmentInput {
   env: string;
   /** Last successful connectivity check of the node. */
   lastCheck: NodeCheck | null;
+  /** "" | "static" | "city" | "region" | "country" */
+  exitRule: ExitRule;
+  /** Allow mainland-China exits (blocked by default). */
+  allowCn: boolean;
+  /** "" | "sandboxie" */
+  isolation: "" | "sandboxie";
 }
+export type ExitRule = "" | "static" | "city" | "region" | "country";
 export interface Environment extends EnvironmentInput {
   id: string;
   usedBy: string[];
   /** Exit timezone last confirmed for the node (connectivity or launch check). */
   detectedTimezone: string | null;
+  /** Exit the rule is bound to (set by the first verified check). */
+  exitBaseline: ExitInfo | null;
 }
 
 export type NodeKind = "clash" | "http" | "https" | "socks5";
@@ -100,6 +111,10 @@ export const api = {
   createShortcut: (id: string) => invoke<string>("create_shortcut", { id }),
   setupLoginRouter: () => invoke<void>("setup_login_router"),
   prepareLogin: (id: string) => invoke<void>("prepare_login", { id }),
+  openAccountBrowser: (id: string, url?: string) => invoke<void>("open_account_browser", { id, url: url ?? null }),
+  resumeAccount: (id: string) => invoke<string>("resume_account", { id }),
+  rebindExit: (id: string) => invoke<string>("rebind_exit", { id }),
+  sandboxStatus: () => invoke<string>("sandbox_status"),
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
   revealTranscript: (path: string) => invoke<void>("reveal_transcript", { path }),

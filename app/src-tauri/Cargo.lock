@@ -595,6 +595,8 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
+ "webview2-com",
+ "windows",
  "windows-sys 0.59.0",
 ]
 

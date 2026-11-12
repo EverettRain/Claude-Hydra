@@ -5,7 +5,11 @@ export const LOCALES: [string, string][] = [
   ["zh-CN", "简体中文"], ["zh-TW", "繁體中文"], ["ja-JP", "日语"], ["ko-KR", "韩语"],
 ];
 
-export const emptyEnvironment = (): EnvironmentInput => ({ name: "", node: null, timezone: "proxy", locale: "", args: "", env: "", lastCheck: null });
+export const emptyEnvironment = (): EnvironmentInput => ({ name: "", node: null, timezone: "proxy", locale: "", args: "", env: "", lastCheck: null, exitRule: "", allowCn: false, isolation: "" });
+
+export const EXIT_RULES: [string, string][] = [
+  ["", "不限（只拦截中国大陆出口）"], ["country", "同国家"], ["region", "同省/州"], ["city", "同城市"], ["static", "固定 IP"],
+];
 
 /** One-line description: proxy · timezone · language · extras. */
 /** `detectedTimezone`: the confirmed exit zone, shown instead of "follows proxy" once known. */
@@ -20,10 +24,12 @@ export function environmentSummary(e: EnvironmentInput & { detectedTimezone?: st
   if (e.locale && lang) parts.push(lang[1]);
   const extras = [e.args.trim() && "启动参数", e.env.trim() && "环境变量"].filter(Boolean);
   if (extras.length) parts.push(extras.join("、"));
+  if (e.exitRule) parts.push(`出口：${EXIT_RULES.find(([v]) => v === e.exitRule)?.[1] ?? e.exitRule}`);
+  if (e.isolation === "sandboxie") parts.push("沙箱隔离");
   return parts.join(" · ");
 }
 
 export function toInput(e: Environment): EnvironmentInput {
-  const { name, node, timezone, locale, args, env, lastCheck } = e;
-  return { name, node, timezone, locale, args, env, lastCheck: lastCheck ?? null };
+  const { name, node, timezone, locale, args, env, lastCheck, exitRule, allowCn, isolation } = e;
+  return { name, node, timezone, locale, args, env, lastCheck: lastCheck ?? null, exitRule: exitRule ?? "", allowCn: !!allowCn, isolation: isolation ?? "" };
 }
