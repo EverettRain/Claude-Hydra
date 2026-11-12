@@ -104,7 +104,7 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
 
         <section>
           <div className="group-label">网络与时区</div>
-          <NodeConfigForm idPrefix="env-node" node={env.node} onNodeChange={(node) => setEnv((e) => ({ ...e, node }))}
+          <NodeConfigForm subscription={env.clashSubscription} onSubscriptionChange={(clashSubscription) => setEnv(e => ({ ...e, clashSubscription }))} idPrefix="env-node" node={env.node} onNodeChange={(node) => setEnv((e) => ({ ...e, node }))}
             timezone={env.timezone} onTimezoneChange={(timezone) => setEnv({ ...env, timezone })}
             detectedTimezone={JSON.stringify(env.node) === JSON.stringify(initial?.node ?? null) ? detectedTimezone : null}
             lastCheck={env.lastCheck} onLastCheckChange={(lastCheck) => setEnv((e) => ({ ...e, lastCheck }))} />

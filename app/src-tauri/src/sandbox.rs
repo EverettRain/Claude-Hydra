@@ -201,8 +201,80 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<St
     let mut reload = Command::new(dir.join("Start.exe"));
     #[cfg(windows)]
     reload.creation_flags(0x0800_0000);
-    reload.arg("/reload").status().map_err(|e| format!("无法让 Sandboxie 重新加载配置：{e}"))?;
+    if !reload.arg("/reload").status().map_err(|e| format!("无法让 Sandboxie 重新加载配置：{e}"))?.success() {
+        return Err("Sandboxie 未能重新加载账号配置。".into());
+    }
+    #[cfg(windows)]
+    sync_box_proxy(&dir, &name, relay_port.filter(|_| crate::sys::claude_egress_policy().is_some()))?;
     Ok(name)
+}
+
+/// Edit only the physical copy of the value in the box hive. Removing that copy
+/// restores Sandboxie's merged view of the current host policy.
+#[cfg(windows)]
+fn sync_box_proxy(dir: &Path, name: &str, port: Option<u16>) -> Result<(), String> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{FreeLibrary, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::Registry::*;
+    let folder = crate::paths::storage_root().join("sandbox");
+    let marker = folder.join(format!("{name}.proxy"));
+    if port.is_none() && !marker.try_exists().map_err(|e| e.to_string())? { return Ok(()); }
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let dll = wide(&dir.join("SbieDll.dll").to_string_lossy());
+    let mut path = [0u16; 1024];
+    let mut size = std::mem::size_of_val(&path) as u32;
+    type Query = unsafe extern "system" fn(*const u16, *mut u16, *mut u16, *mut u16, *mut u32, *mut u32, *mut u32) -> i32;
+    let status = unsafe {
+        let module = LoadLibraryW(dll.as_ptr());
+        if module.is_null() { return Err("无法加载 Sandboxie。".into()); }
+        let rc = GetProcAddress(module, c"SbieApi_QueryBoxPath".as_ptr().cast()).map(|f| {
+            let query: Query = std::mem::transmute(f);
+            query(wide(name).as_ptr(), null_mut(), path.as_mut_ptr(), null_mut(), null_mut(), &mut size, null_mut())
+        });
+        FreeLibrary(module);
+        rc
+    };
+    let path = String::from_utf16_lossy(&path[..path.iter().position(|&c| c == 0).unwrap_or(path.len())]);
+    let lower = path.to_ascii_lowercase();
+    let hive = lower.strip_prefix(r"\registry\user\").filter(|s| !s.contains('\\') && s.starts_with("sandbox_") && s.ends_with(&format!("_{}", name.to_ascii_lowercase())));
+    let hive = hive.filter(|_| status == Some(0)).ok_or("无法确认账号沙箱的专用注册表位置。")?;
+    let mut mount = Command::new(dir.join("Start.exe"));
+    mount.args([&format!("/box:{name}"), "/silent", "mount_hive"]).creation_flags(0x0800_0000);
+    mount.spawn().map_err(|e| format!("无法挂载账号沙箱注册表：{e}"))?;
+    // Open the existing mount. Never create a hive or address HKCU/HKLM.
+    let mut root = null_mut();
+    let start = std::time::Instant::now();
+    loop {
+        let rc = unsafe { RegOpenKeyExW(HKEY_USERS, wide(hive).as_ptr(), 0, KEY_READ | KEY_WRITE, &mut root) };
+        if rc == 0 { break; }
+        if rc != ERROR_FILE_NOT_FOUND || start.elapsed().as_secs() >= 10 {
+            return Err(format!("无法打开账号沙箱注册表（Windows 错误 {rc}）。"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let result = (|| -> Result<(), String> {
+        if port.is_some() {
+            std::fs::create_dir_all(&folder).and_then(|_| std::fs::write(&marker, [])).map_err(|e| e.to_string())?;
+        }
+        for branch in [r"machine", r"user\current"] {
+            let key = wide(&format!(r"{branch}\Software\Policies\Claude"));
+            let value = wide("egressProxyUrl");
+            let rc = if let Some(port) = port {
+                let url = wide(&format!("http://127.0.0.1:{port}"));
+                unsafe { RegSetKeyValueW(root, key.as_ptr(), value.as_ptr(), REG_SZ, url.as_ptr().cast(), (url.len() * 2) as u32) }
+            } else {
+                unsafe { RegDeleteKeyValueW(root, key.as_ptr(), value.as_ptr()) }
+            };
+            if rc != 0 && !(port.is_none() && matches!(rc, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)) {
+                return Err(format!("无法更新账号沙箱的代理策略（Windows 错误 {rc}）。"));
+            }
+        }
+        if port.is_none() { std::fs::remove_file(&marker).map_err(|e| e.to_string())?; }
+        Ok(())
+    })();
+    unsafe { RegCloseKey(root); }
+    result
 }
 
 /// A command that runs `exe raw_args` inside the account's box. `env` is passed both inherited
@@ -245,6 +317,38 @@ pub fn box_of(_pid: u32) -> Option<String> { None }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires Sandboxie-Plus and CLAUDE_HYDRA_ROOT pointing to a scratch folder"]
+    fn boxed_proxy_round_trip() {
+        assert!(std::env::var_os("CLAUDE_HYDRA_ROOT").is_some());
+        let dir = super::available().unwrap();
+        let data = crate::paths::storage_root().join("proxy-test");
+        std::fs::create_dir_all(&data).unwrap();
+        let id = "hydra-proxy-integration-test";
+        let name = super::configure(id, &data.to_string_lossy(), None).unwrap();
+        let key = r"Software\Policies\Claude";
+        let host = [true, false].map(|machine| crate::sys::reg_string(machine, key, "egressProxyUrl"));
+        for port in [Some(34567), Some(34568), None] {
+            super::sync_box_proxy(&dir, &name, port).unwrap();
+            for (i, hive) in ["HKLM", "HKCU"].iter().enumerate() {
+                let output = data.join("policy.txt");
+                let script = data.join("query.cmd");
+                std::fs::write(&script, format!("@echo off\r\nreg query {hive}\\{key} /v egressProxyUrl > \"{}\" 2>nul\r\n", output.display())).unwrap();
+                let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+                let status = std::process::Command::new(dir.join("Start.exe"))
+                    .args([&format!("/box:{name}"), "/silent", "/wait"]).arg(cmd)
+                    .args(["/d", "/c"]).arg(&script).status().unwrap();
+                let expected = port.map(|p| format!("http://127.0.0.1:{p}")).or_else(|| host[i].clone());
+                assert_eq!(status.success(), expected.is_some());
+                if let Some(expected) = expected {
+                    assert!(std::fs::read_to_string(&output).unwrap().trim_end().ends_with(&expected));
+                }
+                assert_eq!(crate::sys::reg_string(i == 0, key, "egressProxyUrl"), host[i]);
+            }
+        }
+    }
+
     /// Real Sandboxie-Plus + Claude check: `CLAUDE_HYDRA_ROOT=<scratch> cargo test --lib sandboxie_end_to_end -- --ignored --nocapture`
     #[cfg(windows)]
     #[test]
@@ -285,6 +389,8 @@ mod tests {
         assert!(net.contains("dns-localhost=ok"), "{net}");
 
         // 2) Claude itself (Store builds through the copy), detected and confirmed in its box.
+        relay.set_nonblocking(true).unwrap();
+        while relay.accept().is_ok() {} // discard the connectivity probe above
         let install = crate::install::resolve().unwrap();
         let t = Instant::now();
         let exe = super::launch_exe(&install).unwrap();
@@ -305,6 +411,9 @@ mod tests {
         let log = std::fs::read_to_string(udd.join("logs").join("main.log")).unwrap_or_default();
         let _ = std::process::Command::new(super::available().unwrap().join("Start.exe")).args([&format!("/box:{name}"), "/terminate"]).status();
         assert_eq!(boxed.as_deref(), Some(name.as_str()));
+        if crate::sys::claude_egress_policy().is_some() {
+            assert!(relay.accept().is_ok(), "Claude did not connect to its box's policy proxy");
+        }
         assert!(udd.join("Local State").is_file() || udd.join("logs").is_dir(), "profile data did not reach the real folder");
         println!("claude log net lines: {}", log.lines().filter(|l| l.contains("net::") || l.contains("proxy")).take(4).collect::<Vec<_>>().join(" | "));
     }

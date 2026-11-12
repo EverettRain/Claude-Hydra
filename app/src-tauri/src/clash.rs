@@ -63,7 +63,12 @@ pub async fn clash_subscription(url: String) -> Result<String,String> {
         if !matches!(url.scheme(),"http"|"https") { return Err("订阅地址须为 HTTP 或 HTTPS。".into()); }
         let mut text = String::new();
         reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|_| "无法初始化网络。")?
-            .get(url).header("User-Agent","clash.meta").send().and_then(|r|r.error_for_status()).map_err(|_| "订阅下载失败。")?
+            .get(url).header("User-Agent","clash.meta").send().and_then(|r|r.error_for_status()).map_err(|e| {
+                if let Some(status) = e.status() { format!("订阅服务器返回 HTTP {}。", status.as_u16()) }
+                else if e.is_timeout() { "订阅下载超时。".into() }
+                else if e.is_connect() { "无法连接订阅服务器，请检查网络或系统代理。".into() }
+                else { "订阅请求失败，请检查地址和网络连接。".into() }
+            })?
             .take(4_194_305).read_to_string(&mut text).map_err(|_| "订阅不是有效文本。")?;
         if text.len()>4_194_304 { return Err("订阅超过 4 MB。".into()); }
         Ok(text)

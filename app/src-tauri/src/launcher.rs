@@ -43,9 +43,9 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
         // Claude pins itself to a managed egress proxy over `--proxy-server`, so the account
         // would leave through that proxy (e.g. a local Clash port) instead of its node.
-        if let Some(policy) = crate::sys::claude_egress_policy() {
+        if let Some(policy) = sys::claude_egress_policy().filter(|_| !sandboxed || crate::sandbox::available().is_err()) {
             return Err(format!(
-                "账号未启动：系统策略为 Claude 固定了出口代理 {policy}（注册表 HKCU 或 HKLM 下 Software\\Policies\\Claude 的 egressProxyUrl）。Claude 会忽略 Hydra 的代理节点、改走这个代理。请删除该策略值后重试；不使用代理节点的账号不受影响。"
+                "账号未启动：系统策略为 Claude 固定了出口代理 {policy}。Claude 会忽略 Hydra 的代理节点、改走这个代理。如需改走 Hydra 配置，请切换到 Sandboxie-Plus 隔离环境；不使用代理节点的账号不受影响。"
             ));
         }
         let port = crate::relay::port_for_launch(&p.id, node).map_err(|e| format!("账号未启动：{e}"))?;

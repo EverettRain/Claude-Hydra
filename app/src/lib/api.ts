@@ -26,7 +26,10 @@ export interface ProfileOptions {
   lastExit: ExitInfo | null;
 }
 
+export interface ClashSubscription { url: string; nodes: NodeConfig[] }
+
 export interface EnvironmentInput {
+  clashSubscription?: ClashSubscription | null;
   name: string;
   node: NodeConfig | null;
   /** "proxy" | "system" | IANA name */

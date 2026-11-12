@@ -15,6 +15,8 @@ pub const LOCALES: [&str; 7] = ["", "en-US", "en-GB", "zh-CN", "zh-TW", "ja-JP",
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub clash_subscription: String,
     /// Password sealed at rest (see `node::seal`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeConfig>,
@@ -75,10 +77,18 @@ impl Environment {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClashSubscription {
+    pub url: String,
+    pub nodes: Vec<NodeConfig>,
+}
+
 /// What the UI edits: plain-text password and env lines.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentInput {
+    #[serde(default)]
+    pub clash_subscription: Option<ClashSubscription>,
     pub name: String,
     #[serde(default)]
     pub node: Option<NodeConfig>,
@@ -123,6 +133,7 @@ fn view(s: &Settings, id: &str, e: &Environment) -> EnvironmentView {
     EnvironmentView {
         id: id.to_string(),
         input: EnvironmentInput {
+            clash_subscription: serde_json::from_str(&node::unseal(&e.clash_subscription)).ok(),
             name: e.name.clone(),
             node: e.node(),
             timezone: if e.timezone.is_empty() { "proxy".into() } else { e.timezone.clone() },
@@ -183,6 +194,10 @@ fn build(input: &EnvironmentInput) -> Result<Environment, String> {
     if !matches!(input.isolation.as_str(), "" | "sandboxie") { return Err("不支持此隔离方式。".into()); }
     if !input.exit_rule.is_empty() && node.is_none() { return Err("出口规则需要先设置代理节点。".into()); }
     Ok(Environment {
+        clash_subscription: match &input.clash_subscription {
+            Some(sub) => node::seal(&serde_json::to_string(sub).map_err(|e| e.to_string())?),
+            None => String::new(),
+        },
         name: name.to_string(), node: node.map(|mut n| { n.password = node::seal(&n.password); n }), timezone, locale: input.locale.clone(), args, env, last_check,
         exit_rule: input.exit_rule.clone(), allow_cn: input.allow_cn, exit_baseline: None, isolation: input.isolation.clone(),
     })
@@ -262,6 +277,31 @@ pub fn migrate() {
 mod tests {
     use super::*;
     use crate::settings::AccountConfig;
+
+    #[test]
+    fn saved_subscription_can_switch_nodes_after_reopening() {
+        let nodes: Vec<_> = ["first", "second"].iter().map(|name| NodeConfig {
+            kind: "clash".into(), host: "example.org".into(), port: 443,
+            password: serde_json::json!({"name": name, "type": "ss", "server": "example.org", "port": 443}).to_string(),
+            ..Default::default()
+        }).collect();
+        let url = "https://example.org/sub";
+        let mut draft = EnvironmentInput {
+            name: "test".into(), node: Some(nodes[1].clone()),
+            clash_subscription: Some(ClashSubscription { url: url.into(), nodes: nodes.clone() }),
+            ..Default::default()
+        };
+        for selected in [1, 0] {
+            let stored = serde_json::to_vec(&build(&draft).unwrap()).unwrap();
+            let reopened: Environment = serde_json::from_slice(&stored).unwrap();
+            draft = view(&Settings::default(), "test", &reopened).input;
+            let subscription = draft.clash_subscription.as_ref().unwrap();
+            assert_eq!(subscription.url, url);
+            assert_eq!(subscription.nodes, nodes);
+            assert_eq!(draft.node.as_ref().unwrap().password, nodes[selected].password);
+            draft.node = Some(subscription.nodes[0].clone());
+        }
+    }
 
     #[test]
     fn effective_config_prefers_assigned_environment() {

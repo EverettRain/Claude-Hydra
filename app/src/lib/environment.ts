@@ -31,5 +31,5 @@ export function environmentSummary(e: EnvironmentInput & { detectedTimezone?: st
 
 export function toInput(e: Environment): EnvironmentInput {
   const { name, node, timezone, locale, args, env, lastCheck, exitRule, allowCn, isolation } = e;
-  return { name, node, timezone, locale, args, env, lastCheck: lastCheck ?? null, exitRule: exitRule ?? "", allowCn: !!allowCn, isolation: isolation ?? "" };
+  return { clashSubscription: e.clashSubscription, name, node, timezone, locale, args, env, lastCheck: lastCheck ?? null, exitRule: exitRule ?? "", allowCn: !!allowCn, isolation: isolation ?? "" };
 }

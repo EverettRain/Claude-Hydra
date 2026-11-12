@@ -1,13 +1,15 @@
 import { ClashImport } from "./ClashImport";
 import { Check, CircleAlert, CircleCheck, Clock, Copy, Info, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { api, errorText, type ExitInfo, type NodeCheck, type NodeConfig } from "@/lib/api";
+import { api, errorText, type ClashSubscription, type ExitInfo, type NodeCheck, type NodeConfig } from "@/lib/api";
 import { COMMON_TIMEZONES, emptyNode, formatNode, parseNodeText } from "@/lib/node";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { Input, Select } from "./ui/input";
 
 interface Props {
+  subscription?: ClashSubscription | null;
+  onSubscriptionChange: (subscription: ClashSubscription) => void;
   node: NodeConfig | null;
   onNodeChange: (node: NodeConfig | null) => void;
   timezone: string;
@@ -65,7 +67,7 @@ export function checkText(c: NodeCheck) {
   return `已连通　${exitText(c.exit)}\n${c.quality ?? "家宽 / 机房可能性：未知（未取得分类依据）"}\n${c.risk}`;
 }
 
-export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange, lastExit, lastCheck, onLastCheckChange, detectedTimezone, idPrefix = "node" }: Props) {
+export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNodeChange, timezone, onTimezoneChange, lastExit, lastCheck, onLastCheckChange, detectedTimezone, idPrefix = "node" }: Props) {
   const [checking, setChecking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -124,7 +126,7 @@ export function NodeConfigForm({ node, onNodeChange, timezone, onTimezoneChange,
         <Segmented label="代理方式" value={mode} options={[["clash", "Clash 代理"], ["custom", "自定义代理"]]} onChange={switchMode} />
       </Row>
 
-      {mode === "clash" && <ClashImport node={node} choose={changeNode} />}
+      {mode === "clash" && <ClashImport subscription={subscription} onSubscriptionChange={onSubscriptionChange} node={node} choose={changeNode} />}
       {node && (
         <>
           {mode === "custom" && <>
