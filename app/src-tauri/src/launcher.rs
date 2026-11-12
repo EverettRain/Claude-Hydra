@@ -38,6 +38,12 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     if let Some(reason) = s.account(&p.id).blocked {
         return Err(format!("账号未启动：出口保护已切断这个账号的网络——{reason}\n请在账号菜单中选择“恢复网络”重新检测，或在环境配置中重新绑定出口。"));
     }
+    if effective.unusable_node {
+        return Err("账号未启动：这个账号的代理节点无法读取（密码不能在本机解密，或节点配置已损坏）。为避免改用本机网络直连，已拒绝启动。请打开它的环境配置，重新填写节点并保存。".into());
+    }
+    if node.is_none() && !p.is_default && s.requires_environment() {
+        return Err(NO_ENVIRONMENT.into());
+    }
     let mut relay_port = None;
     if let Some(node) = &node {
         if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
@@ -68,6 +74,24 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     if let Some(tz) = timezone {
         env.retain(|(k, _)| !k.eq_ignore_ascii_case("TZ"));
         env.push(("TZ".into(), tz));
+    }
+    if sandboxed {
+        // The box's identity guard answers `GetComputerNameEx` with this name; the environment
+        // variable is inherited instead of queried, so it has to be set to the same value or a
+        // program reading `COMPUTERNAME` would see two different machines.
+        let name = crate::identity::Identifiers::for_account(&p.id).computer_name;
+        for (key, value) in crate::identity::host_name_env(&name, |k| std::env::var(k).ok()) {
+            env.retain(|(k, _)| !k.eq_ignore_ascii_case(&key));
+            env.push((key, value));
+        }
+    }
+    // Claude Code started by this account keeps its sign-in, settings and sessions in the
+    // account's own folder instead of the `~/.claude` every account shares.
+    let code_dir = (effective.separate_code && !p.is_default).then(|| crate::sandbox::code_dir(&p.id));
+    if let Some(dir) = &code_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("账号未启动：无法创建 Claude Code 目录：{e}"))?;
+        env.retain(|(k, _)| !k.eq_ignore_ascii_case("CLAUDE_CONFIG_DIR"));
+        env.push(("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned()));
     }
     // With Claude's third-party (API/gateway) mode set up, Claude decides 1P vs 3P from
     // machine-wide state and can ignore `--user-data-dir` (see `third_party`).
@@ -135,7 +159,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
             line.push(extra);
         }
         let mut cmd = if sandboxed {
-            crate::sandbox::configure(&p.id, &p.path, relay_port).map_err(|e| format!("账号未启动：{e}"))?;
+            crate::sandbox::configure(&p.id, &p.path, relay_port, code_dir.as_deref()).map_err(|e| format!("账号未启动：{e}"))?;
             crate::sandbox::command(&p.id, &exe, &line.join(" "), &env)?
         } else {
             let mut cmd = Command::new(&exe);
@@ -175,7 +199,17 @@ fn confirm_boxed(install: &Install, p: &Profile) -> Result<(), String> {
     let expected = crate::sandbox::box_name(&p.id);
     let pid = profiles::running_map(install).get(&path_key(&p.path)).copied();
     let actual = pid.and_then(crate::sandbox::box_of);
-    if actual.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(&expected)) { return Ok(()); }
+    if actual.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(&expected)) {
+        // Being in the box is not enough: the box's rules open loopback and rely on the
+        // guard inside each process to narrow it and to close the DNS path, and the identity
+        // guard is what keeps this account from reporting the host's identifiers. If Sandboxie
+        // did not load them (blocked by security software, DLL removed), stop here.
+        if pid.and_then(crate::sandbox::guard_loaded) == Some(false) {
+            let _ = close(install, p);
+            return Err("账号未启动：Sandboxie 没有把 Hydra 的防护组件加载进 Claude，沙箱内的 DNS、本机端口限制和设备标识隔离不生效，已将其关闭。请检查安全软件是否拦截了 Hydra 数据目录下 sandbox 文件夹中的 hydra_dnsguard / hydra_idguard DLL，或在 Sandboxie-Plus 中确认该沙箱的 InjectDll64 设置。".into());
+        }
+        return Ok(());
+    }
     let _ = close(install, p);
     if let Some(pid) = pid { if sys::is_alive(pid) { sys::terminate(pid); } }
     Err(format!(
@@ -281,6 +315,9 @@ pub fn close(install: &Install, p: &Profile) -> Result<&'static str, String> {
             p.name
         ));
     }
+    // Helpers that detached from Claude's process tree (terminals, MCP servers) still sit in
+    // the account's box and would keep using its relay.
+    if settings::load().effective(&p.id).isolation == "sandboxie" { crate::sandbox::terminate_box(&p.id); }
     Ok("closed")
 }
 
@@ -307,7 +344,14 @@ fn confirm_running(install: &Install, p: &Profile) -> Result<(), String> {
     Err("Claude 启动后立即退出了。请检查环境配置中的额外启动参数，或先关闭该账号后重试。".into())
 }
 
+const NO_ENVIRONMENT: &str = "账号未启动：这个账号没有绑定带代理节点的环境，启动后会用本机网络直连。请在“账号 → 编辑”中为它选择环境；确实需要直连时，可在“设置”中关闭“额外账号必须绑定代理环境”。";
+
+/// Quick add (tray, CLI): creates an account and opens it to sign in. Refused while extra
+/// accounts must have a proxy environment, since a new one has none yet.
 pub fn add_account(install: &Install) -> Result<Profile, String> {
+    if settings::load().requires_environment() {
+        return Err("已开启“额外账号必须绑定代理环境”，快速添加的账号没有环境，会用本机网络直连。请在 Claude-Hydra 主界面点“新建账号”并选择环境。".into());
+    }
     let created = profiles::create(install, &profiles::next_account_name(install))?;
     launch(install, &created)?;
     Ok(created)

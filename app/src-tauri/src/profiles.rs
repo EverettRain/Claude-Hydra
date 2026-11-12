@@ -184,9 +184,10 @@ fn account_badges(names: &[String]) -> Vec<String> {
 pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
     let ids = ids(install);
     let mut s = settings::load();
-    let (colors, changed) = resolve_colors(&ids, &mut s);
+    let (mut colors, changed) = resolve_colors(&ids, &mut s);
     if changed {
-        let _ = settings::save(&s);
+        // Assign under the lock from fresh settings: this copy may already be stale.
+        if let Ok(fresh) = settings::update_with(|fresh| { let (c, _) = resolve_colors(&ids, fresh); Ok((c, fresh.clone())) }) { (colors, s) = fresh; }
     }
     let running = if with_status { running_map(install) } else { HashMap::new() };
     let mut profiles: Vec<Profile> = ids.into_iter()
@@ -293,7 +294,13 @@ pub fn remove(install: &Install, id: &str) -> Result<(), String> {
     if path.exists() {
         std::fs::remove_dir_all(&path).map_err(|e| format!("删除失败：{e}"))?;
     }
-    settings::update(|s| s.remove_account(id))
+    settings::update(|s| s.remove_account(id))?;
+    // Everything else the account owned: its box, browser sign-in and Claude Code folder. A
+    // later account with the same name must not inherit them.
+    crate::browser::forget(id);
+    crate::sandbox::forget(id);
+    crate::login::forget(id);
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -394,7 +401,9 @@ pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(
         acc.label = (!name.is_empty() && name != id).then(|| name.to_string());
         acc.custom_color = (o.color >= 0).then(|| (o.color as usize) % PALETTE_LEN);
         acc.keep_running = o.keep_running;
-        if acc.environment != environment { acc.last_exit = None; }
+        // Another environment: the old exit check and the old network cut no longer apply.
+        // The relay stays paused until the new exit passes (see `relay::sync_all`).
+        if acc.environment != environment { acc.last_exit = None; acc.blocked = None; acc.relay_port = acc.relay_port.filter(|_| environment.is_some()); }
         acc.environment = environment.clone();
         // Launch settings now live in environments; drop any leftover per-account copy.
         acc.set_node(None);

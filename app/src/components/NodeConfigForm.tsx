@@ -2,7 +2,7 @@ import { ClashImport } from "./ClashImport";
 import { Check, CircleAlert, CircleCheck, Clock, Copy, Info, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { api, errorText, type ClashSubscription, type ExitInfo, type NodeCheck, type NodeConfig } from "@/lib/api";
-import { COMMON_TIMEZONES, emptyNode, formatNode, parseNodeText } from "@/lib/node";
+import { COMMON_TIMEZONES, MAX_FRONT, emptyNode, formatNode, fronts, hopLabel, parseNodeText } from "@/lib/node";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { Input, Select } from "./ui/input";
@@ -71,6 +71,7 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
   const [checking, setChecking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [frontDraft, setFrontDraft] = useState("");
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const n = node ?? emptyNode();
   // Any change to the node makes earlier check results stale.
@@ -96,6 +97,24 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
     const parsed = value.includes(":") ? parseNodeText(value) : null;
     if (parsed) set(parsed);
     return !!parsed;
+  };
+  // Front proxies: local machine -> front proxy -> this node -> destination.
+  const chain = fronts(node);
+  // A front node that came with a subscription node belongs to it and is not edited here.
+  const fromSubscription = chain.some((v) => v.kind === "clash");
+  const addFront = (value: string) => {
+    const text = value.trim();
+    if (!text) return false;
+    const parsed = parseNodeText(text);
+    if (!parsed?.host || !parsed.port) {
+      setResult({ ok: false, text: "前置代理格式无法识别。请使用“类型://主机:端口:账号:密码”或“类型://账号:密码@主机:端口”，类型为 socks5、http 或 https。" });
+      return false;
+    }
+    // The new proxy becomes the outermost hop, the first one reached from this machine.
+    const append = (x: NodeConfig): NodeConfig => ({ ...x, via: x.via ? append(x.via) : { ...emptyNode(), ...parsed } });
+    changeNode(append(n));
+    setFrontDraft("");
+    return true;
   };
   const check = async () => {
     setChecking(true); setResult(null);
@@ -152,6 +171,25 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
             <Input aria-label="代理密码" type="password" value={n.password} maxLength={200} placeholder="密码（选填）" autoComplete="new-password" onChange={(e) => set({ password: e.target.value })} />
           </Row>
           </>}
+          <Row label="前置代理" hint={`选填，链式代理：本机 → 前置代理 → 上面的节点 → 目标网站。出口 IP 仍是上面的节点，前置代理只负责中转。最多 ${MAX_FRONT} 级；有前置代理时由内置 Mihomo 内核建立链路。`}>
+            {chain.length > 0 && (
+              <span className="selectable min-w-0 flex-1 truncate font-mono text-xs" title={chain.map(hopLabel).join(" ← ")}>
+                {chain.map(hopLabel).join(" ← ")}
+              </span>
+            )}
+            {!fromSubscription && chain.length < MAX_FRONT && (
+              <Input aria-label="前置代理" className={cn("font-mono text-xs", chain.length > 0 && "w-44 shrink-0")} value={frontDraft}
+                placeholder={chain.length ? "再加一级（更靠近本机）" : "选填：socks5://主机:端口:账号:密码"}
+                onChange={(e) => setFrontDraft(e.target.value)}
+                onPaste={(e) => { if (addFront(e.clipboardData.getData("text"))) e.preventDefault(); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFront(frontDraft); } }}
+                onBlur={() => addFront(frontDraft)} />
+            )}
+            {chain.length > 0 && !fromSubscription && (
+              <Button variant="outline" size="sm" onClick={() => set({ via: null })}>清除</Button>
+            )}
+          </Row>
+          {fromSubscription && <p className="px-4 pb-2 pl-[116px] text-[11.5px] text-muted">前置节点来自订阅（dialer-proxy），随所选节点一起保存；要更换请在订阅中另选节点。</p>}
           <Row label="出口检测" hint="经节点访问所选服务，检测出口 IP、地区与时区。IP 协议选 IPv6 时节点须提供 IPv6 出口。">
             <Select aria-label="IP查询渠道" value={n.geoChannel} onChange={(e) => set({ geoChannel: e.target.value as NodeConfig["geoChannel"] })}>
               <option value="ipinfo">ipinfo.io</option>
@@ -181,7 +219,7 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
           <div className="flex gap-2.5 px-4 py-3 text-[11.5px] leading-[18px] text-muted">
             <ShieldCheck className="mt-px h-4 w-4 shrink-0 text-ok" />
             <p>
-              已自动启用防泄漏：Claude 只连本机中继，由中继带认证转发到节点；域名在节点解析，禁用 QUIC，拒绝 UDP，WebRTC 仅走代理，子进程通过代理环境变量走同一节点。
+              已自动启用防泄漏：Claude 只连本机中继，由中继带认证转发到节点；域名在节点解析，禁用 QUIC，拒绝 UDP，WebRTC 仅走代理，子进程通过代理环境变量走同一节点。{chain.length > 0 && "链式代理的每一跳都在内置内核中完成，任何一跳失败即断开，不会跳过前置代理直连节点。"}
               启动前会检测出口，失败则不启动；节点断开或 Hydra 退出时该账号断网，不回退直连。
             </p>
           </div>

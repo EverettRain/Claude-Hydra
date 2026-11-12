@@ -94,6 +94,16 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
           )}
         </Group>
 
+        <Group label="网络保护">
+          <Row label="额外账号必须绑定代理环境" hint="开启后，没有绑定带代理节点的环境的额外账号会拒绝启动，账号专属浏览器也不会打开，避免误用本机网络直连。系统默认账号不受影响。">
+            <Switch
+              checked={!!info?.requireEnvironment}
+              disabled={!info || busy === "require"}
+              onCheckedChange={(v) => act("require", () => api.setRequireEnvironment(v))}
+            />
+          </Row>
+        </Group>
+
         <Group label="Claude 桌面端">
           {info?.installError && <div className="px-4 py-3 text-[12.5px] text-danger">{info.installError}</div>}
           {install && (

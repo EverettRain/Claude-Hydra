@@ -46,6 +46,8 @@ export interface EnvironmentInput {
   allowCn: boolean;
   /** "" | "sandboxie" */
   isolation: "" | "sandboxie";
+  /** Each account gets its own Claude Code login and configuration directory. */
+  separateCode: boolean;
 }
 export type ExitRule = "" | "static" | "city" | "region" | "country";
 export interface Environment extends EnvironmentInput {
@@ -61,6 +63,8 @@ export type NodeKind = "clash" | "http" | "https" | "socks5";
 export interface NodeConfig {
   kind: NodeKind; host: string; port: number; username: string; password: string;
   ipVersion: "ipv4" | "ipv6"; geoChannel: "ipinfo" | "ipapi" | "ip-api"; refreshUrl: string;
+  /** Front (transit) proxy this node is reached through; may itself have one. */
+  via?: NodeConfig | null;
 }
 export interface NodeCheck { exit: ExitInfo; quality: string | null; risk: string }
 /** A published release and its markdown notes. */
@@ -85,6 +89,8 @@ export interface AppInfo {
   storageRoot: string;
   settingsPath: string;
   autostart: boolean;
+  /** Extra accounts refuse to start without a proxy environment. */
+  requireEnvironment: boolean;
 }
 
 export interface QuotaWindow { utilization: number; resetsAt: string | null }
@@ -135,6 +141,7 @@ export const api = {
   restartApp: () => invoke<void>("restart_app"),
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
+  setRequireEnvironment: (enabled: boolean) => invoke<void>("set_require_environment", { enabled }),
   setClaudePath: (path: string | null) => invoke<void>("set_claude_path", { path }),
   quit: () => invoke<void>("quit_app"),
 };

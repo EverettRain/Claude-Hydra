@@ -4,6 +4,7 @@ pub mod browser;
 pub mod cli;
 pub mod environment;
 pub mod guard;
+pub mod identity;
 pub mod install;
 pub mod launcher;
 pub mod login;
@@ -115,6 +116,9 @@ async fn add_account(app: AppHandle) -> Result<Profile, String> {
     let a = app.clone();
     let r = tauri::async_runtime::spawn_blocking(move || {
         let i = current_install(&a)?;
+        if settings::load().requires_environment() {
+            return Err("已开启“额外账号必须绑定代理环境”，请用“新建账号”并选择环境。".into());
+        }
         let p = profiles::create(&i, &profiles::next_account_name(&i))?;
         #[cfg(target_os = "macos")]
         let _ = login::mac::expect_sign_in(&p.id);
@@ -163,7 +167,8 @@ fn list_environments() -> Vec<environment::EnvironmentView> {
 #[tauri::command]
 fn save_environment(app: AppHandle, id: Option<String>, input: environment::EnvironmentInput) -> Result<String, String> {
     let id = environment::save(&current_install(&app)?, id.as_deref(), &input)?;
-    relay::sync_all();
+    // Starting or re-checking a node can take seconds; never on the UI thread.
+    relay::sync_soon();
     after_change(&app);
     Ok(id)
 }
@@ -171,7 +176,8 @@ fn save_environment(app: AppHandle, id: Option<String>, input: environment::Envi
 #[tauri::command]
 fn delete_environment(app: AppHandle, id: String) -> Result<(), String> {
     environment::delete(&id)?;
-    relay::sync_all();
+    // Starting or re-checking a node can take seconds; never on the UI thread.
+    relay::sync_soon();
     after_change(&app);
     Ok(())
 }
@@ -202,7 +208,8 @@ fn profile_options(app: AppHandle, id: String) -> Result<ProfileOptions, String>
 #[tauri::command]
 fn save_profile_options(app: AppHandle, id: String, options: ProfileOptions) -> Result<(), String> {
     profiles::save_options(&current_install(&app)?, &id, &options)?;
-    relay::sync_all();
+    // Starting or re-checking a node can take seconds; never on the UI thread.
+    relay::sync_soon();
     after_change(&app);
     Ok(())
 }
@@ -210,7 +217,8 @@ fn save_profile_options(app: AppHandle, id: String, options: ProfileOptions) -> 
 #[tauri::command]
 fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     profiles::remove(&current_install(&app)?, &id)?;
-    relay::sync_all();
+    // Starting or re-checking a node can take seconds; never on the UI thread.
+    relay::sync_soon();
     after_change(&app);
     Ok(())
 }
@@ -269,7 +277,7 @@ async fn open_account_browser(app: AppHandle, id: String, url: Option<String>) -
 /// Re-checks a blocked account's exit and restores its network when it complies again.
 #[tauri::command]
 async fn resume_account(app: AppHandle, id: String) -> Result<String, String> {
-    let r = tauri::async_runtime::spawn_blocking(move || guard::resume(&id).map(|x| guard::describe(&x)))
+    let r = tauri::async_runtime::spawn_blocking(move || guard::resume(&id))
         .await.map_err(|e| e.to_string())?;
     after_change(&app);
     r
@@ -421,6 +429,8 @@ struct AppInfo {
     storage_root: String,
     settings_path: String,
     autostart: bool,
+    /// Extra accounts refuse to start without a proxy environment.
+    require_environment: bool,
 }
 
 #[tauri::command]
@@ -435,10 +445,11 @@ fn app_info(app: AppHandle) -> AppInfo {
         platform: std::env::consts::OS.into(),
         install,
         install_error,
-        claude_path: s.claude_path,
+        claude_path: s.claude_path.clone(),
         storage_root: paths::storage_root().to_string_lossy().into(),
         settings_path: paths::settings_path().to_string_lossy().into(),
         autostart: sys::autostart_enabled(),
+        require_environment: s.requires_environment(),
     }
 }
 
@@ -450,6 +461,11 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
     } else {
         sys::set_autostart(None)
     }
+}
+
+#[tauri::command]
+fn set_require_environment(enabled: bool) -> Result<(), String> {
+    settings::update(|s| s.require_environment = Some(enabled))
 }
 
 #[tauri::command]
@@ -667,6 +683,7 @@ pub fn run(start_in_tray: bool) {
             reveal_transcript,
             app_info,
             set_autostart,
+            set_require_environment,
             set_claude_path,
             quit_app,
         ])
@@ -678,7 +695,8 @@ pub fn run(start_in_tray: bool) {
             guard::on_block(move |id, reason| {
                 let _ = notify.emit_to("main", "guard-blocked", (id, reason));
                 after_change(&notify);
-                let text = format!("出口保护已切断账号“{id}”的网络。\n\n{reason}\n\n在账号菜单中选择“恢复网络”可重新检测。");
+                let name = settings::load().account(id).label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| id.to_string());
+                let text = format!("出口保护已切断账号“{name}”的网络。\n\n{reason}\n\n在账号菜单中选择“恢复网络”可重新检测。");
                 std::thread::spawn(move || sys::error_box(&text));
             });
             relay::start_monitor();
@@ -686,7 +704,7 @@ pub fn run(start_in_tray: bool) {
             browser::remember_fallback();
             environment::migrate();
             // Starting Clash-node relays waits for each Mihomo core; keep the window responsive.
-            std::thread::spawn(relay::sync_all);
+            std::thread::spawn(|| { clash::sweep_stale_runs(); relay::sync_all(); });
             let list = current_install(&handle).map(|i| profiles::list(&i, true)).unwrap_or_default();
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip("Claude-Hydra")

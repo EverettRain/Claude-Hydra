@@ -59,6 +59,25 @@ export function formatNode(n: NodeConfig): string {
   return `${n.kind}://${host}:${n.port}${n.username ? `:${n.username}:${n.password}` : ""}`;
 }
 
+/** Most front proxies a node may be chained through (matches the backend). */
+export const MAX_FRONT = 3;
+
+/** Short label of one hop: the subscription name of a Clash node, else type and address. */
+export function hopLabel(n: NodeConfig): string {
+  if (n.kind === "clash") {
+    try { return String(JSON.parse(n.password).name); } catch { /* fall through */ }
+  }
+  const host = n.host.includes(":") ? `[${n.host}]` : n.host;
+  return `${n.kind.toUpperCase()} ${host}:${n.port}`;
+}
+
+/** Front proxies of a node, nearest to the node first. */
+export function fronts(n: NodeConfig | null | undefined): NodeConfig[] {
+  const out: NodeConfig[] = [];
+  for (let v = n?.via; v && out.length <= MAX_FRONT; v = v.via) out.push(v);
+  return out;
+}
+
 export const COMMON_TIMEZONES = [
   "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Taipei", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore", "Asia/Kolkata", "Asia/Dubai",
   "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Amsterdam", "Europe/Moscow",

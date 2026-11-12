@@ -76,9 +76,12 @@ pub(super) fn lookup(ids: &HashSet<String>) -> HashMap<String, Metrics> {
     let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| {
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|p| PathBuf::from(p).join(".claude"))
     });
-    let Some(dirs) = config.and_then(|p| fs::read_dir(p.join("projects")).ok()) else { return HashMap::new(); };
+    // The shared folder plus the folders of accounts that keep Claude Code separate.
+    let separate = fs::read_dir(crate::sandbox::code_root()).into_iter().flatten().flatten().map(|e| e.path());
+    let dirs: Vec<fs::DirEntry> = config.into_iter().chain(separate)
+        .filter_map(|p| fs::read_dir(p.join("projects")).ok()).flat_map(|d| d.flatten()).collect();
     let mut paths: HashMap<String, Option<PathBuf>> = HashMap::new();
-    for dir in dirs.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) {
+    for dir in dirs.into_iter().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) {
         let Ok(files) = fs::read_dir(dir.path()) else { continue };
         for file in files.flatten() {
             let name = file.file_name();

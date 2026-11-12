@@ -27,7 +27,12 @@
 
 #define STATUS_OBJECT_NAME_NOT_FOUND ((NTSTATUS)0xC0000034L)
 
-typedef void *(*P_SbieDll_Hook)(const char *name, void *source, void *detour, HMODULE module);
+/* SbieDll is built with stdcall as its default convention (it only matters on x86). */
+typedef void *(__stdcall *P_SbieDll_Hook)(const char *name, void *source, void *detour, HMODULE module);
+#ifndef _WIN64
+/* x86 decorates the stdcall export; Sandboxie looks the entry point up by its plain name. */
+#pragma comment(linker, "/EXPORT:InjectDllMain=_InjectDllMain@8")
+#endif
 
 typedef NTSTATUS(NTAPI *P_NtAlpcConnectPort)(PHANDLE, PUNICODE_STRING, POBJECT_ATTRIBUTES, PVOID, ULONG, PSID,
                                              PVOID, PSIZE_T, PVOID, PVOID, PLARGE_INTEGER);

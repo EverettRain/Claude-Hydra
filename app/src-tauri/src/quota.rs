@@ -225,8 +225,12 @@ pub fn fetch(install: &crate::install::Install, profile: &crate::profiles::Profi
     }
     let credential = found.token;
     let settings = crate::settings::load();
+    // The kill switch covers Hydra's own requests for the account as well.
+    if settings.account(&profile.id).blocked.is_some() { return Err("出口保护已切断这个账号的网络，额度查询也已暂停。恢复网络后再试。".into()); }
+    let effective = settings.effective(&profile.id);
+    if effective.unusable_node { return Err("这个账号的代理节点无法读取，已暂停额度查询。请重新保存它的环境配置。".into()); }
     let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none());
-    if let Some(node) = settings.effective(&profile.id).node {
+    if let Some(node) = effective.node {
         // Same exit as the account itself; never a direct connection.
         let (node, _core) = crate::clash::resolve(&node)?;
         return query(node.client(Duration::from_secs(15))?, credential);

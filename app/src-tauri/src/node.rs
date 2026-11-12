@@ -28,7 +28,14 @@ pub struct NodeConfig {
     /// Provider URL that rotates the node's exit IP (called directly, not through the node).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub refresh_url: String,
+    /// Front (transit) proxy this node is dialed through: local relay -> `via` -> this node ->
+    /// target. The exit stays this node. Chains run inside the managed Mihomo core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<Box<NodeConfig>>,
 }
+
+/// Longest chain: the exit node plus this many front proxies.
+pub const MAX_FRONT: usize = 3;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +57,10 @@ impl NodeConfig {
     /// Normalises and validates user input. Errors are user-facing.
     pub fn validated(&self) -> Result<NodeConfig, String> {
         let mut n = self.clone();
+        if let Some(front) = &n.via {
+            if front.depth() > MAX_FRONT { return Err(format!("代理链最多支持 {MAX_FRONT} 个前置节点。")); }
+            n.via = Some(Box::new(front.validated().map_err(|e| format!("前置代理：{e}"))?));
+        }
         n.kind = n.kind.trim().to_ascii_lowercase();
         n.host = n.host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
         n.username = n.username.trim().to_string();
@@ -77,6 +88,28 @@ impl NodeConfig {
             if !matches!(u.scheme(), "http" | "https") { return Err("刷新 URL 只支持 http 或 https。".into()); }
         }
         Ok(n)
+    }
+
+    /// Number of hops in this chain, itself included.
+    pub fn depth(&self) -> usize {
+        1 + self.via.as_ref().map_or(0, |v| v.depth())
+    }
+
+    /// Copy with every password in the chain sealed for `settings.json`.
+    pub fn sealed(&self) -> NodeConfig {
+        let mut n = self.clone();
+        n.password = seal(&n.password);
+        n.via = n.via.map(|v| Box::new(v.sealed()));
+        n
+    }
+
+    /// Copy with every password in the chain readable again; `None` when one cannot be
+    /// decrypted (settings copied from another Windows user or machine).
+    pub fn unsealed(&self) -> Option<NodeConfig> {
+        let mut n = self.clone();
+        n.password = try_unseal(&n.password)?;
+        n.via = match n.via { Some(v) => Some(Box::new(v.unsealed()?)), None => None };
+        Some(n)
     }
 
     /// Parses a legacy `scheme://host:port` endpoint saved by earlier versions.
@@ -151,22 +184,48 @@ fn parse_geo(channel: &str, body: &str) -> Result<ExitInfo, String> {
     Ok(info)
 }
 
-/// Checks a route end to end: exit IP of the required version, then its region and timezone.
-pub fn inspect(client: &reqwest::blocking::Client, node: &NodeConfig) -> Result<ExitInfo, String> {
-    let ip_url = if node.ip_version == "ipv6" { "https://api6.ipify.org" } else { "https://api4.ipify.org" };
-    let ip: IpAddr = get_text(client, ip_url, 64)
-        .map_err(|e| if node.ip_version == "ipv6" { format!("{e}（节点可能不支持 IPv6 出口）") } else { e })?
-        .trim().parse().map_err(|_| "检测服务未返回有效的出口 IP。")?;
-    let geo_url = match node.geo_channel.as_str() {
+fn geo_url(channel: &str, ip: IpAddr) -> String {
+    match channel {
         "ipapi" => format!("https://ipapi.co/{ip}/json/"),
         "ip-api" => format!("http://ip-api.com/json/{ip}?fields=status,message,query,countryCode,regionName,city,timezone"),
         _ => format!("https://ipinfo.io/{ip}/json"),
-    };
-    let mut info = parse_geo(&node.geo_channel, &get_text(client, &geo_url, 16 * 1024)?)?;
-    if info.ip.parse::<IpAddr>().ok() != Some(ip) { return Err("位置服务返回了其他 IP 的结果。".into()); }
-    if !valid_timezone(&info.timezone) { info.timezone.clear(); }
-    info.checked_at = crate::paths::now_millis();
-    Ok(info)
+    }
+}
+
+/// Checks a route end to end: exit IP of the required version, then its region and timezone.
+/// Each step falls back to another public service, so one service being down or rate
+/// limited does not cut every account's network.
+pub fn inspect(client: &reqwest::blocking::Client, node: &NodeConfig) -> Result<ExitInfo, String> {
+    let v6 = node.ip_version == "ipv6";
+    let sources: [&str; 2] = if v6 { ["https://api6.ipify.org", "https://ipv6.icanhazip.com"] } else { ["https://api4.ipify.org", "https://ipv4.icanhazip.com"] };
+    let mut failure = String::new();
+    let mut ip: Option<IpAddr> = None;
+    for url in sources {
+        match get_text(client, url, 64) {
+            Ok(text) => match text.trim().parse::<IpAddr>() { Ok(found) => { ip = Some(found); break; } Err(_) => failure = "检测服务未返回有效的出口 IP。".into() },
+            Err(e) => failure = e,
+        }
+    }
+    let ip = ip.ok_or_else(|| if v6 { format!("{failure}（节点可能不支持 IPv6 出口）") } else { failure.clone() })?;
+    let chosen = match node.geo_channel.as_str() { c @ ("ipapi" | "ip-api") => c, _ => "ipinfo" };
+    let mut error = String::new();
+    for channel in std::iter::once(chosen).chain(["ipinfo", "ipapi", "ip-api"].into_iter().filter(|c| *c != chosen)) {
+        let found = get_text(client, &geo_url(channel, ip), 16 * 1024).and_then(|body| parse_geo(channel, &body)).and_then(|info| {
+            if info.ip.parse::<IpAddr>().ok() != Some(ip) { return Err("位置服务返回了其他 IP 的结果。".to_string()); }
+            // A result without a country cannot be judged by the exit rules.
+            if info.country.trim().is_empty() { return Err("位置服务未返回出口所在国家。".to_string()); }
+            Ok(info)
+        });
+        match found {
+            Ok(mut info) => {
+                if !valid_timezone(&info.timezone) { info.timezone.clear(); }
+                info.checked_at = crate::paths::now_millis();
+                return Ok(info);
+            }
+            Err(e) => if error.is_empty() { error = e },
+        }
+    }
+    Err(error)
 }
 
 /// Classification is optional and never participates in the launch check.
@@ -240,15 +299,20 @@ pub fn seal(secret: &str) -> String {
     format!("plain:{secret}")
 }
 
-pub fn unseal(stored: &str) -> String {
-    if let Some(rest) = stored.strip_prefix("plain:") { return rest.to_string(); }
+/// `None` when the stored value cannot be decrypted by this user on this machine.
+pub fn try_unseal(stored: &str) -> Option<String> {
+    if let Some(rest) = stored.strip_prefix("plain:") { return Some(rest.to_string()); }
     #[cfg(windows)]
     if let Some(rest) = stored.strip_prefix("dpapi:") {
         use base64::{engine::general_purpose::STANDARD, Engine};
-        return STANDARD.decode(rest).ok().and_then(|b| win::unprotect(&b)).and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+        return STANDARD.decode(rest).ok().and_then(|b| win::unprotect(&b)).and_then(|b| String::from_utf8(b).ok());
     }
-    if stored.starts_with("dpapi:") { return String::new(); }
-    stored.to_string()
+    if stored.starts_with("dpapi:") { return None; }
+    Some(stored.to_string())
+}
+
+pub fn unseal(stored: &str) -> String {
+    try_unseal(stored).unwrap_or_default()
 }
 
 #[cfg(windows)]

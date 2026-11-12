@@ -10,18 +10,66 @@ impl Core {
     pub fn alive(&mut self) -> bool { matches!(self.0.try_wait(), Ok(None)) }
 }
 
+fn run_root() -> std::path::PathBuf { paths::storage_root().join("mihomo-run") }
+
+/// Host start-up: removes run directories left by cores of a Hydra that crashed or was
+/// killed (a clean exit removes its own). Only the host owns long-lived cores, so anything
+/// older than a few minutes belongs to nobody.
+pub fn sweep_stale_runs() {
+    let Ok(entries) = std::fs::read_dir(run_root()) else { return };
+    for dir in entries.flatten() {
+        let old = dir.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(300));
+        if old { let _ = std::fs::remove_dir_all(dir.path()); }
+    }
+}
+
+/// One hop as a Mihomo proxy entry. Clash nodes carry theirs; custom proxies are converted.
+fn hop(node: &NodeConfig, name: &str, dialer: Option<&str>) -> Result<Value, String> {
+    let mut proxy = if node.kind == "clash" {
+        serde_json::from_str::<Value>(&node.password).ok().filter(Value::is_object).ok_or("节点配置无效。")?
+    } else {
+        let mut p = json!({"type": if node.kind == "socks5" { "socks5" } else { "http" }, "server": node.host, "port": node.port, "udp": false});
+        if node.kind == "https" { p["tls"] = json!(true); }
+        if !node.username.is_empty() { p["username"] = json!(node.username); p["password"] = json!(node.password); }
+        p
+    };
+    proxy["name"] = json!(name);
+    match dialer {
+        Some(d) => proxy["dialer-proxy"] = json!(d),
+        // A subscription node that depends on another one needs that node saved with it.
+        None => if proxy.get("dialer-proxy").is_some() {
+            return Err("这个节点通过另一个节点中转（dialer-proxy），但没有保存它的前置节点。请在环境配置中重新读取订阅并重新选择该节点。".into());
+        },
+    }
+    Ok(proxy)
+}
+
+/// Mihomo proxy list for a node and its front proxies; the first entry is the exit.
+fn chain(node: &NodeConfig) -> Result<Vec<Value>, String> {
+    let mut hops = Vec::new();
+    let mut current = Some(node);
+    while let Some(n) = current {
+        let name = if hops.is_empty() { "HYDRA-NODE".to_string() } else { format!("HYDRA-VIA-{}", hops.len()) };
+        let dialer = n.via.as_ref().map(|_| format!("HYDRA-VIA-{}", hops.len() + 1));
+        hops.push(hop(n, &name, dialer.as_deref())?);
+        current = n.via.as_deref();
+    }
+    Ok(hops)
+}
+
+/// Turns a configured node into the upstream the relay talks to. Plain proxies are used as
+/// they are; Clash nodes and proxy chains run in a managed Mihomo core that is reached over
+/// an authenticated loopback SOCKS5 port.
 pub fn resolve(node: &NodeConfig) -> Result<(NodeConfig, Option<Core>), String> {
-    if node.kind != "clash" { return Ok((node.clone(), None)); }
-    let mut proxy: Value = serde_json::from_str(&node.password).map_err(|_| "节点配置无效。")?;
-    proxy["name"] = json!("HYDRA-NODE");
-    if proxy.get("dialer-proxy").is_some() { return Err("暂不支持依赖其他节点的代理链。".into()); }
+    if node.kind != "clash" && node.via.is_none() { return Ok((node.clone(), None)); }
+    let proxies = chain(node)?;
     let port = TcpListener::bind(("127.0.0.1", 0)).and_then(|s| s.local_addr()).map_err(|_| "无法分配代理端口。")?.port();
     let secret = uuid::Uuid::new_v4().to_string();
     let config = json!({"socks-port":port,"allow-lan":false,"mode":"rule","authentication":[format!("hydra:{secret}")],
-        "proxies":[proxy],"rules":["MATCH,HYDRA-NODE"],"log-level":"silent"});
+        "proxies":proxies,"rules":["MATCH,HYDRA-NODE"],"log-level":"silent"});
     // Per-run working dirs live apart from the installed binary path, otherwise the first run
     // turns `<root>/mihomo` into a directory and the installed kernel can never be found.
-    let home = paths::storage_root().join("mihomo-run").join(uuid::Uuid::new_v4().to_string());
+    let home = run_root().join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&home).map_err(|_| "无法创建内核目录。")?;
     let mut cmd = Command::new(mihomo_exe());
     #[cfg(windows)]
@@ -32,7 +80,7 @@ pub fn resolve(node: &NodeConfig) -> Result<(NodeConfig, Option<Core>), String> 
     let end = Instant::now() + Duration::from_secs(8);
     while core.alive() && Instant::now() < end {
         if TcpStream::connect(("127.0.0.1",port)).is_ok() {
-            return Ok((NodeConfig {kind:"socks5".into(),host:"127.0.0.1".into(),port,username:"hydra".into(),password:secret,..node.clone()},Some(core)));
+            return Ok((NodeConfig {kind:"socks5".into(),host:"127.0.0.1".into(),port,username:"hydra".into(),password:secret,via:None,..node.clone()},Some(core)));
         }
         std::thread::sleep(Duration::from_millis(60));
     }
@@ -78,6 +126,28 @@ pub async fn clash_subscription(url: String) -> Result<String,String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chains_front_proxies_with_dialer_proxy() {
+        let front = NodeConfig { kind: "socks5".into(), host: "front.example".into(), port: 1080, username: "u".into(), password: "p".into(), ..Default::default() };
+        let middle = NodeConfig { kind: "https".into(), host: "mid.example".into(), port: 443, via: Some(Box::new(front)), ..Default::default() };
+        let exit = json!({"type":"trojan","name":"exit","server":"exit.example","port":443,"password":"x","dialer-proxy":"old"});
+        let node = NodeConfig { kind: "clash".into(), host: "exit.example".into(), port: 443, password: exit.to_string(), via: Some(Box::new(middle)), ..Default::default() }.validated().unwrap();
+        let hops = chain(&node).unwrap();
+        assert_eq!(hops.len(), 3);
+        assert_eq!((hops[0]["name"].as_str(), hops[0]["dialer-proxy"].as_str()), (Some("HYDRA-NODE"), Some("HYDRA-VIA-1")));
+        assert_eq!((hops[1]["type"].as_str(), hops[1]["tls"].as_bool(), hops[1]["dialer-proxy"].as_str()), (Some("http"), Some(true), Some("HYDRA-VIA-2")));
+        assert_eq!((hops[2]["type"].as_str(), hops[2]["username"].as_str()), (Some("socks5"), Some("u")));
+        assert!(hops[2].get("dialer-proxy").is_none());
+        // A dependent subscription node without its front node is refused, not run directly.
+        let alone = NodeConfig { via: None, ..node.clone() };
+        assert!(chain(&alone).is_err());
+        // A plain proxy without a chain needs no core at all.
+        let plain = NodeConfig { kind: "socks5".into(), host: "h".into(), port: 1, ..Default::default() };
+        assert!(resolve(&plain).unwrap().1.is_none());
+        let deep = (0..crate::node::MAX_FRONT + 1).fold(plain.clone(), |n, _| NodeConfig { via: Some(Box::new(n)), ..plain.clone() });
+        assert!(deep.validated().is_err());
+    }
 
     #[test]
     #[ignore = "requires Mihomo, HYDRA_TEST_PROXY and internet"]

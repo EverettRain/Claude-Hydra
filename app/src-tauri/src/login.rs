@@ -11,7 +11,15 @@ fn marker() -> std::path::PathBuf { paths::storage_root().join("pending-login.js
 pub fn arm(id: &str, signed_in: bool) -> Result<(), String> {
     std::fs::create_dir_all(paths::storage_root()).map_err(|e| e.to_string())?;
     let data = serde_json::json!({"id": id, "expires": paths::now_secs() + 600, "signedIn": signed_in});
-    std::fs::write(marker(), data.to_string()).map_err(|e| format!("无法准备登录：{e}"))
+    // Written whole or not at all: a callback must never read half a marker.
+    let tmp = marker().with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, data.to_string()).and_then(|_| std::fs::rename(&tmp, marker())).map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("无法准备登录：{e}") })
+}
+
+/// Drops a sign-in pending for a deleted account, so its callback cannot reach a later
+/// account created under the same name.
+pub fn forget(id: &str) {
+    if pending().as_deref() == Some(id) { let _ = std::fs::remove_file(marker()); }
 }
 
 /// The account a sign-in is pending for, without consuming it.

@@ -24,6 +24,11 @@ const URL_PROGID: &str = "ClaudeHydra.URL";
 
 fn hex_id(id: &str) -> String { crate::sandbox::box_name(id).trim_start_matches("Hydra_").to_string() }
 
+/// Removes a deleted account's browser data (cookies, sign-in).
+pub fn forget(id: &str) {
+    let _ = std::fs::remove_dir_all(paths::storage_root().join("account-browser").join(hex_id(id)));
+}
+
 fn label(id: &str) -> String { format!("acct-browser-{}", hex_id(id)) }
 
 /// Hosts whose links belong to the account (sign-in, account pages).
@@ -57,6 +62,10 @@ pub fn plan(id: &str, url: Option<&str>) -> Result<Plan, String> {
     if let Some(reason) = s.account(id).blocked {
         return Err(format!("出口保护已切断这个账号的网络——{reason}\n请先“恢复网络”或重新绑定出口。"));
     }
+    if eff.unusable_node { return Err("这个账号的代理节点无法读取（密码不能解密或配置损坏），为避免直连已拒绝打开。请重新保存它的环境配置。".into()); }
+    if eff.node.is_none() && !p.is_default && s.requires_environment() {
+        return Err("这个账号没有绑定带代理节点的环境，账号浏览器会用本机网络直连，已拒绝打开。请先在“账号 → 编辑”中选择环境。".into());
+    }
     let mut timezone = match eff.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
     let mut relay_port = None;
     if let Some(node) = &eff.node {
@@ -87,6 +96,9 @@ fn browser_args(plan: &Plan) -> String {
 /// Opens (or reuses) the account's browser window. Call from any thread but the UI thread.
 pub fn open(app: &tauri::AppHandle, plan: Plan) -> Result<(), String> {
     use tauri::{webview::NewWindowResponse, Manager, WebviewUrl, WebviewWindowBuilder};
+    // Decide before any window exists: the time zone override below is WebView2-only, and a
+    // window without it would show the account's pages in the system zone.
+    if !cfg!(windows) { return Err("账号浏览器目前只支持 Windows。".into()); }
     let label = label(&plan.id);
     if let Some(w) = app.get_webview_window(&label) {
         let target = plan.url.parse().map_err(|_| "链接无效。")?;
@@ -125,11 +137,7 @@ pub fn open(app: &tauri::AppHandle, plan: Plan) -> Result<(), String> {
         }).map_err(|e| e.to_string())?;
     }
     #[cfg(not(windows))]
-    {
-        let _ = w;
-        return Err("账号浏览器目前只支持 Windows。".into());
-    }
-    #[allow(unreachable_code)]
+    let _ = w;
     Ok(())
 }
 
@@ -278,6 +286,7 @@ pub fn start_watcher(app: tauri::AppHandle) {
             let _ = std::fs::remove_file(&file);
             let Some(v) = data else { continue };
             let fresh = v["at"].as_u64().is_some_and(|at| paths::now_millis().saturating_sub(at) < 60_000);
+            if !fresh { paths::append_log("hydra-error.log", "link router: dropped a link that waited over 60 s for the host"); }
             let Some(url) = v["url"].as_str().filter(|_| fresh).map(str::to_owned) else { continue };
             let id = v["id"].as_str().map(str::to_owned);
             let app = app.clone();

@@ -16,6 +16,11 @@
 //! which settings cannot close. Every box therefore loads Hydra's DNS guard (`dnsguard.c`,
 //! `InjectDll64`), which refuses that endpoint: external names then fail inside the box, while
 //! Claude itself sends host names to its relay.
+//!
+//! A box virtualizes files and the registry, not what the system reports about itself, so every
+//! box also carries the identity guard (`idguard.c`, same `InjectDll`) answering the machine GUID,
+//! hardware profile GUID, volume serial, MAC addresses and computer name with values derived per
+//! account (see `identity`). Two accounts then do not look like one device.
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -104,20 +109,145 @@ const DNS_GUARD: Option<&[u8]> = Some(include_bytes!(env!("HYDRA_DNSGUARD")));
 #[cfg(not(all(windows, target_arch = "x86_64", target_env = "msvc")))]
 const DNS_GUARD: Option<&[u8]> = None;
 
-/// Writes the DNS guard next to Hydra's data, named by content so a version still loaded by a
+/// The same guard for 32-bit processes in a box (built when the x86 toolchain is installed).
+#[cfg(hydra_guard32)]
+const DNS_GUARD32: Option<&[u8]> = Some(include_bytes!(env!("HYDRA_DNSGUARD32")));
+#[cfg(not(hydra_guard32))]
+const DNS_GUARD32: Option<&[u8]> = None;
+
+/// The identity guard DLL built from `idguard.c` (64-bit Windows builds only).
+#[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
+const IDENTITY_GUARD: Option<&[u8]> = Some(include_bytes!(env!("HYDRA_IDGUARD")));
+#[cfg(not(all(windows, target_arch = "x86_64", target_env = "msvc")))]
+const IDENTITY_GUARD: Option<&[u8]> = None;
+
+/// The same guard for 32-bit processes in a box.
+#[cfg(hydra_idguard32)]
+const IDENTITY_GUARD32: Option<&[u8]> = Some(include_bytes!(env!("HYDRA_IDGUARD32")));
+#[cfg(not(hydra_idguard32))]
+const IDENTITY_GUARD32: Option<&[u8]> = None;
+
+/// Writes a guard DLL next to Hydra's data, named by content so a version still loaded by a
 /// running box is never overwritten.
-fn dns_guard_path() -> Result<Option<PathBuf>, String> {
+fn guard_path(bytes: Option<&[u8]>, stem: &str) -> Result<Option<PathBuf>, String> {
     use sha2::{Digest, Sha256};
-    let Some(bytes) = DNS_GUARD else { return Ok(None) };
+    let Some(bytes) = bytes else { return Ok(None) };
     let hash: String = Sha256::digest(bytes).iter().take(6).map(|b| format!("{b:02x}")).collect();
     let dir = crate::paths::storage_root().join("sandbox");
-    let path = dir.join(format!("hydra_dnsguard_{hash}.dll"));
+    let path = dir.join(format!("{stem}_{hash}.dll"));
     if std::fs::read(&path).ok().as_deref() != Some(bytes) {
         std::fs::create_dir_all(&dir)
             .and_then(|_| std::fs::write(&path, bytes))
-            .map_err(|e| format!("无法写入沙箱 DNS 防护组件：{e}"))?;
+            .map_err(|e| format!("无法写入沙箱防护组件：{e}"))?;
     }
     Ok(Some(path))
+}
+
+fn dns_guard_path() -> Result<Option<PathBuf>, String> { guard_path(DNS_GUARD, "hydra_dnsguard") }
+
+fn identity_guard_path() -> Result<Option<PathBuf>, String> { guard_path(IDENTITY_GUARD, "hydra_idguard") }
+
+/// Gives a box one `InjectDll` / `InjectDll64` entry per guard. Sandboxie reads each value as a
+/// single DLL path and does not split it, so a comma-joined list is taken as one nonexistent
+/// path and *no* guard loads — the box then runs with neither the network nor the identity
+/// guard. Clearing first also drops an entry for a guard this build no longer carries.
+#[cfg(windows)]
+fn set_injection(dir: &Path, name: &str, key: &str, guards: &[Option<PathBuf>]) -> Result<(), String> {
+    ini(dir, &["set", name, key, ""])?;
+    for path in guards.iter().flatten() {
+        ini(dir, &["append", name, key, &path.to_string_lossy()])?;
+    }
+    Ok(())
+}
+
+/// Whether the account's Claude (a 64-bit process) has every guard this box needs loaded.
+/// `None` when that cannot be determined (no guard in this build, or its modules cannot be
+/// listed).
+#[cfg(windows)]
+pub fn guard_loaded(pid: u32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+    if DNS_GUARD.is_none() && IDENTITY_GUARD.is_none() { return None; }
+    let wanted: Vec<String> = [dns_guard_path(), identity_guard_path()].into_iter()
+        .filter_map(|p| p.ok().flatten())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .collect();
+    if wanted.is_empty() { return None; }
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+        if snap == INVALID_HANDLE_VALUE { return None; }
+        let mut entry: MODULEENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        let mut seen = 0;
+        let mut found: Vec<bool> = vec![false; wanted.len()];
+        let mut more = Module32FirstW(snap, &mut entry);
+        while more != 0 {
+            seen += 1;
+            let len = entry.szModule.iter().position(|c| *c == 0).unwrap_or(entry.szModule.len());
+            let name = String::from_utf16_lossy(&entry.szModule[..len]).to_lowercase();
+            if let Some(i) = wanted.iter().position(|w| w == &name) { found[i] = true; }
+            if found.iter().all(|f| *f) { break; }
+            more = Module32NextW(snap, &mut entry);
+        }
+        CloseHandle(snap);
+        // An empty list means the snapshot was not really readable, not that a guard is absent.
+        (seen > 0).then_some(found.iter().all(|f| *f))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn guard_loaded(_pid: u32) -> Option<bool> { None }
+
+/// Folder name for per-account data outside the profile (browser data, Claude Code config).
+pub fn account_key(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(id.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Claude Code's own config folder for an account whose environment keeps it separate
+/// (`CLAUDE_CONFIG_DIR`): sign-in, settings and sessions of Claude Code are then not shared
+/// with other accounts through `~/.claude`.
+pub fn code_dir(id: &str) -> PathBuf { code_root().join(account_key(id)) }
+pub fn code_root() -> PathBuf { crate::paths::storage_root().join("claude-code") }
+
+/// Ends every process still running in the account's box.
+pub fn terminate_box(id: &str) {
+    #[cfg(windows)]
+    if let Ok(dir) = available() {
+        let mut cmd = Command::new(dir.join("Start.exe"));
+        cmd.creation_flags(0x0800_0000);
+        let _ = cmd.args([&format!("/box:{}", box_name(id)), "/silent", "/terminate"]).status();
+    }
+    #[cfg(not(windows))]
+    let _ = id;
+}
+
+/// Removes what a deleted account left outside its profile folder: its box (settings and
+/// contents), the box's proxy marker and its separate Claude Code folder.
+pub fn forget(id: &str) {
+    let name = box_name(id);
+    let _ = std::fs::remove_dir_all(code_dir(id));
+    let _ = std::fs::remove_file(crate::paths::storage_root().join("sandbox").join(format!("{name}.proxy")));
+    #[cfg(windows)]
+    if let Ok(dir) = available() {
+        // Only a box Hydra configured for this account: it exists and is named by the id's hash.
+        let (status, root) = match box_file_root(&dir, &name) { Ok(root) => (0, Some(root)), Err(_) => (-1, None) };
+        let mut cmd = Command::new(dir.join("Start.exe"));
+        cmd.creation_flags(0x0800_0000);
+        let _ = cmd.args([&format!("/box:{name}"), "/silent", "/terminate"]).status();
+        if let Some(root) = root.filter(|r| status == 0 && r.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name))) {
+            let _ = std::fs::remove_dir_all(root);
+        }
+        // The derived identifiers first and by name: a box re-created for the same account must
+        // not answer with the previous account's device if the wildcard wipe ever misses them.
+        for key in ["HydraMachineGuid", "HydraHwProfileGuid", "HydraComputerName", "HydraMac", "HydraVolumeSerial"] {
+            let _ = ini(&dir, &["set", &name, key, ""]);
+        }
+        let _ = ini(&dir, &["set", &name, "*", ""]);
+        let mut reload = Command::new(dir.join("Start.exe"));
+        reload.creation_flags(0x0800_0000);
+        let _ = reload.args(["/silent", "/reload"]).status();
+    }
 }
 
 /// Box name for an account: stable, short and free of characters Sandboxie rejects.
@@ -181,8 +311,10 @@ pub fn configure_quiet_start() -> Result<(), String> {
 }
 
 /// Creates or updates the account's box. `relay_port` = the only address the box may reach;
-/// `None` (no node) leaves the network unrestricted.
-pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<String, String> {
+/// `None` (no node) leaves the network unrestricted. `code_dir` = the account's own Claude
+/// Code folder when its environment keeps Claude Code separate; otherwise the shared
+/// `~/.claude` is opened to the box.
+pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, code_dir: Option<&Path>) -> Result<String, String> {
     let dir = available()?;
     let name = box_name(id);
     let drop = drop_dir();
@@ -197,22 +329,41 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<St
     set("AutoDelete", "n")?;
     set("BlockNetworkFiles", "y")?;
     let guard = dns_guard_path()?;
-    match &guard {
-        Some(dll) => set("InjectDll64", &dll.to_string_lossy())?,
-        None => { let _ = set("InjectDll64", ""); }
-    }
+    let guard32 = guard_path(DNS_GUARD32, "hydra_dnsguard32")?;
+    let id_guard = identity_guard_path()?;
+    let id_guard32 = guard_path(IDENTITY_GUARD32, "hydra_idguard32")?;
+    set_injection(&dir, &name, "InjectDll64", &[guard.clone(), id_guard.clone()])?;
+    set_injection(&dir, &name, "InjectDll", &[guard32.clone(), id_guard32])?;
+    // What `idguard.c` reports inside the box in place of this computer's own identifiers, so
+    // accounts on one machine do not look like one device. The guard stays inert when any of
+    // these is missing, which also keeps an unreadable value from becoming a random-looking one.
+    let ids = crate::identity::Identifiers::for_account(id);
+    set("HydraMachineGuid", &ids.machine_guid)?;
+    set("HydraHwProfileGuid", &ids.hw_profile_guid)?;
+    set("HydraComputerName", &ids.computer_name)?;
+    set("HydraMac", &ids.mac)?;
+    set("HydraVolumeSerial", &ids.volume_serial)?;
     set("OpenFilePath", data_dir)?;
     append("OpenFilePath", &drop.to_string_lossy())?;
     // Claude Code's sessions and settings, shared with unboxed accounts as without a box, so
     // Hydra (and other accounts) see what a boxed account did. `*` covers its temp-and-rename saves.
-    let code = claude_code_paths();
+    let code = match code_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir).map_err(|e| format!("无法创建账号的 Claude Code 目录：{e}"))?;
+            vec![dir.to_path_buf()]
+        }
+        None => claude_code_paths(),
+    };
     for path in &code { append("OpenFilePath", &path.to_string_lossy())?; }
     match relay_port {
         Some(port) => {
             set("NetworkAccess", "*,Block")?;
             // Loopback is narrowed again by the DNS guard (relay port or listeners in this box),
             // which lets runtimes connect socket pairs to themselves. Without it, only the relay.
-            let loopback = if guard.is_some() { "*,Allow;Address=127.0.0.1".to_string() } else { format!("*,Allow;Address=127.0.0.1;Port={port}") };
+            // All of loopback is opened only when every process in the box carries a guard:
+            // a 32-bit program without one could otherwise reach other accounts' relays or a
+            // local proxy of the host and leave through a different exit.
+            let loopback = if guard.is_some() && guard32.is_some() { "*,Allow;Address=127.0.0.1".to_string() } else { format!("*,Allow;Address=127.0.0.1;Port={port}") };
             append("NetworkAccess", &loopback)?;
             set("HydraRelayPort", &port.to_string())?;
         }
@@ -464,11 +615,16 @@ pub fn box_of(pid: u32) -> Option<String> {
     unsafe {
         let module = LoadLibraryW(dll.as_ptr());
         if module.is_null() { return None; }
-        let f: QueryProcess = std::mem::transmute(GetProcAddress(module, c"SbieApi_QueryProcess".as_ptr().cast())?);
-        let (mut name, mut image, mut sid, mut session) = ([0u16; 34], [0u16; 96], [0u16; 96], 0u32);
-        if f(pid as isize, name.as_mut_ptr(), image.as_mut_ptr(), sid.as_mut_ptr(), &mut session) != 0 { return None; }
-        let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
-        Some(String::from_utf16_lossy(&name[..len])).filter(|n| !n.is_empty())
+        let found = GetProcAddress(module, c"SbieApi_QueryProcess".as_ptr().cast()).and_then(|f| {
+            let f: QueryProcess = std::mem::transmute(f);
+            let (mut name, mut image, mut sid, mut session) = ([0u16; 34], [0u16; 96], [0u16; 96], 0u32);
+            if f(pid as isize, name.as_mut_ptr(), image.as_mut_ptr(), sid.as_mut_ptr(), &mut session) != 0 { return None; }
+            let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+            Some(String::from_utf16_lossy(&name[..len])).filter(|n| !n.is_empty())
+        });
+        // Called for every boxed process on every refresh: do not leak a module reference.
+        windows_sys::Win32::Foundation::FreeLibrary(module);
+        found
     }
 }
 
@@ -486,7 +642,7 @@ mod tests {
         let data = crate::paths::storage_root().join("proxy-test");
         std::fs::create_dir_all(&data).unwrap();
         let id = "hydra-proxy-integration-test";
-        let name = super::configure(id, &data.to_string_lossy(), None).unwrap();
+        let name = super::configure(id, &data.to_string_lossy(), None, None).unwrap();
         let key = r"Software\Policies\Claude";
         let host = [true, false].map(|machine| crate::sys::reg_string(machine, key, "egressProxyUrl"));
         for port in [Some(34567), Some(34568), None] {
@@ -525,7 +681,7 @@ mod tests {
         let port = relay.local_addr().unwrap().port();
         let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let other_port = other.local_addr().unwrap().port();
-        let name = super::configure(id, &data.to_string_lossy(), Some(port)).unwrap();
+        let name = super::configure(id, &data.to_string_lossy(), Some(port), None).unwrap();
         println!("box {name}, relay port {port}");
 
         // 1) network rules, through `command` (what launcher uses).
@@ -577,6 +733,173 @@ mod tests {
         }
         assert!(udd.join("Local State").is_file() || udd.join("logs").is_dir(), "profile data did not reach the real folder");
         println!("claude log net lines: {}", log.lines().filter(|l| l.contains("net::") || l.contains("proxy")).take(4).collect::<Vec<_>>().join(" | "));
+    }
+
+    /// Real Sandboxie-Plus check of the five identifiers: `CLAUDE_HYDRA_ROOT=<scratch> cargo test --lib
+    /// sandboxie_identity -- --ignored --nocapture`. System tools are used rather than a helper exe so
+    /// the test also proves the hooks reach programs that bind straight to kernelbase.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires Sandboxie-Plus and CLAUDE_HYDRA_ROOT pointing to a scratch folder"]
+    fn sandboxie_identity_is_per_account() {
+        use std::time::{Duration, Instant};
+        assert!(std::env::var_os("CLAUDE_HYDRA_ROOT").is_some());
+        let dir = super::available().unwrap();
+        let data = crate::paths::storage_root().join("identity-test");
+        std::fs::create_dir_all(&data).unwrap();
+        let ids = crate::identity::Identifiers::for_account("hydra-identity-test");
+        let name = super::configure("hydra-identity-test", &data.to_string_lossy(), None, None).unwrap();
+
+        let out = data.join("ids.txt");
+        let _ = std::fs::remove_file(&out);
+        let script = data.join("ids.cmd");
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\n(\r\n\
+                 reg query \"HKLM\\SOFTWARE\\Microsoft\\Cryptography\" /v MachineGuid\r\n\
+                 reg query \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\IDConfigDB\\Hardware Profiles\\0001\" /v HwProfileGuid\r\n\
+                 hostname\r\n\
+                 vol C:\r\n\
+                 vol D:\r\n\
+                 ipconfig /all\r\n\
+                 echo HYDRA-ENUM\r\n\
+                 reg query \"HKLM\\SOFTWARE\\Microsoft\\Cryptography\"\r\n\
+                 echo HYDRA-WHOAMI\r\n\
+                 whoami\r\n\
+                 echo HYDRA-NODE\r\n\
+                 node -e \"const o=require('os'),f=require('fs');console.log('NODE-HOST='+o.hostname());console.log('NODE-DEV-C='+f.statSync('C:/').dev);console.log('NODE-DEV-D='+f.statSync('D:/').dev);for(const l of Object.values(o.networkInterfaces()))for(const a of l)if(a.mac!=='00:00:00:00:00:00')console.log('NODE-MAC='+a.mac)\"\r\n\
+                 echo HYDRA-DONE\r\n\
+                 ) > \"{}\" 2>&1\r\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        super::command("hydra-identity-test", &cmd, &format!("/d /c \"{}\"", script.display()), &[])
+            .unwrap()
+            .spawn()
+            .unwrap();
+        // The redirect creates the file before the four commands have run, so wait for the last
+        // line instead of for the file itself. `vol` prints in the OEM code page, which is not
+        // UTF-8, so the bytes are decoded lossily — every value asserted below is ASCII.
+        let started = Instant::now();
+        let mut text = String::new();
+        while started.elapsed() < Duration::from_secs(60) {
+            text = std::fs::read(&out).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            if text.contains("HYDRA-DONE") { break; }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        assert!(text.contains("HYDRA-DONE"), "boxed probe did not finish: {text}");
+        println!("{text}");
+
+        assert!(text.contains(&ids.machine_guid), "MachineGuid is still the host's: {text}");
+        assert!(text.contains(&ids.hw_profile_guid), "HwProfileGuid is still the host's: {text}");
+        assert!(text.contains(&ids.computer_name), "hostname is still the host's: {text}");
+        // Each volume reports its own serial, not the account's single base value.
+        // The derived serial is keyed on the volume's real one, read here outside the box.
+        let host_serial = |drive: &str| -> u32 {
+            let out = std::process::Command::new("cmd").args(["/d", "/c", "vol", drive]).output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let token = text
+                .split_whitespace()
+                .find(|w| w.len() == 9 && w.as_bytes()[4] == b'-' && w.chars().filter(|c| *c != '-').all(|c| c.is_ascii_hexdigit()))
+                .unwrap_or_else(|| panic!("no serial in {text}"));
+            u32::from_str_radix(&token.replace('-', ""), 16).unwrap()
+        };
+        let (host_c, host_d) = (host_serial("C:"), host_serial("D:"));
+        let c_value = crate::identity::volume_serial_for(&ids, host_c);
+        let d_value = crate::identity::volume_serial_for(&ids, host_d);
+        let c = crate::identity::volume_serial_text(c_value);
+        let d = crate::identity::volume_serial_text(d_value);
+        assert!(!text.contains(&crate::identity::volume_serial_text(host_c)), "C: still reports the host serial: {text}");
+        assert_ne!(c, d);
+        assert!(text.contains(&c), "C: does not report the account's serial {c}: {text}");
+        assert!(text.contains(&d), "D: does not report the account's serial {d}: {text}");
+
+        // `ipconfig` prints the adapter addresses the guard handed to `GetAdaptersAddresses`:
+        // upper case, colon replaced by a dash. Every adapter must start with the account's own
+        // three-byte prefix, and the addresses must differ from each other — one shared address
+        // for all adapters is what a naive override produces and it is not what a real PC looks
+        // like.
+        let macs: Vec<String> = text
+            .split_whitespace()
+            .filter(|w| w.len() == 17 && w.split('-').count() == 6 && w.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+            .map(|w| w.to_ascii_lowercase())
+            .collect();
+        let prefix = format!("{}-{}-{}", &ids.mac[..2], &ids.mac[2..4], &ids.mac[4..6]);
+        assert!(macs.len() >= 4, "expected one address per adapter, got {macs:?}");
+        for mac in &macs {
+            assert!(mac.starts_with(&prefix), "adapter address {mac} is not the account's ({prefix}…): {text}");
+        }
+        assert_eq!(
+            macs.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            macs.len(),
+            "adapters share one address: {macs:?}"
+        );
+
+        // The host is untouched: the same read outside the box still gives the real value.
+        let host = crate::sys::reg_string(true, r"SOFTWARE\Microsoft\Cryptography", "MachineGuid").unwrap();
+        assert_ne!(host.to_lowercase(), ids.machine_guid);
+        // Listing the key's values (no /v) goes through NtEnumerateValueKey, not a named query.
+        let section = |from: &str, to: &str| text.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or("").to_string();
+        let listed = section("HYDRA-ENUM", "HYDRA-WHOAMI");
+        assert!(listed.contains(&ids.machine_guid), "enumerated MachineGuid is not the account's: {listed}");
+        assert!(!listed.to_lowercase().contains(&host.to_lowercase()), "enumeration leaks the host MachineGuid: {listed}");
+        // `whoami` prints `DOMAIN\user`; for a local account the domain is the computer name.
+        let who = section("HYDRA-WHOAMI", "HYDRA-NODE").to_lowercase();
+        let host_name = std::env::var("COMPUTERNAME").unwrap().to_lowercase();
+        assert!(who.contains(&format!("{}\\", ids.computer_name.to_lowercase())), "whoami domain is not the account's: {who}");
+        assert!(!who.contains(&format!("{host_name}\\")), "whoami still names the host: {who}");
+        // Claude Code is a Node program: what Node reads is what matters most.
+        let node = section("HYDRA-NODE", "HYDRA-DONE");
+        if node.contains("NODE-HOST=") {
+            let value = |key: &str| node.lines().find_map(|l| l.trim().strip_prefix(key).map(str::to_owned)).unwrap_or_default();
+            assert_eq!(value("NODE-HOST="), ids.computer_name, "os.hostname(): {node}");
+            assert_eq!(value("NODE-DEV-C="), c_value.to_string(), "fs.stat('C:').dev: {node}");
+            assert_eq!(value("NODE-DEV-D="), d_value.to_string(), "fs.stat('D:').dev: {node}");
+            let prefix = format!("{}:{}:{}", &ids.mac[..2], &ids.mac[2..4], &ids.mac[4..6]);
+            let node_macs: Vec<&str> = node.lines().filter_map(|l| l.trim().strip_prefix("NODE-MAC=")).collect();
+            assert!(!node_macs.is_empty(), "os.networkInterfaces() listed no adapter: {node}");
+            for mac in &node_macs {
+                assert!(mac.starts_with(&prefix), "os.networkInterfaces() mac {mac} is not the account's: {node}");
+            }
+        } else {
+            println!("node is not on PATH: the Node checks were skipped");
+        }
+        assert_eq!(crate::identity::Identifiers::for_account("hydra-identity-test"), ids);
+        assert_ne!(crate::identity::Identifiers::for_account("other-account"), ids);
+        let _ = std::process::Command::new(dir.join("Start.exe")).args([&format!("/box:{name}"), "/terminate"]).status();
+    }
+
+    /// Regression for the bug where `set_injection` joined the two guard paths with a comma.
+    /// Sandboxie takes one path per value and does not split on commas, so the joined string
+    /// named a file that does not exist and *neither* guard loaded. It looked healthy in the ini
+    /// (the key had a value), which is why this asserts the line count instead.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires Sandboxie-Plus"]
+    fn every_guard_is_its_own_injection_line() {
+        let dir = super::available().unwrap();
+        use std::os::windows::process::CommandExt;
+        let id = "hydra-injection-test";
+        let name = super::configure(id, &crate::paths::storage_root().join("injection-test").to_string_lossy(), None, None).unwrap();
+        let count = |key: &str| {
+            let out = std::process::Command::new(dir.join("SbieIni.exe")).args(["query", &name, key]).creation_flags(0x0800_0000).output().unwrap();
+            assert!(out.status.success(), "query {key} failed");
+            String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect::<Vec<_>>()
+        };
+        let wide = count("InjectDll64");
+        let narrow = count("InjectDll");
+        println!("InjectDll64 {wide:?}\nInjectDll {narrow:?}");
+        // Two guards per bitness. A comma-joined value collapses these to one line each.
+        assert_eq!(wide.len(), 2, "InjectDll64 must list each guard separately: {wide:?}");
+        assert_eq!(narrow.len(), 2, "InjectDll must list each guard separately: {narrow:?}");
+        for path in wide.iter().chain(narrow.iter()) {
+            assert!(std::path::Path::new(path).is_file(), "guard was not materialised: {path}");
+            assert!(!path.contains(','), "guard paths must not be comma-joined: {path}");
+        }
+        let _ = std::process::Command::new(dir.join("Start.exe")).args([&format!("/box:{name}"), "/silent", "/terminate"]).status();
     }
 
     #[test]

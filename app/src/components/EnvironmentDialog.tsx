@@ -130,9 +130,15 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
                 )}
               </div>
             )}
-            <Line label="中国大陆出口">
-              <Switch checked={env.allowCn} onCheckedChange={(allowCn) => setEnv({ ...env, allowCn })} label="允许中国大陆出口" />
-              <span className="text-[11.5px] text-muted">{env.allowCn ? "允许" : "拦截（推荐）"}</span>
+            <Line label="受限地区出口">
+              <Switch checked={env.allowCn} onCheckedChange={(allowCn) => setEnv({ ...env, allowCn })} label="允许不支持地区的出口" />
+              <span className="text-[11.5px] text-muted" title="中国大陆、香港、澳门、俄罗斯、白俄罗斯、伊朗、朝鲜、古巴、叙利亚">{env.allowCn ? "允许" : "拦截 Claude 不提供服务的地区（推荐）"}</span>
+            </Line>
+            <Line label="独立 Code">
+              <Switch checked={env.separateCode || env.isolation === "sandboxie"} disabled={env.isolation === "sandboxie"} onCheckedChange={(separateCode) => setEnv({ ...env, separateCode })} label="每个账号使用独立的 Claude Code 登录与配置" />
+              <span className="text-[11.5px] text-muted">{env.isolation === "sandboxie"
+                ? "沙箱隔离时强制开启：共用 ~/.claude.json 会让各沙箱报出同一个 Claude Code 设备 ID"
+                : env.separateCode ? "每个账号有自己的 Claude Code 登录、配置与会话目录" : "与本机的 Claude Code 共用登录和会话（~/.claude）"}</span>
             </Line>
             <Line label="沙箱隔离">
               <Switch checked={env.isolation === "sandboxie"} disabled={!sandbox?.ok && env.isolation !== "sandboxie"} onCheckedChange={(v) => setEnv({ ...env, isolation: v ? "sandboxie" : "" })} label="在 Sandboxie-Plus 沙箱中运行" />

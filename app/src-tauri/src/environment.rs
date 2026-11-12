@@ -45,6 +45,10 @@ pub struct Environment {
     /// "" = run Claude directly, "sandboxie" = inside a Sandboxie-Plus box (see `sandbox`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub isolation: String,
+    /// Give each account of this environment its own Claude Code folder (`CLAUDE_CONFIG_DIR`)
+    /// instead of the shared `~/.claude`: separate sign-in, settings and sessions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub separate_code: bool,
 }
 
 /// A successful connectivity check: exit info plus the residential/datacenter and risk notes.
@@ -60,10 +64,14 @@ pub struct NodeCheck {
 
 impl Environment {
     pub fn node(&self) -> Option<NodeConfig> {
-        let mut n = self.node.clone()?;
-        n.password = node::unseal(&n.password);
-        n.validated().ok()
+        self.node.as_ref()?.unsealed()?.validated().ok()
     }
+
+    /// Whether accounts of this environment keep their own Claude Code folder. Always on in a
+    /// box: Claude Code's `userID` and telemetry ids live in `~/.claude.json`, so boxes sharing
+    /// that file would each report a different machine GUID but one Claude Code device — a
+    /// pairing no real fleet of machines produces, and more telling than no isolation at all.
+    pub fn keeps_code_separate(&self) -> bool { self.separate_code || self.isolation == "sandboxie" }
 
     /// Window language plus the user's extra switches.
     pub fn launch_args(&self) -> String {
@@ -73,7 +81,7 @@ impl Environment {
 
     /// Whether this environment changes how Claude is launched at all.
     pub fn customizes_launch(&self) -> bool {
-        self.node.is_some() || !matches!(self.timezone.as_str(), "" | "proxy" | "system") || !self.launch_args().is_empty() || !self.env.is_empty()
+        self.node.is_some() || self.keeps_code_separate() || !matches!(self.timezone.as_str(), "" | "proxy" | "system") || !self.launch_args().is_empty() || !self.env.is_empty()
     }
 }
 
@@ -108,6 +116,8 @@ pub struct EnvironmentInput {
     pub allow_cn: bool,
     #[serde(default)]
     pub isolation: String,
+    #[serde(default)]
+    pub separate_code: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -144,6 +154,7 @@ fn view(s: &Settings, id: &str, e: &Environment) -> EnvironmentView {
             exit_rule: e.exit_rule.clone(),
             allow_cn: e.allow_cn,
             isolation: e.isolation.clone(),
+            separate_code: e.separate_code,
         },
         used_by: s.accounts.iter().filter(|(_, a)| a.environment.as_deref() == Some(id)).map(|(aid, _)| account_name(s, aid)).collect(),
         detected_timezone: detected_timezone(s, id, e),
@@ -198,8 +209,8 @@ fn build(input: &EnvironmentInput) -> Result<Environment, String> {
             Some(sub) => node::seal(&serde_json::to_string(sub).map_err(|e| e.to_string())?),
             None => String::new(),
         },
-        name: name.to_string(), node: node.map(|mut n| { n.password = node::seal(&n.password); n }), timezone, locale: input.locale.clone(), args, env, last_check,
-        exit_rule: input.exit_rule.clone(), allow_cn: input.allow_cn, exit_baseline: None, isolation: input.isolation.clone(),
+        name: name.to_string(), node: node.map(|n| n.sealed()), timezone, locale: input.locale.clone(), args, env, last_check,
+        exit_rule: input.exit_rule.clone(), allow_cn: input.allow_cn, exit_baseline: None, isolation: input.isolation.clone(), separate_code: input.separate_code,
     })
 }
 
@@ -207,30 +218,36 @@ fn build(input: &EnvironmentInput) -> Result<Environment, String> {
 pub fn save(install: &crate::install::Install, id: Option<&str>, input: &EnvironmentInput) -> Result<String, String> {
     let mut env = build(input)?;
     if env.isolation == "sandboxie" { crate::sandbox::available()?; }
-    let mut s = settings::load();
-    if let Some(id) = id { if !s.environments.contains_key(id) { return Err("这个环境配置已不存在。".into()); } }
-    if s.environments.iter().any(|(k, e)| Some(k.as_str()) != id && e.name == env.name) { return Err(format!("已有名为“{}”的环境配置。", env.name)); }
-    if install.is_msix() && env.customizes_launch() && id.is_some_and(|id| s.account(crate::paths::DEFAULT_ID).environment.as_deref() == Some(id)) {
-        return Err("商店版默认账号正在使用此环境，而它无法应用代理、时区或启动参数。请先为默认账号取消此环境。".into());
-    }
-    let id = id.map(str::to_string).unwrap_or_else(|| new_id(&s));
-    // A different node makes earlier launch checks of its accounts describe the wrong exit.
-    let node_changed = s.environments.get(&id).map(|old| old.node() != env.node()).unwrap_or(false);
-    if node_changed {
-        for acc in s.accounts.values_mut().filter(|a| a.environment.as_deref() == Some(id.as_str())) { acc.last_exit = None; }
-    } else {
-        // Same node: keep the bound exit; a fresh check of it may seed one.
-        env.exit_baseline = s.environments.get(&id).and_then(|old| old.exit_baseline.clone());
-    }
-    if env.exit_baseline.is_none() && !env.exit_rule.is_empty() {
-        env.exit_baseline = env.last_check.as_ref().map(|c| c.exit.clone()).filter(|x| crate::guard::check(&env, x).is_ok());
-    }
-    s.environments.insert(id.clone(), env);
-    settings::save(&s)?;
-    Ok(id)
+    settings::update_with(|s| {
+        if let Some(id) = id { if !s.environments.contains_key(id) { return Err("这个环境配置已不存在。".into()); } }
+        if s.environments.iter().any(|(k, e)| Some(k.as_str()) != id && e.name == env.name) { return Err(format!("已有名为“{}”的环境配置。", env.name)); }
+        if install.is_msix() && env.customizes_launch() && id.is_some_and(|id| s.account(crate::paths::DEFAULT_ID).environment.as_deref() == Some(id)) {
+            return Err("商店版默认账号正在使用此环境，而它无法应用代理、时区或启动参数。请先为默认账号取消此环境。".into());
+        }
+        let id = id.map(str::to_string).unwrap_or_else(|| new_id(s));
+        let old = s.environments.get(&id).cloned();
+        // A different node makes earlier launch checks of its accounts describe the wrong exit.
+        let node_changed = old.as_ref().map(|old| old.node() != env.node()).unwrap_or(false);
+        if !node_changed {
+            // Same node: keep the bound exit; a fresh check of it may seed one.
+            env.exit_baseline = old.as_ref().and_then(|old| old.exit_baseline.clone());
+        }
+        if env.exit_baseline.is_none() && !env.exit_rule.is_empty() {
+            env.exit_baseline = env.last_check.as_ref().map(|c| c.exit.clone()).filter(|x| crate::guard::check(&env, x).is_ok());
+        }
+        // The rules an exit is judged by changed: an earlier cut no longer describes this
+        // environment. The relay stays paused until the new exit passes (see `relay::sync_all`).
+        let rules_changed = old.as_ref().is_some_and(|old| node_changed || old.exit_rule != env.exit_rule || old.allow_cn != env.allow_cn);
+        for acc in s.accounts.values_mut().filter(|a| a.environment.as_deref() == Some(id.as_str())) {
+            if node_changed { acc.last_exit = None; }
+            if rules_changed { acc.blocked = None; }
+        }
+        s.environments.insert(id.clone(), env);
+        Ok(id)
+    })
 }
 
-/// Deletes an environment; accounts using it fall back to a direct connection.
+/// Deletes an environment; its accounts keep no proxy and no stale network cut.
 pub fn delete(id: &str) -> Result<(), String> {
     settings::update(|s| {
         s.environments.remove(id);
@@ -238,39 +255,39 @@ pub fn delete(id: &str) -> Result<(), String> {
             acc.environment = None;
             acc.relay_port = None;
             acc.last_exit = None;
+            acc.blocked = None;
         }
     })
 }
 
 /// One-time move of per-account settings (v3.0) into environments.
 pub fn migrate() {
-    let mut s = settings::load();
-    let pending: Vec<String> = s.accounts.iter()
-        .filter(|(_, a)| a.environment.is_none() && (a.node.is_some() || !a.proxy_endpoint.is_empty() || !a.args.is_empty() || !a.env.is_empty() || !matches!(a.timezone.as_str(), "" | "proxy")))
-        .map(|(id, _)| id.clone()).collect();
-    if pending.is_empty() { return; }
-    for id in pending {
-        let acc = s.account(&id);
-        // Keep the sealed password as-is; convert a legacy entrance and seal nothing new.
-        let node = acc.node.clone().or_else(|| NodeConfig::from_legacy(&acc.proxy_endpoint));
-        let mut locale = String::new();
-        let args: Vec<&str> = acc.args.split_whitespace().filter(|a| {
-            match a.strip_prefix("--lang=") { Some(l) if LOCALES.contains(&l) && locale.is_empty() => { locale = l.to_string(); false } _ => true }
-        }).collect();
-        let mut name = format!("{} 的环境", account_name(&s, &id));
-        while s.environments.values().any(|e| e.name == name) { name.push('′'); }
-        let env = Environment { name, node, timezone: acc.timezone.clone(), locale, args: args.join(" "), env: acc.env.clone(), ..Default::default() };
-        let env_id = new_id(&s);
-        s.environments.insert(env_id.clone(), env);
-        let a = s.account_mut(&id);
-        a.environment = Some(env_id);
-        a.node = None;
-        a.proxy_endpoint.clear();
-        a.args.clear();
-        a.env.clear();
-        a.timezone.clear();
-    }
-    let _ = settings::save(&s);
+    let needs = |a: &settings::AccountConfig| a.environment.is_none() && (a.node.is_some() || !a.proxy_endpoint.is_empty() || !a.args.is_empty() || !a.env.is_empty() || !matches!(a.timezone.as_str(), "" | "proxy"));
+    if !settings::load().accounts.values().any(needs) { return; }
+    let _ = settings::update(|s| {
+        let pending: Vec<String> = s.accounts.iter().filter(|(_, a)| needs(a)).map(|(id, _)| id.clone()).collect();
+        for id in pending {
+            let acc = s.account(&id);
+            // Keep the sealed password as-is; convert a legacy entrance and seal nothing new.
+            let node = acc.node.clone().or_else(|| NodeConfig::from_legacy(&acc.proxy_endpoint));
+            let mut locale = String::new();
+            let args: Vec<&str> = acc.args.split_whitespace().filter(|a| {
+                match a.strip_prefix("--lang=") { Some(l) if LOCALES.contains(&l) && locale.is_empty() => { locale = l.to_string(); false } _ => true }
+            }).collect();
+            let mut name = format!("{} 的环境", account_name(s, &id));
+            while s.environments.values().any(|e| e.name == name) { name.push('\u{2032}'); }
+            let env = Environment { name, node, timezone: acc.timezone.clone(), locale, args: args.join(" "), env: acc.env.clone(), ..Default::default() };
+            let env_id = new_id(s);
+            s.environments.insert(env_id.clone(), env);
+            let a = s.account_mut(&id);
+            a.environment = Some(env_id);
+            a.node = None;
+            a.proxy_endpoint.clear();
+            a.args.clear();
+            a.env.clear();
+            a.timezone.clear();
+        }
+    });
 }
 
 #[cfg(test)]

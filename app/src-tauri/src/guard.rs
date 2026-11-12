@@ -2,7 +2,8 @@
 //!
 //! Every verified exit (at launch, in the account browser and periodically while an account
 //! uses its relay) is checked against the account's environment:
-//! - mainland-China exits are refused unless the environment allows them;
+//! - exits in regions where Claude is not offered (see `UNSUPPORTED`) are refused unless the
+//!   environment allows them;
 //! - an optional rule pins the exit to the first one seen (`exit_baseline`): same IP, city,
 //!   region or country.
 //!
@@ -31,10 +32,19 @@ pub fn describe(x: &ExitInfo) -> String {
     if place.is_empty() { x.ip.clone() } else { format!("{}（{}）", x.ip, place.join(" ")) }
 }
 
+/// ISO country codes of exits refused by default: Claude is not offered there, so an account
+/// appearing from one of them is a misrouted node rather than an intended exit.
+pub const UNSUPPORTED: [(&str, &str); 9] = [
+    ("CN", "中国大陆"), ("HK", "中国香港"), ("MO", "中国澳门"), ("RU", "俄罗斯"), ("BY", "白俄罗斯"),
+    ("IR", "伊朗"), ("KP", "朝鲜"), ("CU", "古巴"), ("SY", "叙利亚"),
+];
+
 /// Checks an exit against an environment's region block and exit rule.
 pub fn check(env: &Environment, exit: &ExitInfo) -> Result<(), String> {
-    if !env.allow_cn && exit.country.trim().eq_ignore_ascii_case("CN") {
-        return Err(format!("出口 {} 位于中国大陆，Claude 不在该地区提供服务，已拦截。", describe(exit)));
+    if !env.allow_cn {
+        if let Some((_, name)) = UNSUPPORTED.iter().find(|(code, _)| exit.country.trim().eq_ignore_ascii_case(code)) {
+            return Err(format!("出口 {} 位于{name}，Claude 不在该地区提供服务，已拦截。", describe(exit)));
+        }
     }
     let Some(base) = &env.exit_baseline else { return Ok(()) };
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
@@ -77,13 +87,25 @@ pub fn rebind(env_id: &str) -> Result<ExitInfo, String> {
     Ok(exit)
 }
 
-/// Re-checks a blocked account's exit and restores its network if the exit is acceptable again.
-pub fn resume(id: &str) -> Result<ExitInfo, String> {
-    let exit = crate::relay::probe(id)?;
-    let env = settings::load().effective(id).environment;
-    verify(env.as_deref(), &exit)?;
+/// Re-checks a blocked account's exit and restores its network if the exit is acceptable
+/// again. Returns a line describing what was restored.
+pub fn resume(id: &str) -> Result<String, String> {
+    let s = settings::load();
+    let eff = s.effective(id);
+    if eff.unusable_node { return Err("这个账号的代理节点无法读取（密码不能解密或配置损坏），请重新保存它的环境配置。".into()); }
+    let Some(node) = eff.node else {
+        // No proxy any more (environment removed or reassigned): there is no exit to judge.
+        crate::relay::unblock(id);
+        return Ok("该账号已不使用代理，已解除断网标记。".into());
+    };
+    // The relay may not be running (node failed to start, Hydra just restarted): check the
+    // node itself instead of leaving the account cut with no way back.
+    let exit = if crate::relay::running(id) { crate::relay::probe(id) } else {
+        crate::clash::resolve(&node).and_then(|(upstream, _core)| crate::node::inspect(&upstream.client(std::time::Duration::from_secs(15))?, &node))
+    }?;
+    verify(eff.environment.as_deref(), &exit)?;
     crate::relay::unblock(id);
-    Ok(exit)
+    Ok(describe(&exit))
 }
 
 type Notifier = Box<dyn Fn(&str, &str) + Send + Sync>;
@@ -109,7 +131,9 @@ mod tests {
         let tokyo = exit("1.1.1.1", "JP", "Tokyo", "Tokyo");
         let mut env = Environment::default();
         assert!(check(&env, &exit("2.2.2.2", "CN", "Beijing", "Beijing")).is_err());
-        assert!(check(&env, &exit("2.2.2.2", "HK", "", "")).is_ok());
+        assert!(check(&env, &exit("2.2.2.2", "hk", "", "")).is_err());
+        assert!(check(&env, &exit("2.2.2.2", "RU", "", "")).is_err());
+        assert!(check(&env, &exit("2.2.2.2", "SG", "", "")).is_ok());
         env.allow_cn = true;
         assert!(check(&env, &exit("2.2.2.2", "CN", "", "")).is_ok());
         // A rule without a baseline yet accepts the exit (it becomes the baseline).

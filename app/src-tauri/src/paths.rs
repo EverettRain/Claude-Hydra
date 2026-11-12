@@ -8,6 +8,14 @@ fn env_dir(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
+#[cfg(windows)]
+fn fixed_drive(root: &str) -> bool {
+    #[link(name = "kernel32")]
+    extern "system" { fn GetDriveTypeW(root: *const u16) -> u32; }
+    let wide: Vec<u16> = root.encode_utf16().chain([0]).collect();
+    unsafe { GetDriveTypeW(wide.as_ptr()) == 3 }
+}
+
 /// Root directory for Claude-Hydra configuration and isolated account data.
 /// Can be overridden via `CLAUDE_HYDRA_ROOT`.
 pub fn storage_root() -> PathBuf {
@@ -16,13 +24,19 @@ pub fn storage_root() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        let d = PathBuf::from(r"D:\");
-        if d.is_dir() {
-            return d.join("ClaudeHydra");
-        }
-        env_dir("LOCALAPPDATA")
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("ClaudeHydra")
+        // Decided once per run: a drive appearing or vanishing must not move the data root
+        // (and with it every account) under a running Hydra.
+        static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let on_d = PathBuf::from(r"D:\ClaudeHydra");
+            let local = env_dir("LOCALAPPDATA").unwrap_or_else(|| PathBuf::from(".")).join("ClaudeHydra");
+            // Existing data wins; a new install uses D: only when it is a fixed disk (not a
+            // USB stick, card reader, optical or network drive).
+            if on_d.is_dir() { on_d }
+            else if local.join("settings.json").is_file() { local }
+            else if fixed_drive(r"D:\") && PathBuf::from(r"D:\").is_dir() { on_d }
+            else { local }
+        }).clone()
     }
     #[cfg(target_os = "macos")]
     {
@@ -85,7 +99,8 @@ pub fn append_log(file: &str, message: &str) {
     let path = dir.join(file);
     let _ = std::fs::create_dir_all(&dir);
     if std::fs::metadata(&path).map(|m| m.len() > 100 * 1024).unwrap_or(false) {
-        let _ = std::fs::remove_file(&path);
+        // Keep one earlier file: the lines before a problem are usually the ones needed.
+        let _ = std::fs::rename(&path, dir.join(format!("{file}.1")));
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "[{}] {}", now_secs(), message);
