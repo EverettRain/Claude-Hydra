@@ -196,18 +196,30 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<St
     set("AutoRecover", "n")?;
     set("AutoDelete", "n")?;
     set("BlockNetworkFiles", "y")?;
-    match dns_guard_path()? {
+    let guard = dns_guard_path()?;
+    match &guard {
         Some(dll) => set("InjectDll64", &dll.to_string_lossy())?,
         None => { let _ = set("InjectDll64", ""); }
     }
     set("OpenFilePath", data_dir)?;
     append("OpenFilePath", &drop.to_string_lossy())?;
+    // Claude Code's sessions and settings, shared with unboxed accounts as without a box, so
+    // Hydra (and other accounts) see what a boxed account did. `*` covers its temp-and-rename saves.
+    let code = claude_code_paths();
+    for path in &code { append("OpenFilePath", &path.to_string_lossy())?; }
     match relay_port {
         Some(port) => {
             set("NetworkAccess", "*,Block")?;
-            append("NetworkAccess", &format!("*,Allow;Address=127.0.0.1;Port={port}"))?;
+            // Loopback is narrowed again by the DNS guard (relay port or listeners in this box),
+            // which lets runtimes connect socket pairs to themselves. Without it, only the relay.
+            let loopback = if guard.is_some() { "*,Allow;Address=127.0.0.1".to_string() } else { format!("*,Allow;Address=127.0.0.1;Port={port}") };
+            append("NetworkAccess", &loopback)?;
+            set("HydraRelayPort", &port.to_string())?;
         }
-        None => { let _ = set("NetworkAccess", ""); }
+        None => {
+            let _ = set("NetworkAccess", "");
+            let _ = set("HydraRelayPort", "");
+        }
     }
     let mut reload = Command::new(dir.join("Start.exe"));
     #[cfg(windows)]
@@ -216,8 +228,160 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<St
         return Err("Sandboxie 未能重新加载账号配置。".into());
     }
     #[cfg(windows)]
-    sync_box_proxy(&dir, &name, relay_port.filter(|_| crate::sys::claude_egress_policy().is_some()))?;
+    {
+        let root = box_file_root(&dir, &name)?;
+        sync_box_proxy(&dir, &name, relay_port.filter(|_| crate::sys::claude_egress_policy().is_some()))?;
+        sync_box_gitconfig(&root, relay_port)?;
+        recover_claude_code_data(&root, &code);
+    }
     Ok(name)
+}
+
+/// The user profile folder (where Claude Code and git keep their per-user files).
+fn home() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+/// `~/.claude` (or `CLAUDE_CONFIG_DIR`) and the `~/.claude.json*` files next to the home folder.
+fn claude_code_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) { paths.push(PathBuf::from(dir)); }
+    if let Some(home) = home() {
+        if paths.is_empty() { paths.push(home.join(".claude")); }
+        paths.push(home.join(".claude.json*"));
+    }
+    paths
+}
+
+/// Where the box keeps its copy of `host_path`: Sandboxie maps the user profile to
+/// `user\current` and every other path to `drive\<letter>`.
+fn box_copy(root: &Path, host_path: &Path) -> Option<PathBuf> {
+    if let Some(rest) = home().and_then(|h| host_path.strip_prefix(h).ok().map(Path::to_path_buf)) {
+        return Some(root.join("user").join("current").join(rest));
+    }
+    let s = host_path.to_string_lossy();
+    let (drive, rest) = s.split_once(":\\")?;
+    (drive.len() == 1).then(|| root.join("drive").join(drive.to_ascii_uppercase()).join(rest))
+}
+
+/// Box folder on disk. Sandboxie reports an NT path (`\Device\HarddiskVolume3\Sandbox\...`),
+/// mapped back to its drive letter.
+#[cfg(windows)]
+fn box_file_root(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
+    let (status, file, _) = query_box_path(dir, name)?;
+    let fail = || "无法确认账号沙箱的文件位置。".to_string();
+    if status != 0 { return Err(fail()); }
+    if let Some(p) = file.strip_prefix(r"\??\").filter(|p| Path::new(p).is_absolute()) { return Ok(PathBuf::from(p)); }
+    for letter in 'A'..='Z' {
+        let drive: Vec<u16> = format!("{letter}:").encode_utf16().chain([0]).collect();
+        let mut target = [0u16; 512];
+        let n = unsafe { QueryDosDeviceW(drive.as_ptr(), target.as_mut_ptr(), target.len() as u32) };
+        if n == 0 { continue; }
+        let device = String::from_utf16_lossy(&target[..target.iter().position(|&c| c == 0).unwrap_or(0)]);
+        if device.is_empty() { continue; }
+        let Some(rest) = file.get(..device.len()).filter(|p| p.eq_ignore_ascii_case(&device)).map(|_| &file[device.len()..]) else { continue };
+        if rest.starts_with('\\') { return Ok(PathBuf::from(format!("{letter}:{rest}"))); }
+    }
+    Err(fail())
+}
+
+/// `SbieApi_QueryBoxPath`: (status, file root, registry root).
+#[cfg(windows)]
+fn query_box_path(dir: &Path, name: &str) -> Result<(i32, String, String), String> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::FreeLibrary;
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let dll = wide(&dir.join("SbieDll.dll").to_string_lossy());
+    let (mut file, mut key) = ([0u16; 1024], [0u16; 1024]);
+    let (mut file_size, mut key_size) = (std::mem::size_of_val(&file) as u32, std::mem::size_of_val(&key) as u32);
+    type Query = unsafe extern "system" fn(*const u16, *mut u16, *mut u16, *mut u16, *mut u32, *mut u32, *mut u32) -> i32;
+    let status = unsafe {
+        let module = LoadLibraryW(dll.as_ptr());
+        if module.is_null() { return Err("无法加载 Sandboxie。".into()); }
+        let rc = GetProcAddress(module, c"SbieApi_QueryBoxPath".as_ptr().cast()).map(|f| {
+            let query: Query = std::mem::transmute(f);
+            query(wide(name).as_ptr(), file.as_mut_ptr(), key.as_mut_ptr(), null_mut(), &mut file_size, &mut key_size, null_mut())
+        });
+        FreeLibrary(module);
+        rc
+    };
+    let text = |b: &[u16]| String::from_utf16_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]);
+    Ok((status.unwrap_or(-1), text(&file), text(&key)))
+}
+
+const GITCONFIG_MARK: &str = "# Claude-Hydra: sandbox copy of the global git config";
+
+/// Git reads proxies from its config before the environment, so a host config that sends git
+/// to a host proxy, or straight out for some sites (`http.<url>.proxy =`), cannot work in the
+/// box. The box gets its own `~/.gitconfig`: the host file followed by `http.proxy` and every
+/// site-specific proxy pointed at the relay. Rewritten at each launch (so host edits carry
+/// over; changes made from inside the box are replaced) and removed without a relay.
+fn sync_box_gitconfig(root: &Path, relay_port: Option<u16>) -> Result<(), String> {
+    let Some(host) = home().map(|h| h.join(".gitconfig")) else { return Ok(()) };
+    let Some(copy) = box_copy(root, &host) else { return Ok(()) };
+    let ours = std::fs::read_to_string(&copy).is_ok_and(|s| s.starts_with(GITCONFIG_MARK));
+    let Some(port) = relay_port else {
+        if ours { std::fs::remove_file(&copy).map_err(|e| format!("无法移除账号沙箱的 git 配置：{e}"))?; }
+        return Ok(());
+    };
+    let original = std::fs::read_to_string(&host).unwrap_or_default();
+    let content = gitconfig_for_box(&host, &original, &site_proxies(), port);
+    if std::fs::read_to_string(&copy).ok().as_deref() == Some(content.as_str()) { return Ok(()); }
+    if let Some(parent) = copy.parent() { std::fs::create_dir_all(parent).map_err(|e| format!("无法写入账号沙箱的 git 配置：{e}"))?; }
+    std::fs::write(&copy, content).map_err(|e| format!("无法写入账号沙箱的 git 配置：{e}"))
+}
+
+fn gitconfig_for_box(host: &Path, original: &str, sites: &[String], port: u16) -> String {
+    let proxy = format!("http://127.0.0.1:{port}");
+    let mut out = format!("{GITCONFIG_MARK} ({}); regenerated at every launch.\n", host.display());
+    out.push_str(original);
+    if !out.ends_with('\n') { out.push('\n'); }
+    out.push_str(&format!("\n{GITCONFIG_MARK}: network goes through the account relay.\n[http]\n\tproxy = {proxy}\n"));
+    for site in sites {
+        let quoted = site.replace('\\', "\\\\").replace('"', "\\\"");
+        out.push_str(&format!("[http \"{quoted}\"]\n\tproxy = {proxy}\n"));
+    }
+    out
+}
+
+/// URLs with their own `http.<url>.proxy` in the host's system or global git config.
+fn site_proxies() -> Vec<String> {
+    let mut cmd = Command::new("git");
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    cmd.args(["config", "--includes", "--name-only", "--get-regexp", r"^http\..+\.proxy$"])
+        .current_dir(std::env::temp_dir());
+    let Ok(out) = cmd.output() else { return Vec::new() };
+    let mut sites: Vec<String> = String::from_utf8_lossy(&out.stdout).lines()
+        .filter_map(|l| l.trim().strip_prefix("http.")?.strip_suffix(".proxy").map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .collect();
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
+/// Copies Claude Code files a box kept for itself before its folders were opened (sessions
+/// started in the box) to the real folders, without replacing anything there.
+fn recover_claude_code_data(root: &Path, paths: &[PathBuf]) {
+    fn merge(from: &Path, to: &Path) {
+        let Ok(entries) = std::fs::read_dir(from) else { return };
+        for e in entries.flatten() {
+            let target = to.join(e.file_name());
+            match e.file_type() {
+                Ok(t) if t.is_dir() => merge(&e.path(), &target),
+                Ok(t) if t.is_file() && !target.exists() => {
+                    let _ = std::fs::create_dir_all(to).and_then(|_| std::fs::copy(e.path(), &target));
+                }
+                _ => {}
+            }
+        }
+    }
+    for dir in paths.iter().filter(|p| !p.to_string_lossy().ends_with('*')) {
+        if let Some(copy) = box_copy(root, dir) { merge(&copy, dir); }
+    }
 }
 
 /// Edit only the physical copy of the value in the box hive. Removing that copy
@@ -225,31 +389,16 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<St
 #[cfg(windows)]
 fn sync_box_proxy(dir: &Path, name: &str, port: Option<u16>) -> Result<(), String> {
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::{FreeLibrary, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
     use windows_sys::Win32::System::Registry::*;
     let folder = crate::paths::storage_root().join("sandbox");
     let marker = folder.join(format!("{name}.proxy"));
     if port.is_none() && !marker.try_exists().map_err(|e| e.to_string())? { return Ok(()); }
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<_>>();
-    let dll = wide(&dir.join("SbieDll.dll").to_string_lossy());
-    let mut path = [0u16; 1024];
-    let mut size = std::mem::size_of_val(&path) as u32;
-    type Query = unsafe extern "system" fn(*const u16, *mut u16, *mut u16, *mut u16, *mut u32, *mut u32, *mut u32) -> i32;
-    let status = unsafe {
-        let module = LoadLibraryW(dll.as_ptr());
-        if module.is_null() { return Err("无法加载 Sandboxie。".into()); }
-        let rc = GetProcAddress(module, c"SbieApi_QueryBoxPath".as_ptr().cast()).map(|f| {
-            let query: Query = std::mem::transmute(f);
-            query(wide(name).as_ptr(), null_mut(), path.as_mut_ptr(), null_mut(), null_mut(), &mut size, null_mut())
-        });
-        FreeLibrary(module);
-        rc
-    };
-    let path = String::from_utf16_lossy(&path[..path.iter().position(|&c| c == 0).unwrap_or(path.len())]);
+    let (status, _, path) = query_box_path(dir, name)?;
     let lower = path.to_ascii_lowercase();
     let hive = lower.strip_prefix(r"\registry\user\").filter(|s| !s.contains('\\') && s.starts_with("sandbox_") && s.ends_with(&format!("_{}", name.to_ascii_lowercase())));
-    let hive = hive.filter(|_| status == Some(0)).ok_or("无法确认账号沙箱的专用注册表位置。")?;
+    let hive = hive.filter(|_| status == 0).ok_or("无法确认账号沙箱的专用注册表位置。")?;
     let mut mount = Command::new(dir.join("Start.exe"));
     mount.args([&format!("/box:{name}"), "/silent", "mount_hive"]).creation_flags(0x0800_0000);
     mount.spawn().map_err(|e| format!("无法挂载账号沙箱注册表：{e}"))?;
@@ -382,7 +531,7 @@ mod tests {
         // 1) network rules, through `command` (what launcher uses).
         let out = data.join("net.txt");
         let script = format!(
-            "$r=@(); foreach($t in @(@('127.0.0.1',{port}),@('127.0.0.1',{other_port}),@('1.1.1.1',80),@('204.79.197.200',443))){{ try{{ $c=New-Object Net.Sockets.TcpClient; $c.Connect($t[0],$t[1]); $r+=\"$($t[0]):$($t[1])=open\"; $c.Close() }}catch{{ $r+=\"$($t[0]):$($t[1])=blocked\" }} }}; $n='h'+[guid]::NewGuid().ToString('N').Substring(0,10)+'.5.6.7.8.nip.io'; try{{ [void][Net.Dns]::GetHostAddresses($n); $r+='dns-external=resolved' }}catch{{ $r+='dns-external=failed' }}; try{{ [void](Resolve-DnsName example.org -Server 8.8.8.8 -DnsOnly -ErrorAction Stop); $r+='dns-server=resolved' }}catch{{ $r+='dns-server=failed' }}; try{{ [void][Net.Dns]::GetHostAddresses('localhost'); $r+='dns-localhost=ok' }}catch{{ $r+='dns-localhost=failed' }}; $r -join ' ' | Set-Content -Encoding ascii '{}'",
+            "$r=@(); foreach($t in @(@('127.0.0.1',{port}),@('127.0.0.1',{other_port}),@('1.1.1.1',80),@('204.79.197.200',443))){{ try{{ $c=New-Object Net.Sockets.TcpClient; $c.Connect($t[0],$t[1]); $r+=\"$($t[0]):$($t[1])=open\"; $c.Close() }}catch{{ $r+=\"$($t[0]):$($t[1])=blocked\" }} }}; $n='h'+[guid]::NewGuid().ToString('N').Substring(0,10)+'.5.6.7.8.nip.io'; try{{ [void][Net.Dns]::GetHostAddresses($n); $r+='dns-external=resolved' }}catch{{ $r+='dns-external=failed' }}; try{{ [void](Resolve-DnsName example.org -Server 8.8.8.8 -DnsOnly -ErrorAction Stop); $r+='dns-server=resolved' }}catch{{ $r+='dns-server=failed' }}; try{{ [void][Net.Dns]::GetHostAddresses('localhost'); $r+='dns-localhost=ok' }}catch{{ $r+='dns-localhost=failed' }}; try{{ $l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0); $l.Start(); $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',$l.LocalEndpoint.Port); $c.Close(); $l.Stop(); $r+='loopback-self=open' }}catch{{ $r+='loopback-self=blocked' }}; $r -join ' ' | Set-Content -Encoding ascii '{}'",
             out.display()
         );
         let probe = data.join("probe.ps1");
@@ -398,6 +547,7 @@ mod tests {
         assert!(net.contains("1.1.1.1:80=blocked") && net.contains("204.79.197.200:443=blocked"), "{net}");
         assert!(net.contains("dns-external=failed") && net.contains("dns-server=failed"), "DNS leaks out of the box: {net}");
         assert!(net.contains("dns-localhost=ok"), "{net}");
+        assert!(net.contains("loopback-self=open"), "listeners inside the box must stay reachable: {net}");
 
         // 2) Claude itself (Store builds through the copy), detected and confirmed in its box.
         relay.set_nonblocking(true).unwrap();
@@ -427,6 +577,30 @@ mod tests {
         }
         assert!(udd.join("Local State").is_file() || udd.join("logs").is_dir(), "profile data did not reach the real folder");
         println!("claude log net lines: {}", log.lines().filter(|l| l.contains("net::") || l.contains("proxy")).take(4).collect::<Vec<_>>().join(" | "));
+    }
+
+    #[test]
+    fn box_gitconfig_overrides_every_proxy_after_the_host_file() {
+        let host = std::path::Path::new(r"C:\Users\u\.gitconfig");
+        let original = "[http]\n\tproxy = http://127.0.0.1:7891\n[http \"https://gitee.com\"]\n\tproxy =";
+        let out = super::gitconfig_for_box(host, original, &["https://gitee.com".into(), "https://a\"b".into()], 4321);
+        assert!(out.starts_with(super::GITCONFIG_MARK));
+        let (head, tail) = out.split_once("proxy =\n").unwrap();
+        assert!(head.contains("127.0.0.1:7891"));
+        assert!(tail.contains("[http]\n\tproxy = http://127.0.0.1:4321\n"));
+        assert!(tail.contains("[http \"https://gitee.com\"]\n\tproxy = http://127.0.0.1:4321\n"));
+        assert!(tail.contains(r#"[http "https://a\"b"]"#));
+    }
+
+    #[test]
+    fn box_copies_map_profile_and_drives() {
+        let root = std::path::Path::new(r"C:\Sandbox\u\Hydra_x");
+        if let Some(home) = super::home() {
+            assert_eq!(super::box_copy(root, &home.join(".claude")), Some(root.join("user").join("current").join(".claude")));
+        }
+        if cfg!(windows) {
+            assert_eq!(super::box_copy(root, std::path::Path::new(r"q:\data\x")), Some(root.join("drive").join("Q").join(r"data\x")));
+        }
     }
 
     #[test]

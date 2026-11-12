@@ -329,11 +329,15 @@ pub fn child_env(relay_port: u16) -> Vec<(String, String)> {
     for k in ["NO_PROXY", "no_proxy"] { env.push((k.to_string(), "localhost,127.0.0.1,::1".to_string())); }
     // Node 24+ only honours proxy variables for fetch/http when asked to.
     env.push(("NODE_USE_ENV_PROXY".into(), "1".into()));
+    // Claude Code resolves API hosts locally before using its proxy unless told the proxy
+    // resolves them. Local lookups leak DNS outside a box and fail inside one (DNS guard).
+    env.push(("CLAUDE_CODE_PROXY_RESOLVES_HOSTS".into(), "1".into()));
     env
 }
 
 pub fn is_proxy_env(key: &str) -> bool {
-    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"].iter().any(|k| k.eq_ignore_ascii_case(key))
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY", "CLAUDE_CODE_PROXY_RESOLVES_HOSTS"]
+        .iter().any(|k| k.eq_ignore_ascii_case(key))
 }
 
 #[cfg(test)]
