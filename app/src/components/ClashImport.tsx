@@ -23,8 +23,7 @@ function nodes(raw: string): NodeConfig[] {
 export function ClashImport({ subscription, onSubscriptionChange, node, choose }: { subscription?: ClashSubscription | null; onSubscriptionChange: (s: ClashSubscription) => void; node: NodeConfig | null; choose: (n: NodeConfig) => void }) {
   const [url, setUrl] = useState<string | null>(null);
   const address = url ?? subscription?.url ?? "";
-  const items = subscription?.nodes ?? [];
-  const list = node?.kind === "clash" && !items.some(n => n.password === node.password) ? [node, ...items] : items;
+  const list = subscription?.nodes ?? [];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function load(source: Promise<string>) {
@@ -33,6 +32,7 @@ export function ClashImport({ subscription, onSubscriptionChange, node, choose }
       const items = nodes(await source);
       if (!items.length) throw new Error("没有可选择的节点。");
       onSubscriptionChange({ url: address.trim(), nodes: items });
+      setUrl(null);
     } catch (e) { setError(errorText(e)); }
     finally { setBusy(false); }
   }
@@ -42,8 +42,9 @@ export function ClashImport({ subscription, onSubscriptionChange, node, choose }
       <Input aria-label="Clash 订阅地址" type="password" placeholder="Clash 订阅地址" value={address} disabled={busy} onChange={e => setUrl(e.target.value)} />
       <Button variant="outline" disabled={busy || !address.trim()} onClick={() => load(invoke<string>("clash_subscription", { url: address }))}>{busy ? "读取中…" : "读取订阅"}</Button>
     </div>
-    {!!list.length && <Select aria-label="选择 Clash 节点" value={list.findIndex(n => n.password === node?.password)} onChange={e => { const n=list[Number(e.target.value)]; if(n) choose(n); }}>
-      <option value={-1}>选择节点（{list.length}）</option>
+    {!list.length && node?.kind === "clash" && <p className="text-xs text-muted">此环境只保存了绑定节点。读取订阅后即可切换。</p>}
+    {!!list.length && <Select disabled={busy} aria-label="选择 Clash 节点" value={list.findIndex(n => n.password === node?.password)} onChange={e => { const n=list[Number(e.target.value)]; if(n) choose(n); }}>
+      <option disabled value={-1}>选择节点（{list.length}）</option>
       {list.map((n,i) => <option key={i} value={i}>{name(n)} · {JSON.parse(n.password).type}</option>)}
     </Select>}
     {node?.kind === "clash" && <p className="text-xs">已绑定：{name(node)} · {node.host}:{node.port}</p>}
