@@ -75,6 +75,7 @@ pub fn verify(env_id: Option<&str>, exit: &ExitInfo) -> Result<(), String> {
 
 /// Binds environment `env_id` to its node's current exit and lifts the block of its accounts.
 pub fn rebind(env_id: &str) -> Result<ExitInfo, String> {
+    let _change = crate::relay::route_change();
     let s = settings::load();
     let env = s.environments.get(env_id).cloned().ok_or("这个环境配置已不存在。")?;
     let node = env.node().ok_or("这个环境没有代理节点。")?;
@@ -83,13 +84,23 @@ pub fn rebind(env_id: &str) -> Result<ExitInfo, String> {
     check(&Environment { exit_baseline: None, ..env }, &exit)?;
     let accounts: Vec<String> = s.accounts.iter().filter(|(_, a)| a.environment.as_deref() == Some(env_id)).map(|(id, _)| id.clone()).collect();
     settings::update(|s| if let Some(e) = s.environments.get_mut(env_id) { e.exit_baseline = Some(exit.clone()); })?;
-    for id in accounts { crate::relay::unblock(&id); }
+    for id in accounts {
+        if crate::relay::running(&id) {
+            let result = crate::relay::probe(&id).and_then(|actual| verify(Some(env_id), &actual));
+            if let Err(reason) = result {
+                crate::relay::block(&id, &reason);
+                continue;
+            }
+        }
+        crate::relay::unblock(&id);
+    }
     Ok(exit)
 }
 
 /// Re-checks a blocked account's exit and restores its network if the exit is acceptable
 /// again. Returns a line describing what was restored.
 pub fn resume(id: &str) -> Result<String, String> {
+    let _change = crate::relay::route_change();
     let s = settings::load();
     let eff = s.effective(id);
     if eff.unusable_node { return Err("这个账号的代理节点无法读取（密码不能解密或配置损坏），请重新保存它的环境配置。".into()); }

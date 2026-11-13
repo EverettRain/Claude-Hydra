@@ -102,40 +102,41 @@ fn relays() -> &'static Mutex<HashMap<String, Relay>> {
 /// Marks this process as the relay host (the GUI / tray process).
 pub fn set_host() { HOST.store(true, Ordering::SeqCst); }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Started { Same, Created, Changed }
+// Serialize route replacement and authorization so a verdict cannot release a different route.
+pub(crate) fn route_change() -> std::sync::MutexGuard<'static, ()> {
+    static CHANGE: Mutex<()> = Mutex::new(());
+    CHANGE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Starts or updates the relay for an account in this process and returns its port.
 ///
 /// Starting a Mihomo core can take seconds, so the relay table is not locked meanwhile: the
 /// kill switch, the monitor and other accounts keep working. While a relay's node is being
 /// replaced its route is empty, so nothing is forwarded over the old or a half-built route.
-fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<(u16, Started), String> {
-    static STARTING: Mutex<()> = Mutex::new(());
-    let _one = STARTING.lock().unwrap_or_else(|e| e.into_inner());
+fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, String> {
     let existing = {
         let mut map = relays().lock().map_err(|_| "中继状态错误。")?;
         match map.get_mut(id) {
             Some(r) => {
                 let changed = r.original != *node;
-                if !changed && !r.core.as_mut().is_some_and(|c| !c.alive()) { return Ok((r.port, Started::Same)); }
+                if !changed && !r.core.as_mut().is_some_and(|c| !c.alive()) { return Ok(r.port); }
+                pause(&r.gate);
                 *r.gate.node.write().map_err(|_| "中继状态错误。")? = NodeConfig::default();
                 r.original = NodeConfig::default();
                 r.core = None;
-                r.gate.conns.close_all();
-                Some((r.port, changed))
+                Some(r.port)
             }
             None => None,
         }
     };
-    if let Some((port, changed)) = existing {
+    if let Some(port) = existing {
         let (upstream, core) = crate::clash::resolve(node)?;
         let mut map = relays().lock().map_err(|_| "中继状态错误。")?;
         let r = map.get_mut(id).ok_or("中继已停止。")?;
         *r.gate.node.write().map_err(|_| "中继状态错误。")? = upstream;
         r.original = node.clone();
         r.core = core;
-        return Ok((port, if changed { Started::Changed } else { Started::Same }));
+        return Ok(port);
     }
     let listener = preferred
         .and_then(|p| TcpListener::bind((Ipv4Addr::LOCALHOST, p)).ok())
@@ -144,13 +145,12 @@ fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<(u16, S
         .map_err(|e| format!("无法启动本地代理中继：{e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let (upstream, core) = crate::clash::resolve(node)?;
-    let blocked = crate::settings::load().account(id).blocked.is_some();
-    let mut gate = Gate::new(upstream, blocked);
+    let mut gate = Gate::new(upstream, true);
     gate.tag = Arc::new(tag(id));
     let relay = Relay { original: node.clone(), core, port, gate: gate.clone() };
     std::thread::Builder::new().name(format!("relay-{port}")).spawn(move || serve(listener, gate)).map_err(|e| e.to_string())?;
     relays().lock().map_err(|_| "中继状态错误。")?.insert(id.to_string(), relay);
-    Ok((port, Started::Created))
+    Ok(port)
 }
 
 pub fn shutdown() { if let Ok(mut map) = relays().lock() { map.clear(); } }
@@ -172,51 +172,40 @@ fn pause(gate: &Gate) {
     gate.conns.close_all();
 }
 
-/// Judges a relay's current exit with the network held: forwarding resumes only when the exit
-/// passes the account's rules. A failed lookup is not a violation (without its node the
-/// account has no network anyway), so it lifts the hold.
-fn recheck(id: &str) {
-    let Some(gate) = gate_of(id) else { return };
-    pause(&gate);
-    let verdict = probe(id).map(|exit| {
-        let env = crate::settings::load().effective(id).environment;
-        crate::guard::verify(env.as_deref(), &exit)
-    });
-    match verdict {
-        Ok(Err(reason)) => block(id, &reason),
-        Ok(Ok(())) => gate.paused.store(false, Ordering::SeqCst),
-        Err(e) => {
-            crate::paths::append_log("hydra-error.log", &format!("relay {id}: exit not checked after a change: {e}"));
-            gate.paused.store(false, Ordering::SeqCst);
-        }
+fn validate_exit(id: &str) -> Result<(), String> {
+    let exit = probe(id).map_err(|e| format!("无法核验代理出口：{e}"))?;
+    let env = crate::settings::load().effective(id).environment;
+    crate::guard::verify(env.as_deref(), &exit)
+}
+
+fn checked_port(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, String> {
+    let port = ensure(id, node, preferred)?;
+    let gate = gate_of(id).ok_or("中继已停止。")?;
+    if let Some(reason) = crate::settings::load().account(id).blocked {
+        pause(&gate);
+        return Err(reason);
     }
+    if gate.paused.load(Ordering::SeqCst) {
+        validate_exit(id).inspect_err(|reason| block(id, reason))?;
+        gate.paused.store(false, Ordering::SeqCst);
+    }
+    Ok(port)
 }
 
 /// Host process: makes the running relays match `settings.json` and persists their ports.
 /// Blocks on network checks; call it from a worker thread (see `sync_soon`).
 pub fn sync_all() {
     if !HOST.load(Ordering::SeqCst) { return; }
-    static ONE: Mutex<()> = Mutex::new(());
-    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _change = route_change();
     let s = crate::settings::load();
     let mut wanted = Vec::new();
     let mut ports = Vec::new();
     for (id, acc) in &s.accounts {
         let Some(node) = s.effective(id).node else { continue };
         wanted.push(id.clone());
-        match ensure(id, &node, acc.relay_port) {
-            Ok((port, started)) => {
-                if acc.relay_port != Some(port) { ports.push((id.clone(), port)); }
-                let Some(gate) = gate_of(id) else { continue };
-                let paused = gate.paused.load(Ordering::SeqCst);
-                if acc.blocked.is_some() {
-                    if !paused { pause(&gate); }
-                } else if started == Started::Changed || paused {
-                    // A new node, or a cut whose reason was withdrawn (environment edited or
-                    // reassigned): the exit has to pass before traffic flows again.
-                    recheck(id);
-                }
-            }
+        match checked_port(id, &node, acc.relay_port) {
+            Ok(port) if acc.relay_port != Some(port) => ports.push((id.clone(), port)),
+            Ok(_) => {}
             Err(e) => crate::paths::append_log("hydra-error.log", &format!("relay {id}: {e}")),
         }
     }
@@ -266,10 +255,10 @@ pub fn start_monitor() {
             .filter(|(_, r)| !r.gate.paused.load(Ordering::SeqCst) && now.saturating_sub(r.gate.active.load(Ordering::SeqCst)) < ACTIVE_WITHIN_MS)
             .map(|(id, _)| id.clone()).collect()).unwrap_or_default();
         for id in due {
-            // A failed lookup is not a violation: without its node the account has no network anyway.
-            let Ok(exit) = probe(&id) else { continue };
-            let env = crate::settings::load().effective(&id).environment;
-            if let Err(reason) = crate::guard::verify(env.as_deref(), &exit) { block(&id, &reason); }
+            let _change = route_change();
+            if gate_of(&id).is_some_and(|gate| !gate.paused.load(Ordering::SeqCst)) {
+                if let Err(reason) = validate_exit(&id) { block(&id, &reason); }
+            }
         }
     });
 }
@@ -277,8 +266,9 @@ pub fn start_monitor() {
 /// Returns the relay port for launching an account, starting the Hydra tray process if needed.
 pub fn port_for_launch(id: &str, node: &NodeConfig) -> Result<u16, String> {
     if HOST.load(Ordering::SeqCst) {
+        let _change = route_change();
         let preferred = crate::settings::load().account(id).relay_port;
-        let (port, _) = ensure(id, node, preferred)?;
+        let port = checked_port(id, node, preferred)?;
         if preferred != Some(port) { crate::settings::update(|s| s.account_mut(id).relay_port = Some(port))?; }
         return Ok(port);
     }
@@ -705,6 +695,24 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         std::thread::spawn(move || serve(l, Gate::new(node, false)));
         port
+    }
+
+    #[test]
+    fn new_and_replaced_routes_refuse_traffic_before_validation() {
+        let _change = route_change();
+        let id = "test-route-validation";
+        let port = ensure(id, &node("http", 1, "", ""), None).unwrap();
+        let refused = || {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.write_all(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n").unwrap();
+            assert!(read_all(&mut c).starts_with("HTTP/1.1 503"));
+        };
+        refused();
+        gate_of(id).unwrap().paused.store(false, Ordering::SeqCst);
+        assert_eq!(ensure(id, &node("http", 2, "", ""), None).unwrap(), port);
+        assert!(validate_exit(id).is_err());
+        refused();
+        stop(id);
     }
 
     #[test]
