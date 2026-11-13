@@ -1,21 +1,24 @@
 import { UpdateNotice } from "./UpdateNotice";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ArrowRightLeft, ChartNoAxesColumn, Globe2, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
+import { ArrowRightLeft, Box, Globe2, LayoutDashboard, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
 import type React from "react";
 import { useLayoutEffect, useRef, useState } from "react";
 import appIcon from "../assets/claude-hydra-icon-256.png";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-export type PageId = "accounts" | "environments" | "usage" | "sessions" | "settings" | "about";
+export type PageId = "dashboard" | "accounts" | "environments" | "containers" | "sessions" | "settings" | "about";
 
 type Icon = React.ComponentType<{ className?: string }>;
 interface NavItem { id: PageId; label: string; icon: Icon }
 
+const isMac = navigator.userAgent.includes("Mac");
 const main: NavItem[] = [
+  { id: "dashboard", label: "仪表板", icon: LayoutDashboard },
   { id: "accounts", label: "账号", icon: Users },
   { id: "environments", label: "环境配置", icon: Globe2 },
-  { id: "usage", label: "用量", icon: ChartNoAxesColumn },
+  // Containers run on OrbStack, which only exists on macOS.
+  ...(isMac ? [{ id: "containers" as const, label: "容器", icon: Box }] : []),
   { id: "sessions", label: "会话迁移", icon: ArrowRightLeft },
 ];
 const footer: NavItem[] = [
@@ -23,10 +26,9 @@ const footer: NavItem[] = [
   { id: "about", label: "关于", icon: Info },
 ];
 const titles: Record<PageId, string> = {
-  accounts: "账号", environments: "环境配置", usage: "用量", sessions: "会话迁移", settings: "设置", about: "关于",
+  dashboard: "仪表板", accounts: "账号", environments: "环境配置", containers: "容器", sessions: "会话迁移", settings: "设置", about: "关于",
 };
 
-const isMac = navigator.userAgent.includes("Mac");
 const nextTheme: Record<ThemeMode, ThemeMode> = { system: "light", light: "dark", dark: "system" };
 const themeLabel: Record<ThemeMode, string> = { system: "跟随系统", light: "浅色", dark: "深色" };
 

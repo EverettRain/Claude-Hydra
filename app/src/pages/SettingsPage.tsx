@@ -2,10 +2,10 @@ import { Copy, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Group, Page, PageHeader, Row } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Input, Select } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { api, errorText, type AppInfo } from "@/lib/api";
+import { api, errorText, type AppInfo, type ContainerRuntime } from "@/lib/api";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +38,21 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => setPath(info?.claudePath ?? ""), [info?.claudePath]);
+
+  const [runtime, setRuntime] = useState<ContainerRuntime | null>(null);
+  const [dockerPath, setDockerPath] = useState("");
+  const loadRuntime = async () => {
+    try {
+      const rt = await api.containerRuntime();
+      setRuntime(rt);
+      setDockerPath(rt.dockerPath ?? "");
+    } catch (e) {
+      toast(errorText(e), "error");
+    }
+  };
+  useEffect(() => { if (info?.platform === "macos") void loadRuntime(); }, [info?.platform]);
+  const saveRuntime = (key: string, docker: string | null, terminal: string, done: string) =>
+    act(key, async () => { await api.setContainerRuntime(docker, terminal); await loadRuntime(); }, done);
 
   const act = async (key: string, fn: () => Promise<unknown>, done?: string) => {
     setBusy(key);
@@ -139,6 +154,60 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
               应用
             </Button>
           </div>
+        </Group>
+
+        {info?.platform === "macos" && (
+          <Group label="OrbStack 容器">
+            <Row
+              label="连接状态"
+              hint={runtime?.version ? `已连接 OrbStack（docker ${runtime.version}，上下文 orbstack）。` : runtime?.error ?? "正在检测…"}
+            >
+              <Button variant="outline" size="sm" disabled={busy === "probe"} onClick={() => act("probe", loadRuntime)}>
+                {busy === "probe" && <Loader2 className="animate-spin" />}
+                重新检测
+              </Button>
+            </Row>
+            <Row label="打开容器使用的终端" hint="容器账号在此终端的新窗口中打开。">
+              <Select
+                aria-label="终端"
+                className="w-48"
+                value={runtime?.terminal ?? ""}
+                disabled={!runtime || busy === "terminal"}
+                onChange={(e) => saveRuntime("terminal", runtime?.dockerPath ?? null, e.target.value, "已保存。")}
+              >
+                {runtime?.terminals.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+              </Select>
+            </Row>
+            <div className="flex gap-2 px-4 py-3">
+              <Input
+                placeholder="docker 命令路径（留空为自动查找 ~/.orbstack/bin/docker 等）"
+                value={dockerPath}
+                onChange={(e) => setDockerPath(e.target.value)}
+                className="font-mono text-xs"
+              />
+              <Button
+                variant="outline"
+                disabled={!runtime || busy === "docker"}
+                onClick={() => saveRuntime("docker", dockerPath.trim() || null, runtime?.terminal ?? "", dockerPath.trim() ? "已使用指定的 docker。" : "已恢复自动查找。")}
+              >
+                {busy === "docker" && <Loader2 className="animate-spin" />}
+                应用
+              </Button>
+            </div>
+          </Group>
+        )}
+
+        <Group label="用量">
+          <Row
+            label="后台记录剩余额度"
+            hint={`手动刷新过一次额度的账号，Hydra 运行期间每 10 分钟经该账号的代理节点再读一次，用于额度趋势。${info?.platform === "macos" ? "macOS 桌面账号读取凭据需要钥匙串授权，只在手动刷新时记录。" : ""}`}
+          >
+            <Switch
+              checked={!!info?.quotaSampling}
+              disabled={!info || busy === "sampling"}
+              onCheckedChange={(v) => act("sampling", () => api.setQuotaSampling(v))}
+            />
+          </Row>
         </Group>
 
         <Group label="数据与诊断">

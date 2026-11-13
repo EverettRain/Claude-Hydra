@@ -3,23 +3,27 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{path::Path, time::Duration};
 
-#[derive(Clone, Serialize)]
+/// One usage window as the usage endpoint names it: `five_hour`, `seven_day`, and per-model
+/// weekly buckets such as `seven_day_opus` (new ones appear without a Hydra update).
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Window { utilization: f64, resets_at: Option<String> }
-#[derive(Clone, Serialize)]
+pub struct Window { pub id: String, pub utilization: f64, pub resets_at: Option<String> }
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Quota { five_hour: Option<Window>, seven_day: Option<Window>, fetched_at: u64 }
+pub struct Quota { pub windows: Vec<Window>, pub fetched_at: u64 }
 
-fn parse_window(v: &Value) -> Option<Window> {
+fn parse_window(id: &str, v: &Value) -> Option<Window> {
     let n = v.get("utilization")?.as_f64()?;
     if !n.is_finite() || !(0.0..=100.0).contains(&n) { return None; }
-    Some(Window { utilization: n, resets_at: v.get("resets_at").and_then(Value::as_str).map(str::to_owned) })
+    Some(Window { id: id.to_string(), utilization: n, resets_at: v.get("resets_at").and_then(Value::as_str).map(str::to_owned) })
 }
 fn parse_quota(v: &Value) -> Result<Quota, String> {
-    let five_hour = parse_window(&v["five_hour"]);
-    let seven_day = parse_window(&v["seven_day"]);
-    if five_hour.is_none() && seven_day.is_none() { return Err("服务没有返回可识别的额度数据。".into()); }
-    Ok(Quota { five_hour, seven_day, fetched_at: crate::paths::now_millis() })
+    let mut windows: Vec<Window> = v.as_object().into_iter().flatten().filter_map(|(id, w)| parse_window(id, w)).collect();
+    if windows.is_empty() { return Err("服务没有返回可识别的额度数据。".into()); }
+    // The session and weekly windows first, as the UI shows them; then the rest by name.
+    let rank = |id: &str| match id { "five_hour" => 0, "seven_day" => 1, _ => 2 };
+    windows.sort_by(|a, b| rank(&a.id).cmp(&rank(&b.id)).then_with(|| a.id.cmp(&b.id)));
+    Ok(Quota { windows, fetched_at: crate::paths::now_millis() })
 }
 
 fn read_json(dir: &Path, name: &str) -> Result<Value, String> {
@@ -249,6 +253,25 @@ pub fn fetch(install: &crate::install::Install, profile: &crate::profiles::Profi
     query(builder.build().map_err(|_| "无法初始化网络连接。")?, credential)
 }
 
+/// Quota of a container account, from the access token Claude Code keeps in the account's data
+/// folder. Like desktop accounts the token is only read, never refreshed. The request goes
+/// through the account's own relay: the same exit as the container, and no network at all
+/// while the exit guard has cut the account off.
+pub fn fetch_container(id: &str) -> Result<Quota, String> {
+    let s = crate::settings::load();
+    let dir = crate::container::claude_data_dir(&s, id)?;
+    let oauth = crate::code_usage::oauth(&dir).ok_or("这个容器账号还没有登录 Claude Code。请打开容器，运行 claude 并完成登录。")?;
+    if oauth["expiresAt"].as_u64().is_some_and(|e| e <= crate::paths::now_millis()) {
+        return Err("容器账号的登录凭据已过期。Hydra 不会自行刷新凭据：在容器中运行一次 claude，等它自动刷新后再刷新用量。".into());
+    }
+    let token = oauth["accessToken"].as_str().unwrap_or_default().to_string();
+    let effective = s.effective(id);
+    let node = effective.node.ok_or("容器账号需要一个带代理节点的环境。")?;
+    if let Some(reason) = s.account(id).blocked { return Err(format!("出口保护已切断这个容器账号的网络，未查询额度——{reason}")); }
+    let port = crate::relay::port_for_launch(id, &node)?;
+    query(crate::node::relay_client(port, Duration::from_secs(15))?, token)
+}
+
 fn query(client: reqwest::blocking::Client, credential: String) -> Result<Quota, String> {
     let response = client.get("https://api.anthropic.com/api/oauth/usage").bearer_auth(credential).header("anthropic-beta", "oauth-2025-04-20").send().map_err(|_| "额度查询连接失败，请检查账号代理和网络。")?;
     let status = response.status();
@@ -371,7 +394,23 @@ fn query(client: reqwest::blocking::Client, credential: String) -> Result<Quota,
 
     #[test] fn parse_preserves_missing_windows() {
         let q = parse_quota(&serde_json::json!({"five_hour":{"utilization":23.5,"resets_at":"2026-01-01T00:00:00Z"},"seven_day":null})).unwrap();
-        assert_eq!(q.five_hour.unwrap().utilization, 23.5); assert!(q.seven_day.is_none());
+        assert_eq!(q.windows.len(), 1); assert_eq!(q.windows[0].utilization, 23.5);
         assert!(parse_quota(&serde_json::json!({"five_hour":{"utilization":999}})).is_err());
+    }
+    #[test] fn parse_keeps_every_window_session_and_weekly_first() {
+        // Arrange
+        let body = serde_json::json!({
+            "seven_day_opus": {"utilization": 3.0, "resets_at": null},
+            "seven_day": {"utilization": 40.0, "resets_at": "2026-11-20T00:00:00Z"},
+            "five_hour": {"utilization": 20.0, "resets_at": "2026-11-13T22:40:00Z"},
+            "extra_usage": {"is_enabled": false},
+            "cedar_ember": null
+        });
+
+        // Act
+        let ids: Vec<String> = parse_quota(&body).unwrap().windows.into_iter().map(|w| w.id).collect();
+
+        // Assert
+        assert_eq!(ids, ["five_hour", "seven_day", "seven_day_opus"]);
     }
 }

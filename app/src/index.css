@@ -22,6 +22,8 @@
     --brand: 79 70 229;
     --brand-soft: 238 237 253;
     --brand-fg: 255 255 255;
+    /* The app icon's coral, for data marks (charts); not for controls. */
+    --accent: 222 112 78;
     --ok: 24 154 88;
     --ok-soft: 228 246 236;
     --danger: 214 69 69;
@@ -51,6 +53,7 @@
     --brand: 165 180 252;
     --brand-soft: 43 44 71;
     --brand-fg: 20 20 42;
+    --accent: 222 112 78;
     --ok: 111 217 155;
     --ok-soft: 28 52 39;
     --danger: 242 139 130;

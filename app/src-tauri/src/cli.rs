@@ -12,6 +12,7 @@ const HELP: &str = "Claude-Hydra - 同时运行多个 Claude 桌面端账号
   --restart <账号>     重启账号的 Claude（让新的启动参数生效）
   --add-account        新建账号并打开登录界面
   --list               列出账号及运行状态
+  --container <名称>   在当前终端进入 Claude Code 容器账号（macOS + OrbStack）
   --watch              执行一次“保持运行”检查
   --version            打印版本号";
 
@@ -34,6 +35,25 @@ pub fn run(args: &[String]) -> Option<i32> {
     }
     if first == "--tray" {
         return None;
+    }
+    if first == "--container" {
+        let result = args.get(1).ok_or("--container 需要一个容器账号名称。".to_string())
+            .and_then(|n| crate::container::resolve(n).ok_or_else(|| format!("没有名为“{n}”的容器账号。")))
+            .and_then(|id| crate::container::enter(&id));
+        return Some(match result {
+            Ok(code) => code,
+            Err(e) => {
+                paths::append_log("hydra-error.log", &format!("--container: {e}"));
+                eprintln!("\n[错误] {e}");
+                // The terminal window may close as soon as this process ends.
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    eprint!("\n按回车键关闭…");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                }
+                1
+            }
+        });
     }
     let console = sys::attach_console();
     let value = args.get(1).map(String::as_str);

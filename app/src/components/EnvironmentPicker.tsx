@@ -9,6 +9,8 @@ interface Props {
   value: string;
   onChange: (id: string) => void;
   disabled?: boolean;
+  /** Only environments with a proxy node can be chosen (container accounts). */
+  requireNode?: boolean;
 }
 
 function Option({ on, icon: Icon, title, sub, onClick, disabled }: { on: boolean; icon: React.ComponentType<{ className?: string }>; title: string; sub: string; onClick: () => void; disabled?: boolean }) {
@@ -33,7 +35,7 @@ function Option({ on, icon: Icon, title, sub, onClick, disabled }: { on: boolean
 }
 
 /** Choose which saved environment an account uses, or create one on the spot. */
-export function EnvironmentPicker({ value, onChange, disabled }: Props) {
+export function EnvironmentPicker({ value, onChange, disabled, requireNode }: Props) {
   const [envs, setEnvs] = useState<Environment[] | null>(null);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -47,10 +49,11 @@ export function EnvironmentPicker({ value, onChange, disabled }: Props) {
   return (
     <>
       <div role="radiogroup" aria-label="环境配置" className="list-card">
-        <Option on={!value} icon={WifiOff} title="不使用环境配置" sub="直连网络 · 系统时区 · 默认启动参数" onClick={() => onChange("")} disabled={disabled} />
-        {envs?.map((e) => (
-          <Option key={e.id} on={value === e.id} icon={Globe2} title={e.name} sub={environmentSummary(e)} onClick={() => onChange(e.id)} disabled={disabled} />
-        ))}
+        {!requireNode && <Option on={!value} icon={WifiOff} title="不使用环境配置" sub="直连网络 · 系统时区 · 默认启动参数" onClick={() => onChange("")} disabled={disabled} />}
+        {envs?.map((e) => {
+          const unusable = requireNode && !e.node;
+          return <Option key={e.id} on={value === e.id} icon={unusable ? WifiOff : Globe2} title={e.name} sub={unusable ? "没有代理节点，容器不能使用" : environmentSummary(e)} onClick={() => onChange(e.id)} disabled={disabled || unusable} />;
+        })}
         <button onClick={() => setCreating(true)} disabled={disabled} className="flex w-full items-center gap-2 px-4 py-2.5 text-[12.5px] text-muted hover:bg-card-2 hover:text-fg active:!scale-100">
           <Plus className="h-3.5 w-3.5" />
           新建环境配置…

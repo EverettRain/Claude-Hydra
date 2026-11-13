@@ -12,3 +12,18 @@ desktop.ini
 app/node_modules/
 app/dist/
 app/src-tauri/target/
+
+# Local reference material, not part of the project.
+references/
+
+# macOS
+.DS_Store
+._*
+.AppleDouble/
+
+# Other editors
+.idea/
+
+# Python (probe scripts)
+__pycache__/
+*.pyc

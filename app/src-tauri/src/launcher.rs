@@ -46,6 +46,8 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     if node.is_none() && !p.is_default && s.requires_environment() {
         return Err(NO_ENVIRONMENT.into());
     }
+    // Only the sandboxed launch (not on macOS) needs the port itself.
+    #[cfg(not(target_os = "macos"))]
     let mut relay_port = None;
     if let Some(node) = &node {
         if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
@@ -56,19 +58,12 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
                 "账号未启动：系统策略为 Claude 固定了出口代理 {policy}。Claude 会忽略 Hydra 的代理节点、改走这个代理。如需改走 Hydra 配置，请切换到 Sandboxie-Plus 隔离环境；不使用代理节点的账号不受影响。"
             ));
         }
-        let port = crate::relay::port_for_launch(&p.id, node).map_err(|e| format!("账号未启动：{e}"))?;
-        // Verify the exact route Claude will use: local relay -> node -> internet.
-        let client = crate::node::relay_client(port, std::time::Duration::from_secs(15))?;
-        let exit = crate::node::inspect(&client, node).map_err(|e| format!("账号未启动：{e}"))?;
-        crate::guard::verify(effective.environment.as_deref(), &exit).map_err(|e| format!("账号未启动：{e}"))?;
-        relay_port = Some(port);
+        let (port, exit) = verify_route(&p.id, effective.environment.as_deref(), node).map_err(|e| format!("账号未启动：{e}"))?;
+        #[cfg(not(target_os = "macos"))]
+        { relay_port = Some(port); }
         if matches!(effective.timezone.as_str(), "" | "proxy") {
-            if exit.timezone.is_empty() {
-                return Err("账号未启动：IP 查询服务没有返回出口时区。请换一个 IP 查询渠道，或在账号设置中手动指定时区。".into());
-            }
-            timezone = Some(exit.timezone.clone());
+            timezone = Some(exit_timezone(&exit).map_err(|e| format!("账号未启动：{e}"))?);
         }
-        let _ = settings::update(|s| s.account_mut(&p.id).last_exit = Some(exit));
         managed = crate::node::chromium_args(port);
         env.retain(|(k, _)| !crate::node::is_proxy_env(k));
         env.extend(crate::node::child_env(port));
@@ -196,6 +191,25 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         }
         result.map(|_| outcome)
     }
+}
+
+/// Checks the exact route an account will use (local relay → node → internet) against its
+/// environment's exit rules and remembers the exit. Returns the relay port and the exit.
+pub fn verify_route(id: &str, environment: Option<&str>, node: &crate::node::NodeConfig) -> Result<(u16, crate::node::ExitInfo), String> {
+    let port = crate::relay::port_for_launch(id, node)?;
+    let client = crate::node::relay_client(port, std::time::Duration::from_secs(15))?;
+    let exit = crate::node::inspect(&client, node)?;
+    crate::guard::verify(environment, &exit)?;
+    let _ = settings::update(|s| s.account_mut(id).last_exit = Some(exit.clone()));
+    Ok((port, exit))
+}
+
+/// The timezone of a verified exit, for environments that follow the proxy.
+pub fn exit_timezone(exit: &crate::node::ExitInfo) -> Result<String, String> {
+    if exit.timezone.is_empty() {
+        return Err("IP 查询服务没有返回出口时区。请换一个 IP 查询渠道，或在环境配置中手动指定时区。".into());
+    }
+    Ok(exit.timezone.clone())
 }
 
 /// Sandboxed launch: the account's Claude must really run in its box, or it is closed again.

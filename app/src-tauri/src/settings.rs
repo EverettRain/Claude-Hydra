@@ -56,6 +56,10 @@ pub struct AccountConfig {
     /// keeps re-checking and lifts it by itself once the exit verifies again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked_soft: bool,
+    /// Set for a Claude Code container account (see `container`) instead of a desktop profile.
+    /// Shares the network fields above: environment, relay port, last exit and the block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<crate::container::ContainerSpec>,
 }
 
 /// The launch configuration that actually applies to an account.
@@ -119,6 +123,15 @@ pub struct Settings {
     /// as any environment with a node exists (see `direct_launch_refused`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_environment: Option<bool>,
+    /// User-chosen OrbStack docker CLI; `None` = look in the usual places (see `orbstack`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_path: Option<String>,
+    /// Terminal app container accounts open in (see `terminal::APPS`); "" = Terminal.app.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub terminal: String,
+    /// Stops the background quota readings (see `quota_history`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_sampling_off: bool,
 }
 
 impl Settings {

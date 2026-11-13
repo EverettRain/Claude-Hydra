@@ -2,6 +2,9 @@
 
 pub mod browser;
 pub mod cli;
+pub mod code_usage;
+pub mod container;
+mod dashboard;
 pub mod environment;
 pub mod guard;
 pub mod identity;
@@ -11,9 +14,12 @@ pub mod login;
 #[cfg(target_os = "macos")]
 mod mac_url;
 pub mod paths;
+pub mod pricing;
 pub mod profiles;
 pub mod node;
+pub mod orbstack;
 pub mod quota;
+mod quota_history;
 mod releases;
 pub mod sandbox;
 pub mod clash;
@@ -21,6 +27,7 @@ mod relay;
 pub mod sessions;
 pub mod settings;
 pub mod sys;
+pub mod terminal;
 pub mod third_party;
 #[cfg(windows)]
 mod taskbar;
@@ -166,7 +173,8 @@ fn list_environments() -> Vec<environment::EnvironmentView> {
 
 #[tauri::command]
 fn save_environment(app: AppHandle, id: Option<String>, input: environment::EnvironmentInput) -> Result<String, String> {
-    let id = environment::save(&current_install(&app)?, id.as_deref(), &input)?;
+    // Environments also serve container accounts, which need no Claude desktop install.
+    let id = environment::save(current_install(&app).ok().as_ref(), id.as_deref(), &input)?;
     // Starting or re-checking a node can take seconds; never on the UI thread.
     relay::sync_soon();
     after_change(&app);
@@ -217,6 +225,7 @@ fn save_profile_options(app: AppHandle, id: String, options: ProfileOptions) -> 
 #[tauri::command]
 fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     profiles::remove(&current_install(&app)?, &id)?;
+    quota_history::delete(&id);
     // Starting or re-checking a node can take seconds; never on the UI thread.
     relay::sync_soon();
     after_change(&app);
@@ -293,6 +302,120 @@ async fn rebind_exit(app: AppHandle, id: String) -> Result<String, String> {
 }
 
 /// Sandboxie-Plus install folder, or why sandbox isolation is unavailable.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContainerRuntime {
+    supported: bool,
+    /// Docker CLI set in Settings; `None` = automatic.
+    docker_path: Option<String>,
+    /// OrbStack's version when connected.
+    version: Option<String>,
+    error: Option<String>,
+    terminal: String,
+    terminals: Vec<(String, String)>,
+}
+
+#[tauri::command]
+async fn container_runtime() -> ContainerRuntime {
+    let s = settings::load();
+    let connected = tauri::async_runtime::spawn_blocking({
+        let path = s.docker_path.clone();
+        move || orbstack::connect_with(path.as_deref()).map(|(_, v)| v)
+    }).await.unwrap_or_else(|e| Err(e.to_string()));
+    ContainerRuntime {
+        supported: orbstack::supported(),
+        docker_path: s.docker_path,
+        version: connected.as_ref().ok().cloned(),
+        error: connected.err(),
+        terminal: s.terminal,
+        terminals: terminal::APPS.iter().map(|(v, n)| (v.to_string(), n.to_string())).collect(),
+    }
+}
+
+#[tauri::command]
+fn set_container_runtime(docker_path: Option<String>, terminal: String) -> Result<(), String> {
+    terminal::validate(&terminal)?;
+    let docker_path = docker_path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    if let Some(p) = &docker_path { orbstack::locate(Some(p))?; }
+    settings::update(|s| { s.docker_path = docker_path; s.terminal = terminal; })
+}
+
+#[tauri::command]
+async fn list_containers() -> Result<Vec<container::ContainerView>, String> {
+    tauri::async_runtime::spawn_blocking(container::list).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_container(id: Option<String>, input: container::ContainerInput) -> Result<String, String> {
+    let id = container::save(id.as_deref(), &input)?;
+    // Starting or re-checking a node can take seconds; never on the UI thread.
+    relay::sync_soon();
+    Ok(id)
+}
+
+#[tauri::command]
+async fn open_container(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || container::open(&id)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn stop_container(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || container::stop(&id)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn rebuild_container(id: String, keep_changes: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || container::rebuild(&id, keep_changes)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn delete_container(id: String) -> Result<Option<String>, String> {
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let note = container::delete(&id)?;
+        quota_history::delete(&id);
+        Ok::<_, String>(note)
+    }).await.map_err(|e| e.to_string())?;
+    relay::sync_soon();
+    r
+}
+
+/// The dashboard built now (scans the transcripts; slow on a cold start).
+#[tauri::command]
+async fn usage_dashboard() -> Result<dashboard::Dashboard, String> {
+    tauri::async_runtime::spawn_blocking(dashboard::build).await.map_err(|e| e.to_string())
+}
+
+/// The last dashboard built, shown while `usage_dashboard` runs.
+#[tauri::command]
+fn usage_dashboard_cached() -> Option<dashboard::Dashboard> {
+    dashboard::cached()
+}
+
+#[tauri::command]
+async fn container_quota(id: String) -> Result<quota::Quota, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let q = quota::fetch_container(&id)?;
+        quota_history::record(&id, &q);
+        Ok(q)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn quota_history(id: String) -> Result<quota_history::History, String> {
+    tauri::async_runtime::spawn_blocking(move || quota_history::read(&id)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn set_quota_sampling(enabled: bool) -> Result<(), String> {
+    settings::update(|s| s.quota_sampling_off = !enabled)
+}
+
+#[tauri::command]
+fn create_container_shortcut(id: String) -> Result<String, String> {
+    let path = container::create_shortcut(&id)?;
+    Ok(format!("已在桌面创建快捷方式：{}", path.file_name().unwrap_or_default().to_string_lossy()))
+}
+
 #[tauri::command]
 fn sandbox_status() -> Result<String, String> {
     sandbox::available().map(|p| p.display().to_string())
@@ -371,7 +494,9 @@ async fn recycle_session(app: AppHandle, account: String, action: String, id: St
 async fn profile_quota(app: AppHandle, id: String) -> Result<quota::Quota, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (install, profile) = find(&app, &id)?;
-        quota::fetch(&install, &profile)
+        let q = quota::fetch(&install, &profile)?;
+        quota_history::record(&id, &q);
+        Ok(q)
     }).await.map_err(|_| "额度查询任务失败。".to_string())?
 }
 
@@ -431,6 +556,7 @@ struct AppInfo {
     autostart: bool,
     /// Extra accounts refuse to start without a proxy environment.
     require_environment: bool,
+    quota_sampling: bool,
 }
 
 #[tauri::command]
@@ -450,8 +576,10 @@ fn app_info(app: AppHandle) -> AppInfo {
         settings_path: paths::settings_path().to_string_lossy().into(),
         autostart: sys::autostart_enabled(),
         require_environment: s.requires_environment(),
+        quota_sampling: !s.quota_sampling_off,
     }
 }
+
 
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<(), String> {
@@ -640,6 +768,7 @@ fn start_background(app: AppHandle) {
 pub fn run(start_in_tray: bool) {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         // `--tray` instances are started only to make sure a host runs (e.g. by link routing).
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| if !args.iter().any(|a| a == "--tray") { show_main(app) }))
         .manage(AppState::default())
@@ -669,6 +798,20 @@ pub fn run(start_in_tray: bool) {
             rebind_exit,
             sandbox_status,
             configure_quiet_sandbox,
+            container_runtime,
+            set_container_runtime,
+            list_containers,
+            save_container,
+            open_container,
+            stop_container,
+            rebuild_container,
+            delete_container,
+            create_container_shortcut,
+            usage_dashboard,
+            usage_dashboard_cached,
+            container_quota,
+            quota_history,
+            set_quota_sampling,
             diagnostics,
             session_preview,
             read_import,
@@ -706,6 +849,8 @@ pub fn run(start_in_tray: bool) {
             let restored = handle.clone();
             guard::on_restore(move |_id| after_change(&restored));
             relay::start_monitor();
+            let sampled = handle.clone();
+            quota_history::start_sampler(move |id, q| { let _ = sampled.emit_to("main", "quota-sampled", (id, q)); });
             browser::start_watcher(handle.clone());
             browser::remember_fallback();
             environment::migrate();

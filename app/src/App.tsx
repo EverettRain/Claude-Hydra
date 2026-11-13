@@ -5,13 +5,14 @@ import { api, errorText, type AppInfo, type Profile } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import { AboutPage } from "@/pages/AboutPage";
 import { AccountsPage } from "@/pages/AccountsPage";
+import { ContainersPage } from "@/pages/ContainersPage";
 import { EnvironmentsPage } from "@/pages/EnvironmentsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
-import { UsagePage } from "@/pages/UsagePage";
+import { DashboardPage } from "@/pages/DashboardPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 
 export default function App() {
-  const [page, setPage] = useState<PageId>("accounts");
+  const [page, setPage] = useState<PageId>("dashboard");
   const [theme, setTheme] = useTheme();
   const [profiles, setProfiles] = useState<Profile[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -51,7 +52,8 @@ export default function App() {
       status={profiles ? { running: profiles.filter((p) => p.pid).length, total: profiles.length } : null}>
       {page === "accounts" && <AccountsPage profiles={profiles} loadError={loadError} refresh={refresh} />}
       {page === "environments" && <EnvironmentsPage onChanged={refresh} />}
-      {page === "usage" && <UsagePage profiles={profiles} />}
+      {page === "containers" && <ContainersPage onOpenSettings={() => setPage("settings")} />}
+      {page === "dashboard" && <DashboardPage profiles={profiles} />}
       {page === "sessions" && <SessionsPage profiles={profiles} />}
       {page === "settings" && (
         <SettingsPage info={info} reloadInfo={reloadInfo} theme={theme} onThemeChange={setTheme} onInstallChanged={refresh} />

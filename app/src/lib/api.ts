@@ -93,16 +93,90 @@ export interface AppInfo {
   autostart: boolean;
   /** Extra accounts refuse to start without a proxy environment. */
   requireEnvironment: boolean;
+  /** Quota is re-read in the background for the trend. */
+  quotaSampling: boolean;
 }
 
-export interface QuotaWindow { utilization: number; resetsAt: string | null }
-export interface Quota { fiveHour: QuotaWindow | null; sevenDay: QuotaWindow | null; fetchedAt: number }
+/** A usage window as the service names it: "five_hour", "seven_day", "seven_day_opus", … */
+export interface QuotaWindow { id: string; utilization: number; resetsAt: string | null }
+export interface Quota { windows: QuotaWindow[]; fetchedAt: number }
+/** Consecutive unchanged readings of one cycle (times in ms). */
+export interface QuotaRun { utilization: number; resetsAt: number | null; from: number; to: number; samples: number }
+export interface QuotaHistory { windows: Record<string, QuotaRun[]> }
 
 export interface CodeSession {
   id: string; title: string; cwd: string | null; cwdExists: boolean; lastActivityAt: number | null; model: string | null; turns: number | null; inTarget: boolean;
 }
 export interface SessionPreview { sessions: CodeSession[]; targetProblem: string | null; running: boolean }
 export interface TransferResult { copied: number; skipped: number; failed: number }
+
+export interface ContainerMount {
+  /** Absolute folder on the Mac. */
+  source: string;
+  /** Folder name under /workspace in the container. */
+  name: string;
+}
+export interface ContainerInput {
+  name: string;
+  /** Environment id; it must have a proxy node. */
+  environment: string;
+  /** "" = Hydra's built-in image. */
+  image: string;
+  mounts: ContainerMount[];
+  sshAgent: boolean;
+  /** Mac folder for Claude Code's data; "" = the account's folder in Hydra's data directory. */
+  claudeDir: string;
+}
+export interface Container extends ContainerInput {
+  id: string;
+  environmentName: string | null;
+  /** The Mac folder that actually holds Claude Code's data. */
+  claudeDirPath: string;
+  state: "running" | "stopped" | "absent" | "unknown";
+  /** Why the container must be rebuilt before it can be opened. */
+  rebuild: string | null;
+  imageUpdate: boolean;
+  blocked: string | null;
+  /** The cut lifts by itself once the exit verifies again. */
+  blockedSoft: boolean;
+  lastExit: ExitInfo | null;
+}
+export interface ContainerRuntime {
+  supported: boolean;
+  dockerPath: string | null;
+  /** OrbStack version when connected. */
+  version: string | null;
+  error: string | null;
+  terminal: string;
+  terminals: [string, string][];
+}
+
+export interface Tokens { input: number; output: number; cacheCreation: number; cacheRead: number }
+export interface CodeAccount {
+  signedIn: boolean;
+  /** e.g. "pro" | "max" */
+  plan: string | null;
+  /** e.g. "default_claude_max_20x" */
+  tier: string | null;
+  email: string | null;
+  organization: string | null;
+  expiresAt: number | null;
+}
+export interface CodeUsage {
+  /** Start of each UTC hour (ms) with recorded usage; `cost` is API-equivalent USD. */
+  hours: { start: number; tokens: Tokens; cost: number }[];
+  /** `cost` is null for models without a known price. */
+  models: { model: string; tokens: Tokens; cost: number | null }[];
+  total: Tokens;
+  responses: number;
+  /** API-equivalent USD of the priced responses. */
+  cost: number;
+  /** Tokens of models without a known price (not in `cost`). */
+  unpriced: number;
+  activeMs: number;
+}
+export interface ContainerUsage { id: string; name: string; account: CodeAccount; usage: CodeUsage; blocked: string | null; blockedSoft: boolean }
+export interface UsageDashboard { containers: ContainerUsage[]; total: CodeUsage; /** When it was built (ms). */ updatedAt: number }
 
 export const api = {
   listProfiles: () => invoke<Profile[]>("list_profiles"),
@@ -127,6 +201,20 @@ export const api = {
   rebindExit: (id: string) => invoke<string>("rebind_exit", { id }),
   sandboxStatus: () => invoke<string>("sandbox_status"),
   configureQuietSandbox: () => invoke<void>("configure_quiet_sandbox"),
+  containerRuntime: () => invoke<ContainerRuntime>("container_runtime"),
+  setContainerRuntime: (dockerPath: string | null, terminal: string) => invoke<void>("set_container_runtime", { dockerPath, terminal }),
+  listContainers: () => invoke<Container[]>("list_containers"),
+  saveContainer: (id: string | null, input: ContainerInput) => invoke<string>("save_container", { id, input }),
+  openContainer: (id: string) => invoke<void>("open_container", { id }),
+  stopContainer: (id: string) => invoke<void>("stop_container", { id }),
+  rebuildContainer: (id: string, keepChanges: boolean) => invoke<void>("rebuild_container", { id, keepChanges }),
+  deleteContainer: (id: string) => invoke<string | null>("delete_container", { id }),
+  createContainerShortcut: (id: string) => invoke<string>("create_container_shortcut", { id }),
+  usageDashboard: () => invoke<UsageDashboard>("usage_dashboard"),
+  usageDashboardCached: () => invoke<UsageDashboard | null>("usage_dashboard_cached"),
+  containerQuota: (id: string) => invoke<Quota>("container_quota", { id }),
+  quotaHistory: (id: string) => invoke<QuotaHistory>("quota_history", { id }),
+  setQuotaSampling: (enabled: boolean) => invoke<void>("set_quota_sampling", { enabled }),
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
   revealTranscript: (path: string) => invoke<void>("reveal_transcript", { path }),

@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""hydra-audit: network audit of a Claude-Hydra container. Run it inside the container.
+
+  hydra-audit                 one-off audit: environment, bypass paths, short sampling, score
+  hydra-audit watch           continuous sampling until stopped (--duration, --background)
+  hydra-audit status | stop   the continuous sampling
+
+The expected exit comes from Claude-Hydra, which verified it before opening the terminal
+(HYDRA_EXPECTED_EXIT, HYDRA_EXPECTED_COUNTRY); --expected / --real-ip add to it.
+Read-only: it never changes proxies, firewall rules or DNS. Every probe uses a fresh
+connection without proxy settings, retries or redirects. Sampling is bounded and discrete:
+a clean result is evidence, not proof that no leak can happen.
+"""
+import argparse, collections, concurrent.futures, datetime, fcntl, ipaddress, json, logging, os
+import signal, socket, struct, subprocess, sys, threading, time, urllib.parse
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+STATE = Path.home() / '.local/state/hydra-audit'
+COOKIE = 0x2112A442
+STUN_HOST = '162.159.207.1'
+TRACE = 'https://www.cloudflare.com/cdn-cgi/trace'
+PENALTY = {'critical': 40, 'high': 20, 'medium': 10, 'low': 5, 'info': 0}
+LABEL = {'pass': '通过', 'critical': '严重', 'high': '高', 'medium': '中', 'low': '低', 'info': '信息'}
+COLOR = {'pass': '32', 'critical': '1;31', 'high': '31', 'medium': '33', 'low': '33', 'info': '2'}
+TTY = sys.stdout.isatty()
+
+
+def paint(text, code):
+    return f'\033[{code}m{text}\033[0m' if TTY else text
+
+
+def utc():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds')
+
+
+def parse_ip(text):
+    return str(ipaddress.ip_address(text.strip()))
+
+
+# ---- probes (as in the original container-ip-audit) --------------------------------------
+
+def parse_stun(data, transaction):
+    if len(data) < 20:
+        raise ValueError('short STUN response')
+    kind, length, cookie = struct.unpack('!HHI', data[:8])
+    if kind != 0x0101 or cookie != COOKIE or data[8:20] != transaction or len(data) < 20 + length:
+        raise ValueError('invalid STUN header or transaction')
+    offset = 20
+    while offset + 4 <= 20 + length:
+        attr, size = struct.unpack('!HH', data[offset:offset + 4])
+        value = data[offset + 4:offset + 4 + size]
+        if len(value) != size:
+            raise ValueError('truncated STUN attribute')
+        if attr in (0x0020, 0x0001) and size >= 8:
+            n = 4 if value[1] == 1 else 16 if value[1] == 2 else 0
+            if n and size >= 4 + n:
+                address = value[4:4 + n]
+                if attr == 0x0020:
+                    mask = struct.pack('!I', COOKIE) + transaction
+                    address = bytes(a ^ b for a, b in zip(address, mask))
+                return str(ipaddress.ip_address(address))
+        offset += 4 + ((size + 3) // 4) * 4
+    raise ValueError('no mapped address in STUN response')
+
+
+def curl(url, timeout, family=None, proxy=None):
+    # -q ignores curlrc; no environment proxy, redirects, retries or connection reuse.
+    cmd = ['curl', '-q', '--silent', '--show-error', '--max-time', str(timeout), '--connect-timeout', str(timeout),
+           '--max-filesize', '16384', '--http1.1', '-H', 'Connection: close', '-H', 'Cache-Control: no-cache',
+           '-A', 'hydra-audit/1', '--write-out', '\n%{http_code}']
+    cmd += ['--proxy', proxy, '--noproxy', ''] if proxy else ['--noproxy', '*', '--proxy', '']
+    if family:
+        cmd.append('-4' if family == 4 else '-6')
+    r = subprocess.run(cmd + [url], capture_output=True, text=True, timeout=timeout + 1)
+    if r.returncode:
+        return {'result': 'error', 'error': r.stderr.strip()[:300], 'curl_code': r.returncode}
+    body, _, code = r.stdout.rpartition('\n')
+    return {'result': 'response', 'http_status': code, 'body': body[:2000]}
+
+
+def exit_probe(url, family, timeout, proxy=None):
+    r = curl(url, timeout, family, proxy)
+    if r['result'] != 'response':
+        return r
+    if r['http_status'] != '200':
+        return {'result': 'error', 'error': 'HTTP ' + r['http_status'], 'http_status': r['http_status']}
+    body = r['body']
+    if 'cdn-cgi/trace' in url:
+        fields = dict(line.split('=', 1) for line in body.splitlines() if '=' in line)
+        return {'result': 'observed', 'ip': parse_ip(fields.get('ip', '')), 'country': fields.get('loc', '')}
+    return {'result': 'observed', 'ip': parse_ip(body), 'country': ''}
+
+
+def stun_udp(timeout):
+    transaction = os.urandom(12)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        s.connect((STUN_HOST, 3478))
+        s.send(struct.pack('!HHI', 1, 0, COOKIE) + transaction)
+        return {'result': 'observed', 'ip': parse_stun(s.recv(4096), transaction), 'country': ''}
+
+
+def stun_tcp(timeout):
+    transaction = os.urandom(12)
+    with socket.create_connection((STUN_HOST, 3478), timeout=timeout) as s:
+        s.settimeout(timeout)
+        s.sendall(struct.pack('!HHI', 1, 0, COOKIE) + transaction)
+        data = b''
+        while len(data) < 20 or len(data) < 20 + struct.unpack('!H', data[2:4])[0]:
+            part = s.recv(4096)
+            if not part:
+                raise ValueError('short STUN response')
+            data += part
+        return {'result': 'observed', 'ip': parse_stun(data, transaction), 'country': ''}
+
+
+def udp_reply(port, timeout):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        s.connect(('1.1.1.1', port))
+        s.send(b'\x1b' + b'\0' * 47)
+        return {'result': 'response', 'bytes': len(s.recv(4096))}
+
+
+def tcp_reply(host, port, timeout):
+    with socket.create_connection((host, port), timeout=timeout) as s:
+        s.settimeout(timeout)
+        s.sendall(b'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n')
+        return {'result': 'response', 'bytes': len(s.recv(200))}
+
+
+def open_socket(family, kind, proto):
+    with socket.socket(family, kind, proto):
+        return {'result': 'opened'}
+
+
+def attempt(fn):
+    try:
+        return fn()
+    except Exception as e:  # a failed probe is a result, not a crash
+        return {'result': 'error', 'error': f'{type(e).__name__}: {str(e)[:300]}'}
+
+
+# ---- judgement ---------------------------------------------------------------------------
+
+class Expectation:
+    """What counts as the account's own exit.
+
+    With the relay address (HYDRA_RELAY) the authority is the node itself: the exit seen
+    through the relay right now. Any other exit means that traffic did not go through the node,
+    whatever its country. An unknown IP first triggers a fresh relay lookup, so a node that
+    rotates its exit is not reported as a leak. Without the relay, an unknown exit in the
+    expected country is only suspicious (it could be rotation, or a direct route in the same
+    country)."""
+
+    def __init__(self, ips, countries, real, relay, timeout):
+        self.ips, self.countries, self.real = set(ips), countries, real
+        self.relay, self.timeout = relay, timeout
+        self.country_of = {}
+        self.lock = threading.Lock()
+
+    def via_relay(self):
+        r = attempt(lambda: exit_probe(TRACE, 4, self.timeout, self.relay))
+        if r['result'] == 'observed':
+            with self.lock:
+                self.ips.add(r['ip'])
+                self.country_of[r['ip']] = r.get('country', '')
+        return r
+
+    def learn(self, r):
+        if r.get('result') == 'observed' and r.get('country'):
+            self.country_of.setdefault(r['ip'], r['country'])
+
+    def judge_exit(self, r, what):
+        """(severity, message) for an observed exit; severity 'pass' when it is the account's own."""
+        ip = r['ip']
+        country = r.get('country') or self.country_of.get(ip, '')
+        where = ip + (f'（{country}）' if country else '')
+        if ip in self.real:
+            return 'critical', f'{what}：出口 {where} 是已知的真实 IP —— 真实 IP 泄露'
+        if ip in self.ips:
+            return 'pass', f'{what}：出口 {where} 是本账号节点的出口'
+        if self.relay:
+            self.via_relay()
+            if ip in self.ips:
+                return 'pass', f'{what}：出口 {where} 是本账号节点的出口（节点更换了出口 IP）'
+            return 'critical', f'{what}：出口 {where} 不是本账号节点的出口 —— 流量没有经过节点（直连或其他代理）'
+        if country and country in self.countries:
+            return 'medium', f'{what}：出口 {where} 不是预期 IP，但国家相同（可能是节点轮换，也可能是同国家的直连）'
+        return 'critical', f'{what}：出口 {where} 不是预期出口 —— 疑似直连或走错节点'
+
+
+def finding(check, severity, message, raw=None):
+    return {'check': check, 'severity': severity, 'message': message, 'raw': raw or {}}
+
+
+def blocked(check, title, r, blocked_ok='已阻断', leak='critical', leak_msg='可以直接出网'):
+    if r['result'] in ('observed', 'response', 'opened'):
+        return finding(check, leak, f'{title}：{leak_msg}', r)
+    return finding(check, 'pass', f'{title}：{blocked_ok}', r)
+
+
+def capabilities():
+    status = Path('/proc/self/status').read_text()
+    fields = dict(line.split(':', 1) for line in status.splitlines() if ':' in line)
+    eff = int(fields.get('CapEff', '0').strip(), 16)
+    named = {12: 'NET_ADMIN', 13: 'NET_RAW', 21: 'SYS_ADMIN'}
+    return [name for bit, name in named.items() if eff >> bit & 1], fields.get('NoNewPrivs', '').strip()
+
+
+def environment_findings(env):
+    out = []
+    risky, nnp = capabilities()
+    out.append(finding('capabilities', 'high' if risky else 'pass',
+                       f'容器权限：拥有 {"、".join(risky)}，可改动网络或绕过网关' if risky else '容器权限：没有 NET_ADMIN / NET_RAW / SYS_ADMIN'))
+    out.append(finding('no_new_privs', 'pass' if nnp == '1' else 'low',
+                       '提权保护：no-new-privileges 已开启' if nnp == '1' else '提权保护：no-new-privileges 未开启'))
+    sockets = [p for p in ('/var/run/docker.sock', '/run/docker.sock') if Path(p).exists()]
+    out.append(finding('docker_socket', 'high' if sockets else 'pass',
+                       f'Docker 控制：挂载了 {", ".join(sockets)}，容器可以控制宿主机的容器' if sockets else 'Docker 控制：未挂载 Docker socket'))
+    proxies = sorted(k for k in os.environ if k.lower().endswith('_proxy'))
+    out.append(finding('proxy_env', 'info', f'代理环境变量：{", ".join(proxies)}（透明网关不需要它们）' if proxies else '代理环境变量：无（由透明网关代理）'))
+    tz = os.environ.get('TZ', '')
+    want = env.get('HYDRA_EXPECTED_TZ', '')
+    out.append(finding('timezone', 'low' if want and tz != want else 'pass' if want else 'info',
+                       f'时区：TZ={tz or "未设置"}，Hydra 期望 {want}' if want and tz != want else f'时区：TZ={tz or "未设置（镜像默认）"}'))
+    ssh = os.environ.get('SSH_AUTH_SOCK') or ''
+    out.append(finding('ssh_agent', 'info', '宿主 SSH agent：已转发（有意保留的能力）' if ssh else '宿主 SSH agent：未转发'))
+    return out
+
+
+def network_findings(exp, env, timeout):
+    host = env.get('HYDRA_HOST_IP', '0.250.250.254')
+    relay = env.get('HYDRA_RELAY', '')
+    out = []
+    if relay:
+        r = exp.via_relay()
+        out.append(finding('relay_exit', 'pass' if r['result'] == 'observed' else 'medium',
+                           f'本账号节点当前出口（经中继）：{r["ip"]}{"（" + r["country"] + "）" if r.get("country") else ""}' if r['result'] == 'observed'
+                           else f'无法经中继取得节点出口（{r.get("error", "")[:80]}）：中继未运行或已被出口保护断网，出口只能与 Hydra 打开终端时的检测结果比较', r))
+    tests = {
+        'exit_https_ip': lambda: exit_probe('https://1.1.1.1/cdn-cgi/trace', 4, timeout),
+        'exit_https_dns': lambda: exit_probe('https://api.ipify.org', 4, timeout),
+        'exit_http_dns': lambda: exit_probe('http://www.cloudflare.com/cdn-cgi/trace', 4, timeout),
+        'exit_tcp_stun': lambda: stun_tcp(timeout),
+        'ipv6': lambda: exit_probe('https://[2606:4700:4700::1111]/cdn-cgi/trace', 6, timeout),
+        'udp_stun': lambda: stun_udp(timeout),
+        'udp_443': lambda: udp_reply(443, timeout),
+        'udp_123': lambda: udp_reply(123, timeout),
+        'raw_icmp': lambda: open_socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP),
+        'raw_packet': lambda: open_socket(socket.AF_PACKET, socket.SOCK_RAW, 0),
+        'host_http': lambda: tcp_reply(host, 80, timeout),
+        'host_docker': lambda: tcp_reply(host, 2375, timeout),
+        'metadata': lambda: curl('http://169.254.169.254/latest/meta-data/', timeout),
+    }
+    if relay:
+        for port in (9090, 2375):
+            tests[f'relay_local_{port}'] = lambda port=port: curl(f'http://127.0.0.1:{port}/version', timeout, proxy=relay)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = dict(zip(tests, pool.map(lambda fn: attempt(fn), tests.values())))
+    for r in results.values():
+        exp.learn(r)
+
+    exits = {'exit_https_ip': 'HTTPS（IP 直连）', 'exit_https_dns': 'HTTPS（域名）', 'exit_http_dns': 'HTTP（域名）',
+             'exit_tcp_stun': 'TCP STUN'}
+    reachable = False
+    for check, what in exits.items():
+        if check not in results:
+            continue
+        r = results[check]
+        if r['result'] == 'observed':
+            reachable = True
+            severity, message = exp.judge_exit(r, what)
+            out.append(finding(check, severity, message, r))
+        else:
+            out.append(finding(check, 'info', f'{what}：未取得出口（{r.get("error", "")[:80]}）', r))
+    if not reachable:
+        out.append(finding('connectivity', 'medium', '出口：所有路径都无法联网，无法确认出口。若中继未运行或出口保护已断网，这是预期的断网状态，而非泄漏'))
+    out.append(blocked('ipv6', 'IPv6', results['ipv6'], leak_msg='可以直接出网（IPv6 不经网关）'))
+    out.append(blocked('udp_stun', 'UDP STUN', results['udp_stun'], leak_msg=f'UDP 可以出网，映射地址 {results["udp_stun"].get("ip", "?")}'))
+    out.append(blocked('udp_443', 'UDP/443（QUIC）', results['udp_443'], leak_msg='收到响应，UDP 可以出网'))
+    out.append(blocked('udp_123', 'UDP/123（NTP）', results['udp_123'], leak_msg='收到响应，UDP 可以出网'))
+    out.append(blocked('raw_icmp', '原始 ICMP 套接字', results['raw_icmp'], '无法打开', 'high', '可以打开（拥有 NET_RAW，可能绕过网关）'))
+    out.append(blocked('raw_packet', '链路层套接字', results['raw_packet'], '无法打开', 'high', '可以打开（可能绕过网关）'))
+    out.append(blocked('host_http', f'宿主机 {host}:80', results['host_http'], '无法访问', 'high', '有响应，容器可以直接访问宿主机服务'))
+    out.append(blocked('host_docker', f'宿主机 {host}:2375', results['host_docker'], '无法访问', 'high', '有响应，容器可能控制宿主机的 Docker'))
+    meta = results['metadata']
+    out.append(finding('metadata', 'high' if meta.get('http_status') == '200' else 'pass',
+                       '云元数据接口：可以访问' if meta.get('http_status') == '200' else '云元数据接口：无法访问', meta))
+    for port in (9090, 2375):
+        r = results.get(f'relay_local_{port}')
+        if r is not None:
+            # Error statuses may come from the relay itself; only served content proves access.
+            hit = r['result'] == 'response' and r.get('http_status', '').startswith(('2', '3'))
+            out.append(finding(f'relay_local_{port}', 'medium' if hit else 'pass',
+                               f'经中继访问 127.0.0.1:{port}：{"得到了响应" if hit else "被拒绝或无响应"}', r))
+    return out
+
+
+def sample(exp, seconds, interval, timeout, on_result=None, stop=None):
+    """Repeated fresh probes; returns per-probe counters and the findings for anything unexpected."""
+    probes = [('https_ip', lambda: exit_probe('https://1.1.1.1/cdn-cgi/trace', 4, timeout), 'exit'),
+              ('http_dns', lambda: exit_probe('http://www.cloudflare.com/cdn-cgi/trace', 4, timeout), 'exit'),
+              ('https_dns', lambda: exit_probe('https://api.ipify.org', 4, timeout), 'exit'),
+              ('ipv6', lambda: exit_probe('https://[2606:4700:4700::1111]/cdn-cgi/trace', 6, timeout), 'ipv6'),
+              ('udp_stun', lambda: stun_udp(timeout), 'udp')]
+    stop = stop or threading.Event()
+    lock = threading.Lock()
+    counts = collections.Counter()
+    alerts = []
+    deadline = time.monotonic() + seconds if seconds else None
+
+    def worker(name, fn, kind):
+        while not stop.is_set() and (deadline is None or time.monotonic() < deadline):
+            started = time.monotonic()
+            r = attempt(fn)
+            r.update(probe=name, at=utc())
+            exp.learn(r)
+            if r['result'] == 'observed':
+                if kind == 'exit':
+                    severity, message = exp.judge_exit(r, f'采样 {name}')
+                else:
+                    severity, message = 'critical', f'采样 {name}：{"IPv6" if kind == "ipv6" else "UDP"} 出网，地址 {r["ip"]}'
+            else:
+                severity, message = 'error', ''
+            r['severity'] = severity
+            with lock:
+                counts[(name, severity)] += 1
+                if severity not in ('pass', 'error'):
+                    alerts.append(finding(f'sample_{name}', severity, message, r))
+            if on_result:
+                on_result(r, severity, message)
+            stop.wait(max(0.0, interval - (time.monotonic() - started)))
+
+    threads = [threading.Thread(target=worker, args=p, daemon=True) for p in probes]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return counts, alerts
+
+
+def score(findings):
+    worst = {}
+    for f in findings:
+        if f['severity'] in PENALTY and PENALTY.get(worst.get(f['check'], 'info'), 0) <= PENALTY[f['severity']]:
+            worst[f['check']] = f['severity']
+    total = max(0, 100 - sum(PENALTY[s] for s in worst.values()))
+    critical = [f for f in findings if f['severity'] == 'critical']
+    if critical:
+        verdict = 'fail', '不通过 —— 发现直连或泄露风险'
+    elif total >= 90:
+        verdict = 'pass', '通过'
+    elif total >= 70:
+        verdict = 'warn', '基本通过，有需要注意的问题'
+    else:
+        verdict = 'fail', '不通过'
+    return total, verdict
+
+
+# ---- commands ----------------------------------------------------------------------------
+
+def expectation(args):
+    env = os.environ
+    ips = {parse_ip(x) for x in env.get('HYDRA_EXPECTED_EXIT', '').split(',') if x.strip()} | {parse_ip(x) for x in args.expected}
+    countries = {x.strip().upper() for x in env.get('HYDRA_EXPECTED_COUNTRY', '').split(',') if x.strip()}
+    real = {parse_ip(x) for x in args.real_ip}
+    if ips & real:
+        sys.exit('真实 IP 与预期出口不能重叠。')
+    relay = env.get('HYDRA_RELAY', '')
+    if relay:
+        u = urllib.parse.urlsplit(relay)
+        if u.scheme != 'http' or not u.hostname or not u.port:
+            sys.exit('HYDRA_RELAY 必须是 http://主机:端口。')
+    return Expectation(ips, countries, real, relay, args.timeout)
+
+
+def new_log_dir():
+    STATE.mkdir(parents=True, exist_ok=True)
+    log = STATE / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + f'-{os.getpid()}')
+    log.mkdir()
+    return log
+
+
+def audit(args):
+    exp = expectation(args)
+    env = dict(os.environ)
+    log = new_log_dir()
+    print(paint('==== Claude-Hydra 网络审计 ====', '1'))
+    ips = '、'.join(sorted(exp.ips)) or '未提供（所有出口都会被视为异常）'
+    countries = '（' + '、'.join(sorted(exp.countries)) + '）' if exp.countries else ''
+    print(f'预期出口：{ips}{countries}')
+    if exp.relay:
+        print(f'本账号中继：{exp.relay}（以经中继看到的节点出口为准）')
+    print('正在检查环境与绕过路径…', flush=True)
+    findings = environment_findings(env) + network_findings(exp, env, args.timeout)
+    if args.sample > 0:
+        print(f'正在采样 {args.sample:g} 秒（每条路径每 {args.interval:g} 秒一次）…', flush=True)
+        counts, alerts = sample(exp, args.sample, args.interval, args.timeout)
+        seen = collections.Counter()
+        for f in alerts:
+            key = (f['check'], f['severity'], f['raw'].get('ip'))
+            if seen[key] == 0:
+                findings.append(f)
+            seen[key] += 1
+        attempts = sum(counts.values())
+        findings.append(finding('sampling', 'info', f'采样：共 {attempts} 次，异常 {len(alerts)} 次'))
+    total, (state, verdict) = score(findings)
+    order = ['critical', 'high', 'medium', 'low', 'pass', 'info']
+    print()
+    for f in sorted(findings, key=lambda f: order.index(f['severity'])):
+        if f['severity'] == 'info' and not args.verbose:
+            continue
+        print(f'  [{paint(LABEL[f["severity"]], COLOR[f["severity"]])}] {f["message"]}')
+    print()
+    tone = {'pass': '32', 'warn': '33', 'fail': '1;31'}[state]
+    print(paint(f'得分：{total} / 100    结论：{verdict}', tone))
+    if state == 'fail':
+        print(paint('\a警告：请先停止使用这个容器联网，在 Claude-Hydra 中检查环境配置与出口保护。', '1;31'))
+    (log / 'report.json').write_text(json.dumps({'at': utc(), 'score': total, 'verdict': verdict, 'expected': sorted(exp.ips),
+                                                 'countries': sorted(exp.countries), 'findings': findings}, ensure_ascii=False, indent=2) + '\n')
+    print(paint(f'详细记录：{log}/report.json', '2'))
+    return 0 if state != 'fail' else 2
+
+
+def ticks(pid):
+    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+
+
+def live(info):
+    try:
+        return ticks(info['pid']) == info['start_ticks'] and b'HYDRA_AUDIT_WATCH=1' in Path(f"/proc/{info['pid']}/environ").read_bytes().split(b'\0')
+    except (OSError, KeyError):
+        return False
+
+
+def watch(args):
+    exp = expectation(args)
+    if args.background:
+        env = dict(os.environ, HYDRA_AUDIT_WATCH='1')
+        argv = [sys.argv[0], 'watch', '--interval', str(args.interval), '--timeout', str(args.timeout), '--duration', str(args.duration)]
+        for ip in args.expected:
+            argv += ['--expected', ip]
+        for ip in args.real_ip:
+            argv += ['--real-ip', ip]
+        subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        print('已在后台开始持续检测；hydra-audit status 查看，hydra-audit stop 停止。')
+        return 0
+    os.environ['HYDRA_AUDIT_WATCH'] = '1'
+    STATE.mkdir(parents=True, exist_ok=True)
+    guard = (STATE / 'lock').open('a')
+    try:
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit('已有持续检测在运行；使用 hydra-audit status 或 hydra-audit stop。')
+    log = new_log_dir()
+    (STATE / 'active.json').write_text(json.dumps({'pid': os.getpid(), 'start_ticks': ticks(os.getpid()), 'log_dir': str(log)}))
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    handler = RotatingFileHandler(log / 'attempts.jsonl', maxBytes=20 * 1024 * 1024, backupCount=4, encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    alerts = (log / 'alerts.jsonl').open('a', buffering=1)
+    alarms = [0]
+
+    def record(r, severity, message):
+        line = json.dumps(r, ensure_ascii=False)
+        handler.emit(logging.LogRecord('hydra-audit', logging.INFO, '', 0, line, (), None))
+        if severity not in ('pass', 'error'):
+            alarms[0] += 1
+            alerts.write(line + '\n')
+            os.fsync(alerts.fileno())
+            if alarms[0] <= 10 or alarms[0] % 20 == 0:
+                print(paint(f'\a[{LABEL[severity]}] {message}', COLOR[severity]), flush=True)
+
+    print(f'持续检测出口；日志：{log}；Ctrl+C 或 hydra-audit stop 停止。', flush=True)
+    counts, _ = sample(exp, args.duration, args.interval, args.timeout, record, stop)
+    summary = {'stopped_at': utc(), 'counts': {f'{k[0]}:{k[1]}': v for k, v in counts.items()}, 'alerts': alarms[0]}
+    (log / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n')
+    print(f'已停止：{summary["counts"]}；异常 {alarms[0]} 次。')
+    handler.close(); alerts.close(); guard.close()
+    return 0
+
+
+def status_or_stop(action):
+    active = STATE / 'active.json'
+    if not active.exists():
+        print('尚无持续检测记录。')
+        return 0
+    info = json.loads(active.read_text())
+    if action == 'stop':
+        if live(info):
+            os.kill(info['pid'], signal.SIGTERM)
+            print('已发送停止请求，正在写入统计。')
+        else:
+            print('持续检测没有在运行。')
+        return 0
+    print('运行中' if live(info) else '已停止')
+    summary = Path(info['log_dir']) / 'summary.json'
+    print(summary.read_text() if summary.exists() else f'日志：{info["log_dir"]}')
+    return 0
+
+
+def main():
+    if not Path('/proc/self/status').is_file():
+        sys.exit('请在 Claude-Hydra 的 Linux 容器内运行 hydra-audit。')
+    p = argparse.ArgumentParser(prog='hydra-audit', description='Claude-Hydra 容器网络审计：检查出口、直连与泄露，并打分。')
+    p.add_argument('action', nargs='?', default='audit', choices=['audit', 'watch', 'status', 'stop'])
+    p.add_argument('--expected', action='append', default=[], help='额外允许的出口 IP，可重复')
+    p.add_argument('--real-ip', action='append', default=[], help='已知的真实公网 IP，可重复；命中即判定泄露')
+    p.add_argument('--sample', type=float, default=15, help='audit 的采样秒数，0 为不采样；默认 15')
+    p.add_argument('--interval', type=float, default=0.5, help='每条路径的采样间隔秒数，最小 0.2；默认 0.5')
+    p.add_argument('--timeout', type=float, default=3.0, help='单次探测超时秒数，最大 10；默认 3')
+    p.add_argument('--duration', type=float, default=0, help='watch 的运行秒数；0 表示直到停止')
+    p.add_argument('--background', action='store_true', help='watch 在后台运行')
+    p.add_argument('-v', '--verbose', action='store_true', help='同时列出信息类条目')
+    args = p.parse_args()
+    if args.interval < 0.2 or not 0 < args.timeout <= 10 or args.sample < 0 or args.duration < 0:
+        p.error('interval >= 0.2，0 < timeout <= 10，sample 与 duration 不能为负')
+    for tool in ('curl',):
+        if subprocess.run(['sh', '-c', f'command -v {tool}'], capture_output=True).returncode:
+            sys.exit(f'容器里没有 {tool}，无法审计。请在镜像中安装 {tool}。')
+    if args.action in ('status', 'stop'):
+        return status_or_stop(args.action)
+    return watch(args) if args.action == 'watch' else audit(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
