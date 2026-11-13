@@ -13,10 +13,12 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bundles: nsis
-          - os: macos-latest
+          # Hosted Apple Silicon runners often go unassigned for lack of capacity, which cancels
+          # the job; both macOS builds run on the Intel image, cross-compiling for Apple Silicon.
+          - os: macos-15-intel
             target: aarch64-apple-darwin
             bundles: app,dmg
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             bundles: app,dmg
     runs-on: ${{ matrix.os }}
