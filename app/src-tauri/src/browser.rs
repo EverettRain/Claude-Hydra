@@ -75,9 +75,12 @@ const FINGERPRINT_JS: &str = r#"(function () {
     var pixels = (data.length / 4) | 0;
     if (!pixels) { return data; }
     var count = Math.min(16, Math.max(3, (pixels / 64) | 0));
+    var changed = new Set();
     for (var i = 0; i < count; i++) {
       var at = (r() % pixels) * 4;
-      data[at] = (data[at] + ((r() & 1) ? 1 : 255)) & 255;
+      if (changed.has(at)) { continue; }
+      changed.add(at);
+      data[at] += (r() & 1) ? 1 : -1;
     }
     return data;
   }
@@ -98,8 +101,8 @@ const FINGERPRINT_JS: &str = r#"(function () {
     var context = copy.getContext('2d');
     if (!context) { return null; }
     context.drawImage(canvasElement, 0, 0);
-    var image = context.getImageData(0, 0, width, height);
-    noise(image.data, hashBytes(image.data, SEED ^ 0x9e3779b9));
+    var image = getImageData.call(context, 0, 0, width, height);
+    noise(image.data, hashBytes(image.data, SEED ^ 0x85ebca6b));
     context.putImageData(image, 0, 0);
     return copy;
   }
@@ -142,7 +145,7 @@ const FINGERPRINT_JS: &str = r#"(function () {
       } catch (e) { return metrics; }
     }, 'measureText');
   }
-  function measured(value) { return value + (((hashText('m' + value, SEED) % 3) - 1) * 0.01); }
+  function measured(value) { if (value === 0) { return 0; } return value + (((hashText('m' + value, SEED) % 3) - 1) * 0.01); }
   if (window.Element && Element.prototype.getBoundingClientRect) {
     var getBoundingClientRect = Element.prototype.getBoundingClientRect;
     Element.prototype.getBoundingClientRect = mask(function () {
@@ -285,6 +288,7 @@ pub fn open(app: &tauri::AppHandle, plan: Plan) -> Result<(), String> {
     let (nav_app, nav_id, nav_label) = (app.clone(), plan.id.clone(), label.clone());
     let (win_app, win_label) = (app.clone(), label.clone());
     let w = WebviewWindowBuilder::new(app, &label, WebviewUrl::External("about:blank".parse().expect("static url")))
+        .initialization_script(fingerprint_script(&plan.id))
         .title(&plan.title)
         .inner_size(1100.0, 820.0)
         .data_directory(data_dir)
@@ -303,9 +307,8 @@ pub fn open(app: &tauri::AppHandle, plan: Plan) -> Result<(), String> {
     #[cfg(windows)]
     {
         let (tz, url) = (plan.timezone.clone(), plan.url.clone());
-        let fingerprint = fingerprint_script(&plan.id);
         w.with_webview(move |pw| {
-            if let Err(e) = unsafe { webview2::start(pw.controller(), tz, url, fingerprint) } {
+            if let Err(e) = unsafe { webview2::start(pw.controller(), tz, url) } {
                 paths::append_log("hydra-error.log", &format!("account browser: {e}"));
             }
         }).map_err(|e| e.to_string())?;
@@ -340,7 +343,7 @@ fn allow_navigation(app: &tauri::AppHandle, id: &str, label: &str, u: &url::Url)
 mod webview2 {
     use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Controller};
     use webview2_com::{
-        AddScriptToExecuteOnDocumentCreatedCompletedHandler, CallDevToolsProtocolMethodCompletedHandler, ExecuteScriptCompletedHandler,
+        CallDevToolsProtocolMethodCompletedHandler, ExecuteScriptCompletedHandler,
         NavigationCompletedEventHandler,
     };
     use windows::core::HSTRING;
@@ -349,32 +352,14 @@ mod webview2 {
         HSTRING::from(format!("<!doctype html><meta charset=utf-8><body style=\"font:15px system-ui;padding:40px;color:#b42318\"><h3>账号浏览器已停止加载</h3><p>{text}</p></body>"))
     }
 
-    /// Registers the per-account page fingerprint for every document, before the page's own
-    /// scripts run. A failure only means the page sees the real browser, so it is logged and the
-    /// navigation goes on.
-    unsafe fn register_fingerprint(core: &ICoreWebView2, script: String) {
-        if script.is_empty() { return; }
-        let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|hr, _id| {
-            if let Err(e) = hr {
-                crate::paths::append_log("hydra-error.log", &format!("account browser fingerprint: {e}"));
-            }
-            Ok(())
-        }));
-        if let Err(e) = core.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script), &handler) {
-            crate::paths::append_log("hydra-error.log", &format!("account browser fingerprint: {e}"));
-        }
-    }
-
     /// Sets the time zone override, then loads `url`; every finished navigation re-checks the
     /// zone the page actually sees.
     pub unsafe fn start(
         controller: ICoreWebView2Controller,
         tz: Option<String>,
         url: String,
-        fingerprint: String,
     ) -> windows::core::Result<()> {
         let core = controller.CoreWebView2()?;
-        register_fingerprint(&core, fingerprint);
         let Some(tz) = tz else { return core.Navigate(&HSTRING::from(url)) };
         let checker = core.clone();
         let expected = tz.clone();
@@ -576,12 +561,10 @@ mod tests {
     fn fingerprint_script_parses_as_javascript() {
         let path = std::env::temp_dir().join("hydra-fingerprint-check.js");
         std::fs::write(&path, fingerprint_script("account-1")).unwrap();
-        if let Ok(out) = std::process::Command::new("node").args(["--check"]).arg(&path).output() {
-            let _ = std::fs::remove_file(&path);
-            assert!(out.status.success(), "node --check: {}", String::from_utf8_lossy(&out.stderr));
-        } else {
-            let _ = std::fs::remove_file(&path);
-        }
+        let out = std::process::Command::new("node").args(["--check"]).arg(&path).output()
+            .expect("Node.js is required for the browser script tests");
+        let _ = std::fs::remove_file(&path);
+        assert!(out.status.success(), "node --check: {}", String::from_utf8_lossy(&out.stderr));
     }
 
     /// Runs the script in Node over a stub canvas/screen/navigator and checks what a fingerprint
@@ -592,15 +575,16 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let harness = dir.join("harness.js");
         std::fs::write(&harness, FINGERPRINT_HARNESS).unwrap();
-        let run = |account: &str| -> Option<serde_json::Value> {
+        let run = |account: &str| -> serde_json::Value {
             let script = dir.join(format!("{}.js", fingerprint_seed(account)));
             std::fs::write(&script, fingerprint_script(account)).unwrap();
-            let out = std::process::Command::new("node").arg(&harness).arg(&script).output().ok()?;
+            let out = std::process::Command::new("node").arg(&harness).arg(&script).output()
+                .expect("Node.js is required for the browser script tests");
             assert!(out.status.success(), "node run: {}", String::from_utf8_lossy(&out.stderr));
-            serde_json::from_slice(&out.stdout).ok()
+            serde_json::from_slice(&out.stdout).expect("browser test harness must emit valid JSON")
         };
-        let Some(one) = run("account-1") else { return };
-        let Some(two) = run("account-2") else { return };
+        let one = run("account-1");
+        let two = run("account-2");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(one["stable"], true, "one canvas read twice must agree: {one}");
         assert_eq!(two["stable"], true, "one canvas read twice must agree: {two}");

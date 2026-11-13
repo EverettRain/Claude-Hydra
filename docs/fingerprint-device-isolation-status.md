@@ -123,7 +123,7 @@ WMI 关掉以后，进程内还剩两条路能读到硬件序列号，第三轮�
 
 账号浏览器是每个账号一个 WebView2 窗口（独立数据目录、独立出口与时区）。网页看到的 Canvas、WebGL、字体测量、屏幕与硬件参数第四轮改成按账号派生：
 
-- 实现方式：窗口创建后、页面脚本运行前，用 `AddScriptToExecuteOnDocumentCreated` 注册一段脚本（`browser.rs` 的 `FINGERPRINT_JS`）。种子由账号 ID 派生，脚本里的每个值都由它决定。
+- 实现方式：创建窗口时，通过 WebView2 窗口构建器的 `initialization_script` 注册一段脚本（`browser.rs` 的 `FINGERPRINT_JS`）。种子由账号 ID 派生，脚本里的每个值都由它决定。
 - Canvas：`toDataURL` / `toBlob` 在副本画布上按"内容 + 账号"确定性地改几个像素的 1 个色阶；`getImageData` 同样处理。同一张图读两次结果一致（不会被"读取不稳定"识别），不同账号不一致，肉眼不可见。
 - WebGL / GPU：`getParameter(UNMASKED_VENDOR_WEBGL)` 与 `getParameter(UNMASKED_RENDERER_WEBGL)` 按账号从一组常见 GPU 里选一组返回（NVIDIA / Intel / AMD 的 ANGLE 字符串），`WebGLRenderingContext` 与 `WebGL2RenderingContext` 都覆盖。
 - 字体：字体本身装在机器上，无法按账号隐藏；改为给测量结果加确定性微扰——`measureText().width` 与 `getBoundingClientRect()` 的宽高偏移零点几像素（不足以影响布局），使基于文字宽度的字体探针在每个账号得到不同的哈希。
@@ -168,7 +168,7 @@ WMI 关掉以后，进程内还剩两条路能读到硬件序列号，第三轮�
 
 另有一个 WMI 测试 `sandboxie_wmi_reports_no_hardware`：盒内 `wmic bios/baseboard/diskdrive/csproduct/computersystem`、32 位 `SysWOW64` 的 `wmic`、`Get-CimInstance Win32_BIOS`、`getmac` 全部失败（`Access is denied.`），并且主机的 BIOS / 主板 / 磁盘 / 内存序列号与主机名一个都没有出现。
 
-网页指纹由单元测试覆盖：`fingerprint_script_follows_the_account`（同一账号稳定、不同账号不同、覆盖所列 API）、`fingerprint_script_parses_as_javascript`（`node --check`）、`fingerprint_script_changes_what_the_page_measures`（在 Node 的 canvas / screen / navigator 桩上真正执行脚本：同一账号读两次一致，两个账号的像素哈希不同，元素与文字测量只偏移零点几像素，屏幕与核数落在允许集合里）。脚本还在**无头 Edge**（与 WebView2 同一 Blink 引擎）里实际运行验证过：种子 12345 与 777 的 canvas 哈希与 `getImageData` 像素不同，同一画布连续读两次一致，`getBoundingClientRect` 只偏移 0.01，`measureText` 偏移在 0.016 以内，屏幕 / 核数 / WebGL 渲染器均按账号变化。这一步抓到一个真实问题：`ImageData.data` 是只读的，最初"整体赋值"的噪声写法在真实浏览器里被静默丢弃，改为原地修改后才生效。WebView2 窗口本身是 GUI，未纳入自动化测试；手工验证方式是打开两个账号的账号浏览器，在页面控制台比较 `document.createElement('canvas').toDataURL()`、`navigator.hardwareConcurrency`、`screen.width` 与 WebGL 的 `UNMASKED_RENDERER_WEBGL`。
+网页指纹由单元测试覆盖：`fingerprint_script_follows_the_account`（同一账号稳定、不同账号不同、覆盖所列 API）、`fingerprint_script_parses_as_javascript`（`node --check`）、`fingerprint_script_changes_what_the_page_measures`（在 Node 的 canvas / screen / navigator 桩上真正执行脚本：同一账号读两次一致，两个账号的像素哈希不同，元素与文字测量只偏移零点几像素，屏幕与核数落在允许集合里）。脚本还在**无头 Edge**（与 WebView2 同一 Blink 引擎）里实际运行验证过：种子 12345 与 777 的 canvas 哈希与 `getImageData` 像素不同，同一画布连续读两次一致，`getBoundingClientRect` 只偏移 0.01，`measureText` 偏移在 0.016 以内，屏幕 / 核数 / WebGL 渲染器均按账号变化。这一步抓到一个真实问题：`ImageData.data` 是只读的，最初"整体赋值"的噪声写法在真实浏览器里被静默丢弃，改为原地修改后才生效。本轮另用独立发布构建的两个真实 WebView2 账号窗口加载本地测试页。页面第一段内联脚本在系统时区和指定 Asia/Tokyo 两条路径都读到预期的屏幕、核数和时区；零尺寸保持为零，白色画布的 PNG 两种导出一致，解码色值在 254–255。该检查为本地集成验收，不包含在线登录。
 
 同一次运行在盒外读 MachineGuid、序列号仍是主机原值：防护只作用于盒内进程。全部单元测试与其余需要 Sandboxie 的集成测试同样通过。
 
