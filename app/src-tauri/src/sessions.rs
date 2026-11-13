@@ -64,6 +64,57 @@ fn stores(path: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
+/// Restore only transcripts named by this Desktop profile when switching Code directories.
+/// Keep project names intact: Desktop uses them to resolve the transcript for a working folder.
+#[cfg(windows)]
+pub(crate) fn recover_projects(profile: &Path, code: &Path, old_roots: &[PathBuf]) -> Result<(), String> {
+    use std::collections::HashSet;
+    let entries = collect(&profile.join("claude-code-sessions"))?;
+    let ids: HashSet<_> = entries.into_iter().filter_map(|e| e.session.transcript_id)
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok()).collect();
+    if ids.is_empty() { return Ok(()); }
+    for root in old_roots {
+        for project in dirs(&root.join("projects"))? {
+            let target = code.join("projects").join(project.file_name().unwrap());
+            for id in &ids {
+                let name = format!("{id}.jsonl");
+                let source = project.join(&name);
+                if !source.is_file() { continue; }
+                copy_missing_history(&source, &target.join(name)).map_err(|e| format!("恢复历史会话失败：{e}"))?;
+                let sidecar = project.join(id);
+                if sidecar.is_dir() {
+                    copy_missing_history(&sidecar, &target.join(id)).map_err(|e| format!("恢复会话附件失败：{e}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_missing_history(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    let meta = fs::symlink_metadata(from)?;
+    if meta.file_attributes() & 0x400 != 0 { return Ok(()); } // Skip reparse points.
+    if meta.is_dir() {
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy_missing_history(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else if meta.is_file() && !to.try_exists()? {
+        let parent = to.parent().unwrap();
+        fs::create_dir_all(parent)?;
+        let temp = parent.join(format!(".hydra-history-{}", uuid::Uuid::new_v4()));
+        let result = fs::copy(from, &temp).and_then(|_| match fs::hard_link(&temp, to) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            result => result,
+        });
+        let _ = fs::remove_file(temp);
+        result?;
+    }
+    Ok(())
+}
+
 fn text(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| v.get(*k).and_then(Value::as_str).filter(|x| !x.trim().is_empty()).map(str::to_owned))
 }
@@ -390,6 +441,34 @@ mod tests {
         assert_eq!(sessions[0].session.title, "Example");
         assert_eq!(sessions[0].session.last_activity_at, Some(5));
         assert!(!sessions[0].session.cwd_exists);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_transcripts_follow_only_the_owning_profiles_indexes() {
+        let root = temp("legacy-history");
+        let source = root.join("legacy");
+        let code = root.join("private");
+        let project = source.join("projects").join("project");
+        let index = root.join("claude-code-sessions/user/org");
+        let id = uuid::Uuid::new_v4().to_string();
+        fs::create_dir_all(project.join(&id)).unwrap();
+        fs::create_dir_all(&index).unwrap();
+        fs::write(index.join("local_test.json"), serde_json::json!({"cliSessionId": id}).to_string()).unwrap();
+        let name = format!("{id}.jsonl");
+        fs::write(project.join(&name), b"original").unwrap();
+        fs::write(project.join(&id).join("attachment"), b"sidecar").unwrap();
+        fs::write(project.join("other.jsonl"), b"unrelated").unwrap();
+        let restore = || recover_projects(&root, &code, std::slice::from_ref(&source)).unwrap();
+        restore();
+        let target = code.join("projects/project");
+        assert_eq!(fs::read(target.join(&name)).unwrap(), b"original");
+        assert_eq!(fs::read(target.join(&id).join("attachment")).unwrap(), b"sidecar");
+        assert!(!target.join("other.jsonl").exists());
+        fs::write(target.join(&name), b"continued").unwrap();
+        restore();
+        assert_eq!(fs::read(target.join(name)).unwrap(), b"continued");
         fs::remove_dir_all(root).unwrap();
     }
 

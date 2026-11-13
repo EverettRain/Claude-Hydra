@@ -384,6 +384,13 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, code_dir: Op
         sync_box_proxy(&dir, &name, relay_port.filter(|_| crate::sys::claude_egress_policy().is_some()))?;
         sync_box_gitconfig(&root, relay_port)?;
         recover_claude_code_data(&root, &code);
+        let legacy = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|s| !s.is_empty())
+            .map(PathBuf::from).or_else(|| home().map(|p| p.join(".claude")));
+        if let (Some(code), Some(legacy)) = (code_dir, legacy.filter(|p| Some(p.as_path()) != code_dir)) {
+            let boxed = box_copy(&root, &legacy);
+            let sources: Vec<_> = std::iter::once(legacy).chain(boxed).collect();
+            crate::sessions::recover_projects(Path::new(data_dir), code, &sources)?;
+        }
     }
     Ok(name)
 }
