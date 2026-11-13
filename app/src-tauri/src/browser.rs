@@ -9,6 +9,10 @@
 //!   (`Emulation.setTimezoneOverride`) before the first page loads, and checked again after every
 //!   navigation; a page that reports another zone is replaced by a warning.
 //! - Storage: its own WebView2 data folder per account (cookies never mix between accounts).
+//! - Page fingerprint: Canvas pixels, WebGL GPU strings, font measurement, screen size and CPU /
+//!   memory are answered per account by a script WebView2 runs before the page's own scripts
+//!   (see `FINGERPRINT_JS`); the values are derived from the account, so one account looks like
+//!   the same browser every time and two accounts never look like each other.
 //! - `claude://` links (the sign-in callback) go straight to the account's Claude.
 //!
 //! Link routing (`--open-url`, Hydra registered as a browser): links that Claude opens for
@@ -30,6 +34,174 @@ pub fn forget(id: &str) {
 }
 
 fn label(id: &str) -> String { format!("acct-browser-{}", hex_id(id)) }
+
+/// A stable number for the account. Everything the page fingerprint below reports is derived from
+/// it, so one account always looks like the same browser and two accounts never look alike.
+fn fingerprint_seed(id: &str) -> u32 { u32::from_str_radix(&crate::sandbox::account_key(id)[..8], 16).unwrap_or(1) }
+
+/// The script WebView2 runs in every document before the page's own scripts. Canvas pixels, the
+/// WebGL vendor/renderer pair, measured text and element widths, screen size and CPU/memory are
+/// answered from the account's seed: the differences are invisible (at most a fraction of a pixel
+/// or one colour step) but a fingerprint hash computed in one account does not match another.
+/// Everything is wrapped in try/catch and falls back to the untouched value, so a page that does
+/// not fit the pattern sees the real browser rather than a broken one.
+const FINGERPRINT_JS: &str = r#"(function () {
+  'use strict';
+  var SEED = __SEED__ >>> 0;
+  if (!SEED) { SEED = 1; }
+  function step(h, v) { return Math.imul(h ^ v, 16777619) >>> 0; }
+  function hashText(text, seed) {
+    var h = (2166136261 ^ seed) >>> 0;
+    for (var i = 0; i < text.length; i++) { h = step(h, text.charCodeAt(i)); }
+    return h >>> 0;
+  }
+  function hashBytes(bytes, seed) {
+    var h = seed >>> 0;
+    var stride = Math.max(4, ((bytes.length / 512) | 0) * 4);
+    for (var i = 0; i < bytes.length; i += stride) { h = step(h, bytes[i]); }
+    return h >>> 0;
+  }
+  function rng(seed) {
+    var s = seed >>> 0 || 1;
+    return function () {
+      s ^= s << 13; s >>>= 0;
+      s ^= s >>> 17;
+      s ^= s << 5; s >>>= 0;
+      return s;
+    };
+  }
+  function noise(data, seed) {
+    var r = rng(seed);
+    var pixels = (data.length / 4) | 0;
+    if (!pixels) { return data; }
+    var count = Math.min(16, Math.max(3, (pixels / 64) | 0));
+    for (var i = 0; i < count; i++) {
+      var at = (r() % pixels) * 4;
+      data[at] = (data[at] + ((r() & 1) ? 1 : 255)) & 255;
+    }
+    return data;
+  }
+  function mask(fn, name) {
+    try {
+      Object.defineProperty(fn, 'name', { value: name });
+      Object.defineProperty(fn, 'toString', { value: function () { return 'function ' + name + '() { [native code] }'; } });
+    } catch (e) {}
+    return fn;
+  }
+  var canvas = window.HTMLCanvasElement && HTMLCanvasElement.prototype;
+  function noised(canvasElement) {
+    var width = canvasElement.width, height = canvasElement.height;
+    if (!width || !height || width * height > 16777216) { return null; }
+    var copy = document.createElement('canvas');
+    copy.width = width;
+    copy.height = height;
+    var context = copy.getContext('2d');
+    if (!context) { return null; }
+    context.drawImage(canvasElement, 0, 0);
+    var image = context.getImageData(0, 0, width, height);
+    noise(image.data, hashBytes(image.data, SEED ^ 0x9e3779b9));
+    context.putImageData(image, 0, 0);
+    return copy;
+  }
+  if (canvas && canvas.toDataURL) {
+    var dataURL = canvas.toDataURL;
+    canvas.toDataURL = mask(function () {
+      try { var copy = noised(this); if (copy) { return dataURL.apply(copy, arguments); } } catch (e) {}
+      return dataURL.apply(this, arguments);
+    }, 'toDataURL');
+  }
+  if (canvas && canvas.toBlob) {
+    var toBlob = canvas.toBlob;
+    canvas.toBlob = mask(function () {
+      try { var copy = noised(this); if (copy) { return toBlob.apply(copy, arguments); } } catch (e) {}
+      return toBlob.apply(this, arguments);
+    }, 'toBlob');
+  }
+  var context2d = window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype;
+  if (context2d && context2d.getImageData) {
+    var getImageData = context2d.getImageData;
+    context2d.getImageData = mask(function () {
+      var image = getImageData.apply(this, arguments);
+      try { noise(image.data, hashBytes(image.data, SEED ^ 0x85ebca6b)); } catch (e) {}
+      return image;
+    }, 'getImageData');
+  }
+  if (context2d && context2d.measureText) {
+    var measureText = context2d.measureText;
+    context2d.measureText = mask(function (text) {
+      var metrics = measureText.apply(this, arguments);
+      try {
+        var delta = ((hashText(String(text) + '\u0000' + (this.font || ''), SEED) % 5) - 2) * 0.008;
+        return new Proxy(metrics, {
+          get: function (target, key) {
+            if (key === 'width') { return target.width + delta; }
+            var value = target[key];
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+        });
+      } catch (e) { return metrics; }
+    }, 'measureText');
+  }
+  function measured(value) { return value + (((hashText('m' + value, SEED) % 3) - 1) * 0.01); }
+  if (window.Element && Element.prototype.getBoundingClientRect) {
+    var getBoundingClientRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = mask(function () {
+      var box = getBoundingClientRect.apply(this, arguments);
+      try { return new DOMRect(box.x, box.y, measured(box.width), measured(box.height)); } catch (e) { return box; }
+    }, 'getBoundingClientRect');
+  }
+  var screens = [[1920, 1080], [2560, 1440], [1680, 1050], [1920, 1200], [2560, 1600]];
+  var chosen = screens[(SEED >>> 8) % screens.length];
+  if (window.Screen) {
+    var values = { width: chosen[0], availWidth: chosen[0], height: chosen[1], availHeight: chosen[1] - 48, colorDepth: 24, pixelDepth: 24 };
+    Object.keys(values).forEach(function (name) {
+      try {
+        Object.defineProperty(Screen.prototype, name, {
+          configurable: true,
+          enumerable: true,
+          get: mask(function () { return values[name]; }, 'get ' + name)
+        });
+      } catch (e) {}
+    });
+  }
+  if (window.Navigator) {
+    var cores = [4, 8, 12, 16][(SEED >>> 4) & 3];
+    var memory = [4, 8, 8, 16][(SEED >>> 6) & 3];
+    try {
+      Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {
+        configurable: true, enumerable: true, get: mask(function () { return cores; }, 'get hardwareConcurrency')
+      });
+    } catch (e) {}
+    try {
+      if ('deviceMemory' in Navigator.prototype) {
+        Object.defineProperty(Navigator.prototype, 'deviceMemory', {
+          configurable: true, enumerable: true, get: mask(function () { return memory; }, 'get deviceMemory')
+        });
+      }
+    } catch (e) {}
+  }
+  var gpus = [
+    ['Google Inc. (NVIDIA)', 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (NVIDIA)', 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (Intel)', 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (AMD)', 'ANGLE (AMD, AMD Radeon RX 580 Series Direct3D11 vs_5_0 ps_5_0, D3D11)'],
+    ['Google Inc. (Intel)', 'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)']
+  ];
+  var gpu = gpus[(SEED >>> 12) % gpus.length];
+  ['WebGLRenderingContext', 'WebGL2RenderingContext'].forEach(function (name) {
+    var proto = window[name] && window[name].prototype;
+    if (!proto || !proto.getParameter) { return; }
+    var getParameter = proto.getParameter;
+    proto.getParameter = mask(function (parameter) {
+      if (parameter === 0x9245) { return gpu[0]; }
+      if (parameter === 0x9246) { return gpu[1]; }
+      return getParameter.apply(this, arguments);
+    }, 'getParameter');
+  });
+})();
+"#;
+
+fn fingerprint_script(id: &str) -> String { FINGERPRINT_JS.replace("__SEED__", &fingerprint_seed(id).to_string()) }
 
 /// Hosts whose links belong to the account (sign-in, account pages).
 fn is_claude_host(host: &str) -> bool {
@@ -130,8 +302,9 @@ pub fn open(app: &tauri::AppHandle, plan: Plan) -> Result<(), String> {
     #[cfg(windows)]
     {
         let (tz, url) = (plan.timezone.clone(), plan.url.clone());
+        let fingerprint = fingerprint_script(&plan.id);
         w.with_webview(move |pw| {
-            if let Err(e) = unsafe { webview2::start(pw.controller(), tz, url) } {
+            if let Err(e) = unsafe { webview2::start(pw.controller(), tz, url, fingerprint) } {
                 paths::append_log("hydra-error.log", &format!("account browser: {e}"));
             }
         }).map_err(|e| e.to_string())?;
@@ -165,17 +338,42 @@ fn allow_navigation(app: &tauri::AppHandle, id: &str, label: &str, u: &url::Url)
 #[cfg(windows)]
 mod webview2 {
     use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Controller};
-    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, ExecuteScriptCompletedHandler, NavigationCompletedEventHandler};
+    use webview2_com::{
+        AddScriptToExecuteOnDocumentCreatedCompletedHandler, CallDevToolsProtocolMethodCompletedHandler, ExecuteScriptCompletedHandler,
+        NavigationCompletedEventHandler,
+    };
     use windows::core::HSTRING;
 
     fn warning(text: &str) -> HSTRING {
         HSTRING::from(format!("<!doctype html><meta charset=utf-8><body style=\"font:15px system-ui;padding:40px;color:#b42318\"><h3>账号浏览器已停止加载</h3><p>{text}</p></body>"))
     }
 
+    /// Registers the per-account page fingerprint for every document, before the page's own
+    /// scripts run. A failure only means the page sees the real browser, so it is logged and the
+    /// navigation goes on.
+    unsafe fn register_fingerprint(core: &ICoreWebView2, script: String) {
+        if script.is_empty() { return; }
+        let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|hr, _id| {
+            if let Err(e) = hr {
+                crate::paths::append_log("hydra-error.log", &format!("account browser fingerprint: {e}"));
+            }
+            Ok(())
+        }));
+        if let Err(e) = core.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script), &handler) {
+            crate::paths::append_log("hydra-error.log", &format!("account browser fingerprint: {e}"));
+        }
+    }
+
     /// Sets the time zone override, then loads `url`; every finished navigation re-checks the
     /// zone the page actually sees.
-    pub unsafe fn start(controller: ICoreWebView2Controller, tz: Option<String>, url: String) -> windows::core::Result<()> {
+    pub unsafe fn start(
+        controller: ICoreWebView2Controller,
+        tz: Option<String>,
+        url: String,
+        fingerprint: String,
+    ) -> windows::core::Result<()> {
         let core = controller.CoreWebView2()?;
+        register_fingerprint(&core, fingerprint);
         let Some(tz) = tz else { return core.Navigate(&HSTRING::from(url)) };
         let checker = core.clone();
         let expected = tz.clone();
@@ -359,4 +557,112 @@ mod tests {
         assert!(args.contains("--accept-lang=ja-JP,ja"));
         assert!(!args.contains("--remote-debugging"));
     }
+
+    #[test]
+    fn fingerprint_script_follows_the_account() {
+        let one = fingerprint_script("account-1");
+        assert_eq!(one, fingerprint_script("account-1"), "one account must look like the same browser");
+        assert_ne!(one, fingerprint_script("account-2"), "two accounts must not look like one browser");
+        assert!(!one.contains("__SEED__"), "the seed must be substituted");
+        assert_eq!(fingerprint_seed("account-1"), fingerprint_seed("account-1"));
+        assert_ne!(fingerprint_seed("account-1"), fingerprint_seed("account-2"));
+        for api in ["toDataURL", "getImageData", "measureText", "getBoundingClientRect", "hardwareConcurrency", "9246"] {
+            assert!(one.contains(api), "the script does not cover {api}");
+        }
+    }
+
+    #[test]
+    fn fingerprint_script_parses_as_javascript() {
+        let path = std::env::temp_dir().join("hydra-fingerprint-check.js");
+        std::fs::write(&path, fingerprint_script("account-1")).unwrap();
+        if let Ok(out) = std::process::Command::new("node").args(["--check"]).arg(&path).output() {
+            let _ = std::fs::remove_file(&path);
+            assert!(out.status.success(), "node --check: {}", String::from_utf8_lossy(&out.stderr));
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// Runs the script in Node over a stub canvas/screen/navigator and checks what a fingerprint
+    /// script would actually see: two reads of one canvas agree, two accounts do not.
+    #[test]
+    fn fingerprint_script_changes_what_the_page_measures() {
+        let dir = std::env::temp_dir().join("hydra-fingerprint-run");
+        let _ = std::fs::create_dir_all(&dir);
+        let harness = dir.join("harness.js");
+        std::fs::write(&harness, FINGERPRINT_HARNESS).unwrap();
+        let run = |account: &str| -> Option<serde_json::Value> {
+            let script = dir.join(format!("{}.js", fingerprint_seed(account)));
+            std::fs::write(&script, fingerprint_script(account)).unwrap();
+            let out = std::process::Command::new("node").arg(&harness).arg(&script).output().ok()?;
+            assert!(out.status.success(), "node run: {}", String::from_utf8_lossy(&out.stderr));
+            serde_json::from_slice(&out.stdout).ok()
+        };
+        let Some(one) = run("account-1") else { return };
+        let Some(two) = run("account-2") else { return };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(one["stable"], true, "one canvas read twice must agree: {one}");
+        assert_eq!(two["stable"], true, "one canvas read twice must agree: {two}");
+        assert_ne!(one["canvas"], two["canvas"], "two accounts produced the same canvas: {one} vs {two}");
+        let width = one["width"].as_f64().unwrap();
+        assert!((99.97..=100.03).contains(&width), "element width moved too far: {one}");
+        let font = one["font"].as_f64().unwrap();
+        assert!((41.97..=42.03).contains(&font), "measured text moved too far: {one}");
+        for value in [&one, &two] {
+            let screen = value["screen"].as_str().unwrap_or_default();
+            assert!(
+                ["1920x1080", "2560x1440", "1680x1050", "1920x1200", "2560x1600"].contains(&screen),
+                "unexpected screen: {value}"
+            );
+            let cores = value["cores"].as_u64().unwrap_or_default();
+            assert!([4, 8, 12, 16].contains(&cores), "unexpected core count: {value}");
+        }
+    }
 }
+
+/// The Node-side of `fingerprint_script_changes_what_the_page_measures`: the smallest browser
+/// the script can run against, so its overrides are exercised for real rather than only parsed.
+const FINGERPRINT_HARNESS: &str = r#"const fs = require('fs');
+global.window = global;
+function Context(canvas) { this.canvas = canvas; }
+Context.prototype.drawImage = function (source) { this.canvas.pixels = Uint8ClampedArray.from(source.pixels); };
+Context.prototype.getImageData = function () { return { data: Uint8ClampedArray.from(this.canvas.pixels) }; };
+Context.prototype.putImageData = function (image) { this.canvas.pixels = Uint8ClampedArray.from(image.data); };
+Context.prototype.measureText = function () { return { width: 42 }; };
+function Canvas() {
+  this.width = 8;
+  this.height = 8;
+  this.pixels = new Uint8ClampedArray(this.width * this.height * 4).fill(180);
+}
+Canvas.prototype.getContext = function () { return new Context(this); };
+Canvas.prototype.toDataURL = function () { return 'pixels:' + Buffer.from(this.pixels).toString('hex'); };
+Canvas.prototype.toBlob = function (callback) { callback(null); };
+function Element() {}
+Element.prototype.getBoundingClientRect = function () { return { x: 1, y: 2, width: 100, height: 20 }; };
+function DOMRect(x, y, width, height) { this.x = x; this.y = y; this.width = width; this.height = height; }
+function Screen() {}
+function Navigator() {}
+global.HTMLCanvasElement = Canvas;
+global.CanvasRenderingContext2D = Context;
+global.document = { createElement: function () { return new Canvas(); } };
+global.Element = Element;
+global.DOMRect = DOMRect;
+global.Screen = Screen;
+global.screen = new Screen();
+global.Navigator = Navigator;
+global.navigator = new Navigator();
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const canvas = new Canvas();
+const first = canvas.toDataURL();
+const second = canvas.toDataURL();
+const width = new Element().getBoundingClientRect().width;
+const font = new Context(canvas).measureText('hello').width;
+console.log(JSON.stringify({
+  canvas: first,
+  stable: first === second,
+  width: width,
+  font: font,
+  screen: screen.width + 'x' + screen.height,
+  cores: navigator.hardwareConcurrency
+}));
+"#;

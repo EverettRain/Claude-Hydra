@@ -38,10 +38,10 @@ pub struct Identifiers {
     /// does not and cannot rename the profile folder behind it.
     pub user_name: String,
     /// The account's SID as text (`S-1-5-21-…-1001`). Derived from the account key, so two
-    /// accounts on one machine do not report one identity. `ConvertSidToStringSid`,
-    /// `LookupAccountName` and `LookupAccountSid` answer with it; the token still carries the
-    /// machine's real SID, so `whoami /user` and .NET's account classes still format the real one
-    /// (see the status document).
+    /// accounts on one machine do not report one identity. It is answered in both forms: the text
+    /// entry points, the token the process reads (`GetTokenInformation`), and the LSA lookups .NET
+    /// uses. The token still carries the host's SID for access checks - only what it reports is
+    /// changed (see the status document).
     pub user_sid: String,
 }
 

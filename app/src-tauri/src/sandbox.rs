@@ -693,6 +693,8 @@ public static class P {
   public static extern bool LookupAccountSidLocalW(IntPtr sid, System.Text.StringBuilder name, ref uint nameSize, System.Text.StringBuilder domain, ref uint domainSize, out int use);
   [DllImport("advapi32.dll", SetLastError=true)]
   public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  public static extern bool GetTokenInformation(IntPtr token, int cls, IntPtr info, uint length, ref uint returned);
   [DllImport("userenv.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   public static extern bool GetUserProfileDirectoryW(IntPtr token, System.Text.StringBuilder path, ref uint size);
   [DllImport("kernel32.dll")]
@@ -774,6 +776,9 @@ $localOk = [P]::LookupAccountSidLocalW($sidPtr, $name2, [ref]$ns2, $domain3, [re
 $localErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
 Write-Output ("PLOCAL=" + $localOk + "," + $localErr + "," + $ns2 + "," + $name2.ToString() + "," + $domain3.ToString())
 Write-Output ("PSDOTNET=" + $id.Name + "," + $id.User.Value)
+try { Write-Output ("PDN1=" + $id.User.Translate([System.Security.Principal.NTAccount]).Value) } catch { Write-Output ("PDN1=ERR:" + $_.Exception.Message) }
+try { Write-Output ("PDN3=" + (New-Object System.Security.Principal.NTAccount($env:USERDOMAIN + "\" + $env:USERNAME)).Translate([System.Security.Principal.SecurityIdentifier]).Value) } catch { Write-Output ("PDN3=ERR:" + $_.Exception.Message) }
+try { Write-Output ("PDN4=" + (New-Object System.Security.Principal.SecurityIdentifier($hostSid)).Translate([System.Security.Principal.NTAccount]).Value) } catch { Write-Output ("PDN4=ERR:" + $_.Exception.Message) }
 $realPtr = [IntPtr]::Zero
 $realOk = [P]::ConvertStringSidToSidW($hostSid, [ref]$realPtr)
 $realText = [IntPtr]::Zero
@@ -833,6 +838,22 @@ if ($handle -ne [IntPtr](-1)) {
   [void][P]::CloseHandle($handle)
 }
 Write-Output ("PDISK=" + $disk)
+$tokenOk = [P]::OpenProcessToken([P]::GetCurrentProcess(), 0x0008, [ref]$token)
+$needed = [uint32]0
+[void][P]::GetTokenInformation($token, 1, [IntPtr]::Zero, 0, [ref]$needed)
+$tokenSid = ""
+if ($needed -gt 0) {
+  $tokenBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal([int]$needed)
+  $tokenRead = [P]::GetTokenInformation($token, 1, $tokenBuffer, $needed, [ref]$needed)
+  $tokenText = [IntPtr]::Zero
+  [void][P]::ConvertSidToStringSidW([System.Runtime.InteropServices.Marshal]::ReadIntPtr($tokenBuffer), [ref]$tokenText)
+  if ($tokenText -ne [IntPtr]::Zero) { $tokenSid = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($tokenText) }
+  Write-Output ("PTOKEN=" + $tokenOk + "," + $tokenRead + "," + $tokenSid)
+  [System.Runtime.InteropServices.Marshal]::FreeHGlobal($tokenBuffer)
+  if ($tokenText -ne [IntPtr]::Zero) { [P]::LocalFree($tokenText) }
+} else {
+  Write-Output ("PTOKEN=" + $tokenOk + ",False,")
+}
 "#;
 
     #[cfg(windows)]
@@ -1166,10 +1187,38 @@ Write-Output ("PDISK=" + $disk)
             Some(ids.computer_name.to_lowercase()),
             "LookupAccountSidLocalW domain: {account}"
         );
-        // What .NET's own account classes report is informational: they reach the SID text and the
-        // name through paths of their own (the token's SID is real, and the status document says
-        // so), so a change there is noted, not failed.
-        println!("dotnet: {}", probe_line("PSDOTNET").join(","));
+        // The token itself, which `whoami /user` and .NET format on their own.
+        let token = probe_line("PTOKEN");
+        assert_eq!(token.get(1).map(String::as_str), Some("True"), "GetTokenInformation(TokenUser) failed: {account}");
+        assert_eq!(token.get(2).map(String::as_str), Some(ids.user_sid.as_str()), "the token's SID: {account}");
+        assert!(!account.contains(&host_sid), "the host SID is still visible in the box: {account}");
+        // .NET's account classes read the token's SID and resolve names through LSA, and both are
+        // answered with the box's account too: `WindowsIdentity.Name`, its SID, and the two
+        // translation directions all agree with the Win32 lookups.
+        let dotnet = probe_line("PSDOTNET");
+        let want = format!("{}\\{}", ids.computer_name, ids.user_name);
+        assert_eq!(
+            dotnet.first().map(|n| n.to_lowercase()),
+            Some(want.to_lowercase()),
+            "WindowsIdentity.Name: {account}"
+        );
+        assert_eq!(
+            dotnet.get(1).map(String::as_str),
+            Some(ids.user_sid.as_str()),
+            "WindowsIdentity.User: {account}"
+        );
+        for key in ["PDN1", "PDN4"] {
+            assert_eq!(
+                probe_line(key).first().map(|n| n.to_lowercase()),
+                Some(want.to_lowercase()),
+                "{key} name: {account}"
+            );
+        }
+        assert_eq!(
+            probe_line("PDN3").first().map(String::as_str),
+            Some(ids.user_sid.as_str()),
+            "name-to-SID translation: {account}"
+        );
         // The firmware and storage routes: the SMBIOS table and the C: volume's storage descriptor
         // are rewritten in place, so the host's board, BIOS and disk serials do not appear there.
         let cim = |class: &str, field: &str| -> Vec<String> {

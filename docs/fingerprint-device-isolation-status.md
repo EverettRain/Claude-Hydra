@@ -1,19 +1,21 @@
 # 指纹 / 设备隔离：当前状态
 
-日期：2026-11-13（第三轮更新）
+日期：2026-11-13（第四轮更新）
 状态：**部分实现**（理解 A 已做，理解 B 未做）
 
 ## 结论
 
 "指纹 / 设备隔离"按理解 A 实现了：开启 Sandboxie 隔离的账号，在沙箱里看到的机器 ID、硬件配置 ID、卷序列号、MAC 地址、主机名、账号名与账号 SID，以及主板 / BIOS / 内存 / 磁盘序列号都换成了这个账号自己的值，与主机和其他账号都不同。
 
-第三轮补上了前两轮列为"不打算做"的账号与固件标识：
+第三轮补上了前两轮列为"不打算做"的账号与固件标识，第四轮补上了 SID 的二进制形式与账号浏览器的网页指纹：
 
 - 账号：`GetUserNameW/A`、`GetUserNameExW/A`、`LookupAccountSid/Name`（含 .NET 使用的 sechost `*Local` 形式）和 `ConvertSidToStringSid` 都按盒内身份应答；`USERNAME` 环境变量同样改写。
+- 账号 SID 的二进制形式：`GetTokenInformation(TokenUser/TokenOwner/TokenPrimaryGroup/TokenGroups)` 返回派生 SID，`LsaLookupSids`、`LsaLookupSids2`、`LsaLookupNames2` 也按派生身份双向应答。`whoami /user` 和 .NET 的 `WindowsIdentity.Name` / `.User.Value` 因此都报盒内账号。
 - 固件与磁盘：`GetSystemFirmwareTable('RSMB')` 返回的 SMBIOS 表在进程内改写（系统 / 主板 / 内存条序列号、系统 UUID，以及同值的机箱序列号），`IOCTL_STORAGE_QUERY_PROPERTY` 返回的磁盘序列号同样改写。
 - WMI：盒内**关闭** `System32\wbem` 与 `SysWOW64\wbem`。WMI 由盒外的 `WmiPrvSE.exe` 应答，进程内改不了；关掉之后盒内任何 WMI 查询都失败，而不是返回主机的硬件序列号。**这是有意的取舍：盒内"没有硬件"好过"报的是主机的硬件"。**
+- 账号浏览器的网页指纹：Canvas 像素、WebGL 的 GPU 厂商 / 型号、文本与元素测量（字体探针）、屏幕尺寸、CPU 核数与内存，都按账号派生。同一账号每次看到的浏览器相同，不同账号不同；改动至多是 1 个色阶或零点几像素。
 
-理解 B（虚拟机级隔离）没有做，也不打算用 Sandboxie 冒充。Sandboxie 是进程沙箱，不是虚拟机：它不虚拟化内核，因此 CPU 型号、核心数、内存大小、显卡与驱动版本仍然与主机一致，`whoami /user`、.NET 的账号类等少数路径也仍会落到主机的 SID 上，见「没有覆盖到的部分」。
+理解 B（虚拟机级隔离）没有做，也不打算用 Sandboxie 冒充。Sandboxie 是进程沙箱，不是虚拟机：它不虚拟化内核，因此 CPU 型号、内存大小、显卡与驱动版本仍与主机一致，账号浏览器以外的浏览器（用户自己的 Chrome / Edge）、Claude Code 命令行本身也不经过网页指纹脚本，见「没有覆盖到的部分」。
 
 ## 这项任务指什么
 
@@ -56,7 +58,7 @@
 | 卷序列号 | 8 位十六进制，每个卷各一个 | `NtQueryVolumeInformationFile(FileFsVolumeInformation)` 与 `NtQueryInformationFile(FileIdInformation)` |
 | MAC 地址 | 本地管理、单播；前 3 字节按账号固定，后 3 字节按网卡 GUID 派生 | `GetAdaptersAddresses`、`GetAdaptersInfo`、`GetIfTable`、`GetIfEntry`、`GetIfTable2[Ex]`、`GetIfEntry2[Ex]` |
 | 账号名 | 小写字母开头、6 位 `[a-z0-9]` | `GetUserNameW/A`、`GetUserNameExW/A(NameSamCompatible)`、`LookupAccountSidW/A`（真 SID → 派生名）、`LookupAccountNameW/A`（派生名 → 派生 SID）；环境变量 `USERNAME` |
-| 账号 SID | `S-1-5-21-…-1001` 文本 | `ConvertSidToStringSidW/A`（真 SID 的文本 → 派生文本）、`LookupAccountSidW/A`（派生 SID → 派生名 + 派生域）、`LookupAccountNameW/A`（派生名 → 派生 SID） |
+| 账号 SID | `S-1-5-21-…-1001`（文本与二进制两种形式） | `ConvertSidToStringSidW/A`（真 SID 的文本 → 派生文本）、`LookupAccountSidW/A`（派生 SID → 派生名 + 派生域）、`LookupAccountNameW/A`（派生名 → 派生 SID）、`GetTokenInformation`（TokenUser 等 → 派生 SID）、`LsaLookupSids` / `LsaLookupSids2` / `LsaLookupNames2`（.NET 使用的 LSA 直接路径） |
 | 主板 / BIOS / 内存条序列号、系统 UUID | 与主机同长度的序列号；UUID 为 16 字节 | `GetSystemFirmwareTable('RSMB')` 返回的 SMBIOS 表：Type 1 的序列号与 UUID、Type 2 的序列号、Type 17 的序列号，再按值替换其它结构里相同的字符串（本机的机箱序列号与系统序列号是同一个） |
 | 物理磁盘序列号 | 与主机同长度 | `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)` 的 `STORAGE_DEVICE_DESCRIPTOR.SerialNumberOffset` 指向的字符串 |
 
@@ -92,6 +94,18 @@ NT 层只知道"是哪个卷"，不知道调用方用的路径，所以派生值
 - 这些查询的 `*Local` 变体（`LookupAccountSidLocalW/A`、`LookupAccountNameLocalW/A`）由 `sechost.dll` 导出、`advapi32` 不转发，.NET 的账号类走的是这一组，所以单独挂钩。
 - **userenv 例外**：`GetUserProfileDirectoryW` 会用 `GetUserNameExW` / `ConvertSidToStringSidW` 得到账号再去打开 `C:\Users\<名>`。如果它也拿到派生账号，配置文件目录就不存在，函数失败并将长度留成 0 —— Node 的 `os.userInfo()` 会因此报 `ENOMEM`。防护 DLL 用 `RtlPcToFileHeader` 判断调用方：来自 `userenv.dll` 的调用返回主机自己的答案，其余调用仍返回派生值。
 
+### 账号 SID：二进制形式
+
+只改文本不够：`whoami /user` 和 .NET 的账号类拿到的是令牌里的 SID 字节，自己把它格式化成字符串，不经过 `ConvertSidToStringSid`。所以第四轮改在令牌查询这一层：
+
+- `GetTokenInformation`：`TokenUser`、`TokenOwner`、`TokenPrimaryGroup` 里的 SID 和 `TokenGroups` / `TokenRestrictedSids` 列表里属于本账号的 SID，在调用方自己的缓冲区里原地换成派生 SID。派生 SID 与真实本机 SID 形状相同（`S-1-5-21-…-1001`，28 字节），替换不会移动后面的数据。
+- `LsaLookupSids` / `LsaLookupSids2`：查 SID → 名字。输入里属于本账号的 SID（派生或真实）先换回真实 SID 让 LSA 能解析，返回后把这一项的名字与域名换成派生的；域名表里本机那一项的域名也换成派生计算机名。调用方用 `LsaFreeMemory` 释放的是 LSA 的块，名字指向进程内常量，不受影响。
+- `LsaLookupNames2`：查名字 → SID。`域名\派生用户名` 先换成主机能解析的真实账号，返回的 SID 再换成派生 SID。
+- .NET 的 `WindowsIdentity.Name` 读 `TokenUser` 后用 LSA 解析名字，所以这三处缺一不可；都不命中时行为与系统一致。
+- userenv 同样豁免：它按令牌 SID 找配置文件，拿到派生 SID 会找不到。
+
+结果是 `whoami /user`、`WindowsIdentity.Name` / `.User.Value`、`SecurityIdentifier.Translate` 两个方向全部报盒内账号（实测见下）。令牌本身仍带着主机 SID 供访问检查使用，改的只是"它报告什么"。
+
 ### WMI：盒内关闭
 
 主板的序列号、BIOS 版本、产品 UUID、磁盘序列号还能经 WMI 读到，而 WMI 由盒外的 `WmiPrvSE.exe` 应答，进程内挂钩够不到。第三轮改为在盒子配置里 `append ClosedFilePath` 关闭 `C:\Windows\System32\wbem\*` 与 `C:\Windows\SysWOW64\wbem\*`（两个位数都要，32 位 `wmic.exe` 在 `SysWOW64` 下）。效果是盒内 `wmic`、`Get-CimInstance`、`Get-WmiObject`、`getmac.exe` 全部失败（实测 `Access is denied.`），而不是报出主机的值。
@@ -105,6 +119,18 @@ WMI 关掉以后，进程内还剩两条路能读到硬件序列号，第三轮�
 - `GetSystemFirmwareTable('RSMB')`：返回的是 `RawSMBIOSData`（8 字节头 + 结构表）和一块调用方自己的缓冲区。按结构类型找到序列号字符串（System 0x07、Baseboard 0x07、Memory Device 0x18），用 `derive(机器 GUID 文本, 'S', 原序列号)` 生成长度相同的序列号并**原地**覆盖；第二遍再按值替换其它结构里相同的字符串（本机 Type 3 机箱序列号与系统序列号相同）。Type 1 的 UUID（0x08 起 16 字节）按账号重新派生并置为 version 4 / RFC 4122 variant。只改内容、不改长度，所以字符串偏移不变；表尾如果带校验和（本机这张表的 Type 127 只有 4 字节，没有校验和字段），改完后重算。
 - `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)`：`STORAGE_DEVICE_DESCRIPTOR.SerialNumberOffset` 指向缓冲区内的序列号字符串，同样按原长度原地覆盖。重叠（overlapped）调用此时缓冲区里还没有结果，不改。
 
+### 账号浏览器：网页指纹
+
+账号浏览器是每个账号一个 WebView2 窗口（独立数据目录、独立出口与时区）。网页看到的 Canvas、WebGL、字体测量、屏幕与硬件参数第四轮改成按账号派生：
+
+- 实现方式：窗口创建后、页面脚本运行前，用 `AddScriptToExecuteOnDocumentCreated` 注册一段脚本（`browser.rs` 的 `FINGERPRINT_JS`）。种子由账号 ID 派生，脚本里的每个值都由它决定。
+- Canvas：`toDataURL` / `toBlob` 在副本画布上按"内容 + 账号"确定性地改几个像素的 1 个色阶；`getImageData` 同样处理。同一张图读两次结果一致（不会被"读取不稳定"识别），不同账号不一致，肉眼不可见。
+- WebGL / GPU：`getParameter(UNMASKED_VENDOR_WEBGL)` 与 `getParameter(UNMASKED_RENDERER_WEBGL)` 按账号从一组常见 GPU 里选一组返回（NVIDIA / Intel / AMD 的 ANGLE 字符串），`WebGLRenderingContext` 与 `WebGL2RenderingContext` 都覆盖。
+- 字体：字体本身装在机器上，无法按账号隐藏；改为给测量结果加确定性微扰——`measureText().width` 与 `getBoundingClientRect()` 的宽高偏移零点几像素（不足以影响布局），使基于文字宽度的字体探针在每个账号得到不同的哈希。
+- 屏幕与硬件：`screen.width / height / availWidth / availHeight / colorDepth / pixelDepth` 从几组常见分辨率里按账号选一组（高度都在 1050 以上，不会出现窗口比屏幕还高），`navigator.hardwareConcurrency` 与 `deviceMemory` 同理。
+- 所有覆盖都在 `try/catch` 里，失败时回退到真实实现；函数保留 `toString()` 的 `[native code]` 形式。
+- 单元测试在 Node 里用最小的 canvas / screen / navigator 桩真正执行这段脚本：同一账号读两次一致、两个账号不同、元素宽度与文字宽度只偏移零点几像素；另有 `node --check` 语法检查。
+
 ### 其他配套
 
 - 防护 DLL 对存在转发关系的函数在两个模块上都挂（`kernel32`/`kernelbase`、`advapi32`/`sechost`、`secur32`/`sspicli`），但同一地址只挂一次：转发导出经 `GetProcAddress` 会解析到同一个地址，重复挂钩会叠在自己身上。
@@ -117,7 +143,7 @@ WMI 关掉以后，进程内还剩两条路能读到硬件序列号，第三轮�
 
 ## 已验证
 
-2026-11-13 第三轮，本机 Windows + Sandboxie-Plus，账号 `hydra-identity-test`（沙箱 `Hydra_e32311b88f`）。主机同一时刻：MachineGuid `9ce867b7-…`、主机名 `LAPTOP-UUCIGDOF`、用户 `24779`、用户 SID `S-1-5-21-1878996900-2321732902-594864897-1001`、BIOS/主板序列号 `PF31RA14`、C: 磁盘序列号 `001B_448B_4807_6193.`、C: 卷号 `04EF-9568`。
+2026-11-13 第三、四轮，本机 Windows + Sandboxie-Plus，账号 `hydra-identity-test`（沙箱 `Hydra_e32311b88f`）。主机同一时刻：MachineGuid `9ce867b7-…`、主机名 `LAPTOP-UUCIGDOF`、用户 `24779`、用户 SID `S-1-5-21-1878996900-2321732902-594864897-1001`、BIOS/主板序列号 `PF31RA14`、C: 磁盘序列号 `001B_448B_4807_6193.`、C: 卷号 `04EF-9568`。
 
 集成测试 `CLAUDE_HYDRA_ROOT=<scratch> cargo test --lib sandboxie_identity -- --ignored --nocapture` 在盒内执行以下命令并逐条断言，全部通过：
 
@@ -134,11 +160,15 @@ WMI 关掉以后，进程内还剩两条路能读到硬件序列号，第三轮�
 | 原生 `LookupAccountNameW`（派生名） | 派生 SID `S-1-5-21-1372292228-…`，域 `DESKTOP-F1JX9W6`；长度探测要 28 字节 |
 | 原生 `LookupAccountSidW` / `LookupAccountSidLocalW`（真 SID 的文本 → 二进制） | 名字 `oqvh7l`，域 `DESKTOP-F1JX9W6` |
 | 原生 `ConvertSidToStringSidW`（真 SID） | 派生 SID 文本 |
-| `whoami /user` | 名字是派生的；SID 仍是真 SID（见下文） |
+| 原生 `GetTokenInformation(TokenUser)` | 令牌里的 SID 是派生 SID `S-1-5-21-1372292228-…` |
+| `whoami /user` | `desktop-f1jx9w6\oqvh7l`，SID 是派生 SID |
+| .NET `WindowsIdentity.Name` / `.User.Value` | `DESKTOP-F1JX9W6\oqvh7l` / 派生 SID；`SecurityIdentifier.Translate` 两个方向都返回派生值 |
 | `GetSystemFirmwareTable('RSMB')` 的字符串 | BIOS/主板序列号 `PF31RA14` → `JBWVL4ER`，内存条序列号同样改写；Type 3 机箱序列号按值替换；主机序列号一个都不出现 |
 | `DeviceIoControl(C:, IOCTL_STORAGE_QUERY_PROPERTY)` | 磁盘序列号 `001B_448B_4807_6193.` → 同长度的 `0S9YH7PCB5D87RUKA6ER` |
 
 另有一个 WMI 测试 `sandboxie_wmi_reports_no_hardware`：盒内 `wmic bios/baseboard/diskdrive/csproduct/computersystem`、32 位 `SysWOW64` 的 `wmic`、`Get-CimInstance Win32_BIOS`、`getmac` 全部失败（`Access is denied.`），并且主机的 BIOS / 主板 / 磁盘 / 内存序列号与主机名一个都没有出现。
+
+网页指纹由单元测试覆盖：`fingerprint_script_follows_the_account`（同一账号稳定、不同账号不同、覆盖所列 API）、`fingerprint_script_parses_as_javascript`（`node --check`）、`fingerprint_script_changes_what_the_page_measures`（在 Node 的 canvas / screen / navigator 桩上真正执行脚本：同一账号读两次一致，两个账号的像素哈希不同，元素与文字测量只偏移零点几像素，屏幕与核数落在允许集合里）。脚本还在**无头 Edge**（与 WebView2 同一 Blink 引擎）里实际运行验证过：种子 12345 与 777 的 canvas 哈希与 `getImageData` 像素不同，同一画布连续读两次一致，`getBoundingClientRect` 只偏移 0.01，`measureText` 偏移在 0.016 以内，屏幕 / 核数 / WebGL 渲染器均按账号变化。这一步抓到一个真实问题：`ImageData.data` 是只读的，最初"整体赋值"的噪声写法在真实浏览器里被静默丢弃，改为原地修改后才生效。WebView2 窗口本身是 GUI，未纳入自动化测试；手工验证方式是打开两个账号的账号浏览器，在页面控制台比较 `document.createElement('canvas').toDataURL()`、`navigator.hardwareConcurrency`、`screen.width` 与 WebGL 的 `UNMASKED_RENDERER_WEBGL`。
 
 同一次运行在盒外读 MachineGuid、序列号仍是主机原值：防护只作用于盒内进程。全部单元测试与其余需要 Sandboxie 的集成测试同样通过。
 
@@ -155,26 +185,30 @@ WMI 关掉以后，进程内还剩两条路能读到硬件序列号，第三轮�
 
 能在进程内改，但有意不改或改不彻底：
 
-- **二进制 SID**：令牌里的 SID 仍是主机的，防护只换文本形式。`whoami /user` 与 .NET 的 `WindowsIdentity.Name` / `SecurityIdentifier.Value` 走的是本地格式化或未挂钩的路径，仍会打印主机 SID 与主机用户名（实测）。要彻底改需要替换令牌 SID，Sandboxie 做不到。
+- **令牌本身与访问检查**：`GetTokenInformation` 与 LSA 查询现在报派生 SID，但令牌实际携带的仍是主机 SID，访问控制（文件 ACL、`HKU\<SID>`、组策略）照旧按真实 SID 判断。直接调用 `NtQueryInformationToken`（绕过 `GetTokenInformation`）的程序也仍会看到真实 SID。
 - **`USERPROFILE` 与路径**：用户名出现在 `C:\Users\24779\…`、账号数据目录、当前工作目录里。只改 API 而路径不变会造出明显自相矛盾的环境，所以路径保持主机用户；`userenv` 也因此按主机账号应答（见上）。
+- **账号浏览器以外的浏览器**：网页指纹脚本只注入 Hydra 打开的账号浏览器（WebView2）。用户自己打开的 Chrome / Edge、其他 WebView2 窗口、Claude Code 命令行里的 Node 网络栈都不经过它；这些环境的 Canvas / WebGL 仍是主机的。
+- **WebGPU 与 Client Hints**：`navigator.gpu`（WebGPU adapter 信息）与 `navigator.userAgentData`（Client Hints 的高熵字段）本轮没有覆盖，仍是真实值；使用它们的站点能看到主机 GPU / 平台。
+- **字体的"存在性"**：脚本扰动的是测量结果，不是字体列表。`document.fonts.check` 与基于渲染的字体枚举仍能看到机器上真实安装的字体集合；只是每次测量得到的宽度按账号不同，指纹哈希因此不同。
+- **网页指纹本身的可探测性**：覆盖是脚本层的，`Function.prototype.toString` 已伪装成原生实现，但深度检测（例如在 Worker / iframe / WASM 里做同样的测量并比对）仍可能发现主线程与其它上下文不一致；这是所有脚本级指纹伪装共有的边界。
 - **SCSI pass-through**（`IOCTL_SCSI_PASS_THROUGH` 一类的裸设备查询）也能拿到磁盘序列号，本轮没有挂钩。
 - **WMI 整体不可用**：盒内 WMI 查询全部失败，这与真实机器不同。能读到硬件序列号远比"WMI 报错"更可疑，所以选前者；但依赖 WMI 的程序在盒内会失败，这是 Sandboxie 方案下无法避免的取舍。
 - **卷创建时间、卷对象 ID**（`FileFsVolumeInformation.VolumeCreationTime`、`FileFsObjectIdInformation`）、`NtQueryMultipleValueKey`：较少被用作指纹，本轮没有改。
 - **理解 B 本身**：共用内核，见上。
 
-另外，账号浏览器（WebView2）的 Canvas、WebGL、GPU、字体、屏幕等**网页指纹**在所有账号之间相同。对 claude.ai 的登录风控来说，这比 MachineGuid 是更强的信号。它不属于本文的"系统标识"范畴，也没有在本轮处理，需要单独评估（WebView2 层面注入脚本或按账号独立的渲染参数）。
-
 ## 尚未完成的内容
 
 1. **虚拟机级隔离（理解 B）**：没有。
-2. **网页指纹**：没有，见上一节末段。
+2. **网页指纹的剩余面**：WebGPU、Client Hints、DOM 字体存在性，以及 Worker / iframe 内的一致性，见上一节。
 3. **不开沙箱时的强制代理**：没有。不开沙箱时只有启动前的连通性核对和代理环境变量两条约束，自带网络栈或忽略代理变量的进程仍能直连；要做到与沙箱等价需要管理员权限下的 WFP 过滤或等价的内核层拦截。
-4. **二进制 SID 与 `%USERPROFILE%` 路径**：不打算在 Sandboxie 方案内处理，见上一节。
+4. **令牌级 SID 替换与 `%USERPROFILE%` 路径**：不打算在 Sandboxie 方案内处理，见上一节。
 
-## 本轮改动（第三轮）
+## 本轮改动（第三、四轮）
 
 - 账号：`GetUserNameW/A`、`GetUserNameEx(NameSamCompatible)` 的用户名，`LookupAccountSid/Name` 及其 `*Local` 变体，`ConvertSidToStringSid`，以及 `USERNAME` 环境变量；`userenv` 的调用按主机账号应答，避免 `GetUserProfileDirectoryW` 失败。
+- 账号 SID 的二进制形式：`GetTokenInformation`（TokenUser / TokenOwner / TokenPrimaryGroup / TokenGroups / TokenRestrictedSids）、`LsaLookupSids` / `LsaLookupSids2` / `LsaLookupNames2`，.NET 与 `whoami /user` 因此全部报派生账号。
 - 固件与磁盘：改写 SMBIOS 表（Type 1/2/17 序列号、Type 1 UUID、同值字符串）与 `IOCTL_STORAGE_QUERY_PROPERTY` 的磁盘序列号，均在原缓冲区原地、原长度改写。
 - WMI：盒内关闭 `System32\wbem` 与 `SysWOW64\wbem`（`append ClosedFilePath`），所有 WMI 查询失败而不是泄漏主机硬件。
+- 网页指纹：账号浏览器注入按账号派生的 Canvas / WebGL / GPU / 字体测量 / 屏幕 / CPU 内存覆盖脚本，并有 Node 桩上的功能测试。
 - `InjectDllMain` 只执行一次，避免 Sandboxie 二次调用把派生值当成主机值。
-- 集成测试新增账号探测（原生 API）、SMBIOS 与磁盘序列号断言，以及独立的 WMI 测试。
+- 集成测试新增账号探测（原生 API、令牌、.NET 与 LSA）、SMBIOS 与磁盘序列号断言，以及独立的 WMI 测试。

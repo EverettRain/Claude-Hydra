@@ -24,16 +24,18 @@
  *     (and the sechost *Local* forms .NET uses, which advapi32 does not forward), and
  *     ConvertSidToStringSidW/A. A local account's domain is the computer name, so both halves are
  *     answered with the box's values, and a SID in either direction maps between the derived name
- *     and the derived SID text. userenv is answered with the host's own account: it builds the
- *     profile directory from the name, and the profile that exists is the host user's;
+ *     and the derived SID text. The SID as bytes is answered too: GetTokenInformation(TokenUser
+ *     and friends) returns the derived SID, and so do LsaLookupSids / LsaLookupSids2 and
+ *     LsaLookupNames2, which .NET's account classes use directly instead of the Win32 lookups.
+ *     userenv is answered with the host's own account in every one of these: it builds the profile
+ *     directory from the name and the SID, and the profile that exists is the host user's;
  *   - the board, BIOS and disk serials: GetSystemFirmwareTable('RSMB') and the storage descriptor
  *     behind IOCTL_STORAGE_QUERY_PROPERTY. WMI, the other route to them, is closed off in the box.
  *
  * Not covered: the DHCPv6 DUID (`ipconfig` prints the host's copy from outside the box),
- * NtQueryMultipleValueKey, the SCSI pass-through IOCTLs that can report a disk serial, and the
- * binary SIDs - the string form is rewritten, but the token still carries the host's SID, so
- * `whoami /user` and anything reading the SID as bytes rather than text report the machine it
- * really is.
+ * NtQueryMultipleValueKey, the SCSI pass-through IOCTLs that can report a disk serial, and
+ * NtQueryInformationToken when a program calls ntdll directly instead of GetTokenInformation. The
+ * token itself still carries the host's SID for access checks - only what it reports is changed.
  */
 #include <winsock2.h>
 #include <windows.h>
@@ -93,6 +95,37 @@ typedef BOOL(WINAPI *P_GetUserNameA)(LPSTR, LPDWORD);
 typedef BOOL(WINAPI *P_ConvertSidToStringSidW)(PSID, LPWSTR *);
 typedef BOOL(WINAPI *P_ConvertSidToStringSidA)(PSID, LPSTR *);
 typedef BOOL(WINAPI *P_ConvertStringSidToSidW)(LPCWSTR, PSID *);
+typedef BOOL(WINAPI *P_GetTokenInformation)(HANDLE, TOKEN_INFORMATION_CLASS, LPVOID, DWORD, LPDWORD);
+/* The native lookup behind .NET's account classes: mscorlib imports these directly and never
+   reaches `LookupAccountSid`, so the derived SID has to be answered here too. */
+typedef struct {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR Buffer;
+} HYDRA_UNICODE_STRING;
+typedef struct {
+    HYDRA_UNICODE_STRING Name;
+    PSID Sid;
+} HYDRA_TRUST_INFORMATION;
+typedef struct {
+    ULONG Entries;
+    HYDRA_TRUST_INFORMATION *Domains;
+} HYDRA_DOMAIN_LIST;
+typedef struct {
+    SID_NAME_USE Use;
+    HYDRA_UNICODE_STRING Name;
+    LONG DomainIndex;
+} HYDRA_TRANSLATED_NAME;
+typedef struct {
+    SID_NAME_USE Use;
+    PSID Sid;
+    LONG DomainIndex;
+    ULONG Flags;
+} HYDRA_TRANSLATED_SID2;
+typedef NTSTATUS(NTAPI *P_LsaLookupSids)(void *, ULONG, PSID *, HYDRA_DOMAIN_LIST **, HYDRA_TRANSLATED_NAME **);
+typedef NTSTATUS(NTAPI *P_LsaLookupSids2)(void *, ULONG, ULONG, PSID *, HYDRA_DOMAIN_LIST **, HYDRA_TRANSLATED_NAME **);
+typedef NTSTATUS(NTAPI *P_LsaLookupNames2)(void *, ULONG, ULONG, HYDRA_UNICODE_STRING *, HYDRA_DOMAIN_LIST **,
+                                           HYDRA_TRANSLATED_SID2 **);
 
 /* A function can be exported by two modules (a forwarder and its target). Both copies are
    hooked so programs bound to either reach the detour; `b` is the target's trampoline and is
@@ -137,6 +170,12 @@ static PAIR(P_GetUserNameW) sys_GetUserNameW;
 static PAIR(P_GetUserNameA) sys_GetUserNameA;
 static PAIR(P_ConvertSidToStringSidW) sys_ConvertSidToStringSidW;
 static PAIR(P_ConvertSidToStringSidA) sys_ConvertSidToStringSidA;
+/* The token's own SID, which the text entry points above never see: `whoami /user` and .NET's
+   account classes format it themselves. */
+static PAIR(P_GetTokenInformation) sys_GetTokenInformation;
+static PAIR(P_LsaLookupSids) sys_LsaLookupSids;
+static PAIR(P_LsaLookupSids2) sys_LsaLookupSids2;
+static PAIR(P_LsaLookupNames2) sys_LsaLookupNames2;
 
 /* What this box reports, as configured on it by sandbox.rs. An empty field is left to the host. */
 static WCHAR id_machine_guid[64];
@@ -1285,9 +1324,231 @@ static BOOL WINAPI my_LookupAccountNameLocalA(LPCSTR account, PSID sid, LPDWORD 
     return swap_domain_a(domain, domain_size, domain_capacity);
 }
 
+/* A SID in the caller's token-information buffer: the box's own becomes the derived one. The
+   replacement never grows the SID (both are shaped S-1-5-21-…-1001), so the rest of the buffer,
+   and any SID after it in a group list, stay where the system put them. */
+static void replace_own_token_sid(PSID sid, const BYTE *buffer, DWORD capacity) {
+    BYTE *bytes = (BYTE *)sid;
+    DWORD length, offset;
+    if (!bytes || !buffer || !is_own_sid(bytes) || is_derived_sid(bytes)) return;
+    length = 8 + 4 * (DWORD)bytes[1];
+    if (derived_sid_size > length || bytes < buffer) return;
+    offset = (DWORD)(bytes - buffer);
+    if (offset + derived_sid_size > capacity) return;
+    memcpy(bytes, derived_sid, derived_sid_size);
+}
+
+/* The SID the token reports is the host's, and the entry points that only return text never see
+   it: `whoami /user` and .NET's account classes read TokenUser and format the SID themselves.
+   The SID is rewritten in the buffer the caller supplied, for the caller's own account only.
+   userenv is left alone for the same reason as the name: it finds the profile by the token's
+   SID. */
+static BOOL WINAPI my_GetTokenInformation(HANDLE token, TOKEN_INFORMATION_CLASS cls, LPVOID info, DWORD length,
+                                          LPDWORD returned) {
+    void *caller = _ReturnAddress();
+    BOOL ok = REAL(sys_GetTokenInformation)(token, cls, info, length, returned);
+    BYTE *buffer = (BYTE *)info;
+    DWORD i, count, header;
+    if (!ok || !info || !derived_sid_size || from_userenv(caller)) return ok;
+    switch ((int)cls) {
+        case TokenUser:
+        case TokenOwner:
+        case TokenPrimaryGroup:
+            if (length >= sizeof(SID_AND_ATTRIBUTES))
+                replace_own_token_sid(((SID_AND_ATTRIBUTES *)info)->Sid, buffer, length);
+            break;
+        case TokenGroups:
+        case TokenRestrictedSids: {
+            TOKEN_GROUPS *groups = (TOKEN_GROUPS *)info;
+            header = (DWORD)FIELD_OFFSET(TOKEN_GROUPS, Groups);
+            if (length <= header) break;
+            count = groups->GroupCount;
+            if (count > (length - header) / sizeof(SID_AND_ATTRIBUTES))
+                count = (length - header) / sizeof(SID_AND_ATTRIBUTES);
+            for (i = 0; i < count; i++) replace_own_token_sid(groups->Groups[i].Sid, buffer, length);
+            break;
+        }
+        default: break;
+    }
+    return ok;
+}
+
+/* The machine SID behind a local account: S-1-5-21-<three authorities>, the derived SID's first
+   four sub-authorities. */
+static int is_local_domain_sid(const BYTE *sid) {
+    if (!sid || !real_sid_size || sid[0] != 1 || sid[1] != 4) return 0;
+    return memcmp(sid, real_sid, 8 + 4 * 4) == 0;
+}
+
+/* The domain list behind a lookup names the computer every local account resolves against; the
+   box's computer name replaces it there, and its index is what the rewritten names point at. The
+   buffer is static for the process lifetime, so it stays valid without being part of the LSA
+   block the caller frees. */
+static LONG rewrite_domains(HYDRA_DOMAIN_LIST *domains) {
+    ULONG i;
+    LONG local = -1;
+    if (!domains || !domains->Domains) return -1;
+    for (i = 0; i < domains->Entries; i++) {
+        HYDRA_UNICODE_STRING *name = &domains->Domains[i].Name;
+        if (name->Buffer && name->Length && is_host_w(name->Buffer, (int)(name->Length / sizeof(WCHAR))))
+            local = (LONG)i;
+        else if (is_local_domain_sid((const BYTE *)domains->Domains[i].Sid))
+            local = (LONG)i;
+    }
+    if (local >= 0 && id_computer_name[0]) {
+        domains->Domains[local].Name.Buffer = id_computer_name;
+        domains->Domains[local].Name.Length = (USHORT)(lstrlenW(id_computer_name) * sizeof(WCHAR));
+        domains->Domains[local].Name.MaximumLength = domains->Domains[local].Name.Length;
+    }
+    return local;
+}
+
+/* The names a SID lookup answered: the box's own entries become the derived name in the derived
+   domain, and the rest of the system's answer stands. */
+static void rewrite_sid_names(ULONG count, const BYTE *own, HYDRA_DOMAIN_LIST **domains, HYDRA_TRANSLATED_NAME **names) {
+    ULONG i;
+    LONG local;
+    HYDRA_DOMAIN_LIST *list = domains ? *domains : NULL;
+    if (!names || !*names) return;
+    local = rewrite_domains(list);
+    if (local < 0 && list && list->Entries > 0) local = 0;
+    if (local >= 0 && list) {
+        list->Domains[local].Name.Buffer = id_computer_name;
+        list->Domains[local].Name.Length = (USHORT)(lstrlenW(id_computer_name) * sizeof(WCHAR));
+        list->Domains[local].Name.MaximumLength = list->Domains[local].Name.Length;
+    }
+    for (i = 0; i < count; i++) {
+        if (!own || !own[i]) continue;
+        (*names)[i].Use = SidTypeUser;
+        (*names)[i].Name.Buffer = id_user_name;
+        (*names)[i].Name.Length = (USHORT)(lstrlenW(id_user_name) * sizeof(WCHAR));
+        (*names)[i].Name.MaximumLength = (*names)[i].Name.Length;
+        (*names)[i].DomainIndex = local;
+    }
+}
+
+/* A private copy of the SID array with the box's own SIDs mapped back to the host's, so LSA can
+   resolve them; `own` marks the entries whose answer is rewritten. */
+static int prepare_sids(ULONG count, PSID *sids, PSID **input, BYTE **own) {
+    PSID *copy = (PSID *)LocalAlloc(LPTR, count * sizeof(PSID));
+    BYTE *flags = (BYTE *)LocalAlloc(LPTR, count);
+    ULONG i;
+    if (!copy || !flags) {
+        LocalFree(copy);
+        LocalFree(flags);
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        copy[i] = sids[i];
+        if (sids[i] && is_derived_sid((const BYTE *)sids[i])) {
+            flags[i] = 1;
+            copy[i] = (PSID)real_sid;
+        } else if (sids[i] && is_own_sid((const BYTE *)sids[i])) {
+            flags[i] = 1;
+        }
+    }
+    *input = copy;
+    *own = flags;
+    return 1;
+}
+
+static NTSTATUS NTAPI my_LsaLookupSids(void *policy, ULONG count, PSID *sids, HYDRA_DOMAIN_LIST **domains,
+                                       HYDRA_TRANSLATED_NAME **names) {
+    void *caller = _ReturnAddress();
+    PSID *input = NULL;
+    BYTE *own = NULL;
+    NTSTATUS status;
+    if (!sids || !count || !derived_sid_size || from_userenv(caller) || !prepare_sids(count, sids, &input, &own))
+        return REAL(sys_LsaLookupSids)(policy, count, sids, domains, names);
+    status = REAL(sys_LsaLookupSids)(policy, count, input, domains, names);
+    if (NT_SUCCESS(status)) rewrite_sid_names(count, own, domains, names);
+    LocalFree(input);
+    LocalFree(own);
+    return status;
+}
+
+static NTSTATUS NTAPI my_LsaLookupSids2(void *policy, ULONG options, ULONG count, PSID *sids,
+                                        HYDRA_DOMAIN_LIST **domains, HYDRA_TRANSLATED_NAME **names) {
+    void *caller = _ReturnAddress();
+    PSID *input = NULL;
+    BYTE *own = NULL;
+    NTSTATUS status;
+    if (!sids || !count || !derived_sid_size || from_userenv(caller) || !prepare_sids(count, sids, &input, &own))
+        return REAL(sys_LsaLookupSids2)(policy, options, count, sids, domains, names);
+    status = REAL(sys_LsaLookupSids2)(policy, options, count, input, domains, names);
+    if (NT_SUCCESS(status)) rewrite_sid_names(count, own, domains, names);
+    LocalFree(input);
+    LocalFree(own);
+    return status;
+}
+
+/* A name lookup asks for "domain\name"; a derived name is turned into the real account so LSA
+   resolves it, with the derived computer name turned into the host's. Returns the length in
+   characters, or 0 when the name is not the box's account. */
+static int substitute_account(const HYDRA_UNICODE_STRING *from, WCHAR *out, int capacity) {
+    const WCHAR *text = from->Buffer;
+    int chars = from->Length / (int)sizeof(WCHAR), at, length = 0, i;
+    int domain = -1;
+    if (!text || chars <= 0 || chars >= 128 || !id_user_name[0]) return 0;
+    for (at = 0; at < chars && text[at] != L'\\'; at++) {
+    }
+    if (at < chars) domain = at;
+    if (!same_text(text + (domain >= 0 ? domain + 1 : 0), chars - (domain >= 0 ? domain + 1 : 0), id_user_name))
+        return 0;
+    if (domain >= 0 && same_text(text, domain, id_computer_name)) {
+        for (i = 0; i < (int)lstrlenW(host_name); i++) out[length++] = host_name[i];
+        out[length++] = L'\\';
+    } else if (domain >= 0) {
+        for (i = 0; i <= domain; i++) out[length++] = text[i];
+    }
+    for (i = 0; real_user[i]; i++) out[length++] = real_user[i];
+    return length < capacity ? length : 0;
+}
+
+static NTSTATUS NTAPI my_LsaLookupNames2(void *policy, ULONG flags, ULONG count, HYDRA_UNICODE_STRING *names,
+                                         HYDRA_DOMAIN_LIST **domains, HYDRA_TRANSLATED_SID2 **sids) {
+    void *caller = _ReturnAddress();
+    HYDRA_UNICODE_STRING *input = NULL;
+    WCHAR *texts = NULL;
+    ULONG i;
+    NTSTATUS status;
+    if (!names || !count || !derived_sid_size || from_userenv(caller))
+        return REAL(sys_LsaLookupNames2)(policy, flags, count, names, domains, sids);
+    input = (HYDRA_UNICODE_STRING *)LocalAlloc(LPTR, count * sizeof(*input));
+    texts = (WCHAR *)LocalAlloc(LPTR, (size_t)count * 128 * sizeof(WCHAR));
+    if (!input || !texts) {
+        status = REAL(sys_LsaLookupNames2)(policy, flags, count, names, domains, sids);
+    } else {
+        for (i = 0; i < count; i++) {
+            int length;
+            input[i] = names[i];
+            length = substitute_account(&names[i], texts + i * 128, 128);
+            if (length > 0) {
+                input[i].Buffer = texts + i * 128;
+                input[i].Length = (USHORT)(length * sizeof(WCHAR));
+                input[i].MaximumLength = input[i].Length;
+            }
+        }
+        status = REAL(sys_LsaLookupNames2)(policy, flags, count, input, domains, sids);
+        if (NT_SUCCESS(status) && sids && *sids) {
+            LONG local = rewrite_domains(domains ? *domains : NULL);
+            for (i = 0; i < count; i++) {
+                BYTE *sid = (BYTE *)(*sids)[i].Sid;
+                if (!sid || !is_own_sid(sid) || is_derived_sid(sid)) continue;
+                if (derived_sid_size > 8 + 4 * (DWORD)sid[1]) continue;
+                memcpy(sid, derived_sid, derived_sid_size);
+                (*sids)[i].Use = SidTypeUser;
+                (*sids)[i].DomainIndex = local;
+            }
+        }
+    }
+    LocalFree(input);
+    LocalFree(texts);
+    return status;
+}
+
 /* NameSamCompatible is `HOST\user` for a local account; the other formats do not carry the
-   computer name. Both halves are the box's, so the answer is rebuilt from the two values. */
-static BOOLEAN WINAPI my_GetUserNameExW(int format, LPWSTR buffer, PULONG size) {
+   computer name. Both halves are the box's, so the answer is rebuilt from the two values. */static BOOLEAN WINAPI my_GetUserNameExW(int format, LPWSTR buffer, PULONG size) {
     void *caller = _ReturnAddress();
     ULONG capacity = size ? *size : 0, host_length = (ULONG)lstrlenW(host_name), length, name_length, rest, total;
     BOOLEAN ok;
@@ -1435,8 +1696,7 @@ static BOOL WINAPI my_ConvertSidToStringSidW(PSID sid, LPWSTR *text) {
     return TRUE;
 }
 
-static BOOL WINAPI my_ConvertSidToStringSidA(PSID sid, LPSTR *text) {
-    void *caller = _ReturnAddress();
+static BOOL WINAPI my_ConvertSidToStringSidA(PSID sid, LPSTR *text) {    void *caller = _ReturnAddress();
     BOOL ok;
     DWORD length, i;
     LPSTR copy;
@@ -1543,6 +1803,10 @@ __declspec(dllexport) void __stdcall InjectDllMain(HINSTANCE sbie, ULONG_PTR unu
         HOOK_PAIR(advapi32, sechost, GetUserNameA);
         HOOK_PAIR(advapi32, sechost, ConvertSidToStringSidW);
         HOOK_PAIR(advapi32, sechost, ConvertSidToStringSidA);
+        HOOK_PAIR(advapi32, kernelbase, GetTokenInformation);
+        HOOK_PAIR(advapi32, sechost, LsaLookupNames2);
+        HOOK_PAIR(advapi32, sechost, LsaLookupSids);
+        HOOK_PAIR(advapi32, sechost, LsaLookupSids2);
     }
 }
 
