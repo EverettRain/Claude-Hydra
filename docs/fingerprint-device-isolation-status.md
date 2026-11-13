@@ -1,13 +1,19 @@
 # 指纹 / 设备隔离：当前状态
 
-日期：2026-11-12（第二轮更新）
+日期：2026-11-13（第三轮更新）
 状态：**部分实现**（理解 A 已做，理解 B 未做）
 
 ## 结论
 
-"指纹 / 设备隔离"按理解 A 实现了：开启 Sandboxie 隔离的账号，在沙箱里看到的机器 ID、硬件配置 ID、卷序列号、MAC 地址和主机名都换成了这个账号自己的值，与主机和其他账号都不同。第二轮把这几项从"常见 API 生效"推进到"同一个值无论从哪条路读都一致"：注册表与卷序列号改在 NT 层改写，Node（即 Claude Code）读到的主机名、卷号、MAC 都已实测为派生值，账号的 Claude Code 设备 ID 也不再在沙箱之间共用。
+"指纹 / 设备隔离"按理解 A 实现了：开启 Sandboxie 隔离的账号，在沙箱里看到的机器 ID、硬件配置 ID、卷序列号、MAC 地址、主机名、账号名与账号 SID，以及主板 / BIOS / 内存 / 磁盘序列号都换成了这个账号自己的值，与主机和其他账号都不同。
 
-理解 B（虚拟机级隔离）没有做，也不打算用 Sandboxie 冒充。Sandboxie 是进程沙箱，不是虚拟机：它不虚拟化内核，WMI 由盒外进程应答，因此仍有一批系统标识会漏出主机的值，见「没有覆盖到的部分」。
+第三轮补上了前两轮列为"不打算做"的账号与固件标识：
+
+- 账号：`GetUserNameW/A`、`GetUserNameExW/A`、`LookupAccountSid/Name`（含 .NET 使用的 sechost `*Local` 形式）和 `ConvertSidToStringSid` 都按盒内身份应答；`USERNAME` 环境变量同样改写。
+- 固件与磁盘：`GetSystemFirmwareTable('RSMB')` 返回的 SMBIOS 表在进程内改写（系统 / 主板 / 内存条序列号、系统 UUID，以及同值的机箱序列号），`IOCTL_STORAGE_QUERY_PROPERTY` 返回的磁盘序列号同样改写。
+- WMI：盒内**关闭** `System32\wbem` 与 `SysWOW64\wbem`。WMI 由盒外的 `WmiPrvSE.exe` 应答，进程内改不了；关掉之后盒内任何 WMI 查询都失败，而不是返回主机的硬件序列号。**这是有意的取舍：盒内"没有硬件"好过"报的是主机的硬件"。**
+
+理解 B（虚拟机级隔离）没有做，也不打算用 Sandboxie 冒充。Sandboxie 是进程沙箱，不是虚拟机：它不虚拟化内核，因此 CPU 型号、核心数、内存大小、显卡与驱动版本仍然与主机一致，`whoami /user`、.NET 的账号类等少数路径也仍会落到主机的 SID 上，见「没有覆盖到的部分」。
 
 ## 这项任务指什么
 
@@ -15,7 +21,7 @@
 
 | 理解 | 内容 | 状态 |
 |---|---|---|
-| A. 生成设备标识 | 给每个虚拟沙箱生成机器 ID、设备 ID、硬件标识、MAC、主机名等，减少平台风控在多个账号在同一台设备上 | 已实现，见下文 |
+| A. 生成设备标识 | 给每个虚拟沙箱生成机器 ID、设备 ID、硬件标识、MAC、主机名、账号标识等，减少平台风控在同一台设备上关联多个账号 | 已实现，见下文 |
 | B. 加强环境隔离 | 让账号运行在与主机隔离的环境里（虚拟机一类），自然拥有独立的系统环境 | 未做；Sandboxie 不能替代虚拟机 |
 
 ## Claude-Cage 实际做了什么
@@ -49,6 +55,10 @@
 | 主机名 | `DESKTOP-` 加 7 位大写字母数字 | `GetComputerName[Ex]W/A`；注册表 `Tcpip\Parameters\Hostname`（同上两个 NT 调用）；账号域名 `LookupAccountSidW/A`、`LookupAccountNameW/A`、`GetUserNameExW/A(NameSamCompatible)`；环境变量 `COMPUTERNAME`、`USERDOMAIN`、`USERDOMAIN_ROAMINGPROFILE`、`LOGONSERVER` |
 | 卷序列号 | 8 位十六进制，每个卷各一个 | `NtQueryVolumeInformationFile(FileFsVolumeInformation)` 与 `NtQueryInformationFile(FileIdInformation)` |
 | MAC 地址 | 本地管理、单播；前 3 字节按账号固定，后 3 字节按网卡 GUID 派生 | `GetAdaptersAddresses`、`GetAdaptersInfo`、`GetIfTable`、`GetIfEntry`、`GetIfTable2[Ex]`、`GetIfEntry2[Ex]` |
+| 账号名 | 小写字母开头、6 位 `[a-z0-9]` | `GetUserNameW/A`、`GetUserNameExW/A(NameSamCompatible)`、`LookupAccountSidW/A`（真 SID → 派生名）、`LookupAccountNameW/A`（派生名 → 派生 SID）；环境变量 `USERNAME` |
+| 账号 SID | `S-1-5-21-…-1001` 文本 | `ConvertSidToStringSidW/A`（真 SID 的文本 → 派生文本）、`LookupAccountSidW/A`（派生 SID → 派生名 + 派生域）、`LookupAccountNameW/A`（派生名 → 派生 SID） |
+| 主板 / BIOS / 内存条序列号、系统 UUID | 与主机同长度的序列号；UUID 为 16 字节 | `GetSystemFirmwareTable('RSMB')` 返回的 SMBIOS 表：Type 1 的序列号与 UUID、Type 2 的序列号、Type 17 的序列号，再按值替换其它结构里相同的字符串（本机的机箱序列号与系统序列号是同一个） |
+| 物理磁盘序列号 | 与主机同长度 | `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)` 的 `STORAGE_DEVICE_DESCRIPTOR.SerialNumberOffset` 指向的字符串 |
 
 ### 为什么改在 NT 层
 
@@ -61,93 +71,110 @@
 
 ### 卷序列号：按真实卷号派生
 
-NT 层只知道"是哪个卷"，不知道调用方用的路径，所以派生值以该卷的**真实序列号**为键：`派生 = derive(账号键, 'V', 真实序列号)`。好处是所有通往同一卷的路都一致——盘符、`NULL`（当前盘）、挂在 `C:\mnt\data` 上的卷、打开的文件句柄——而且挂载点卷与 `C:` 自然分开。第一轮"按盘符归一，挂载点折成 `C:`"的限制和"传 `NULL` 得到另一个值"的不一致都随之消失。
+NT 层只知道"是哪个卷"，不知道调用方用的路径，所以派生值以该卷的**真实序列号**为键：`派生 = derive(账号键, 'V', 真实序列号)`。好处是所有通往同一卷的路都一致——盘符、`NULL`（当前盘）、挂在 `C:\mnt\data` 上的卷、打开的文件句柄——而且挂载点卷与 `C:` 自然分开。
 
 64 位卷号（`FileIdInformation`）的低 32 位与 `vol` 显示的值一致，高 32 位另行派生，与 NTFS 的实际关系相同。
 
-`derive` 是带账号键的 FNV-1a 加 murmur3 收尾混淆，Rust（`identity.rs::derive`）与 C（`idguard.c::derive`）逐字节一致。用带键的非线性混淆而不是"基值异或"，是因为异或方案下同一台机器上任何账号的 `serial(C) ^ serial(D)` 都相等，可以据此把账号串起来，甚至认出 Hydra 本身；单元测试 `volume_relations_do_not_link_accounts` 钉住这一点，`derive_matches_the_guard` 钉住一组在真实沙箱里观察到的值（主机 `04EF-9568` → 账号 `hydra-identity-test` 的 `89A3-60FA`），任何一侧改动都会在离线单元测试里失败。
+`derive` 是带账号键的 FNV-1a 加 murmur3 收尾混淆，Rust（`identity.rs::derive`）与 C（`idguard.c::derive`）逐字节一致。用带键的非线性混淆而不是"基值异或"，是因为异或方案下同一台机器上任何账号的 `serial(C) ^ serial(D)` 都相等，可以据此把账号串起来，甚至认出 Hydra 本身；单元测试 `volume_relations_do_not_link_accounts` 钉住这一点，`derive_matches_the_guard` 钉住一组在真实沙箱里观察到的值。
 
 ### MAC：按网卡 GUID 派生
 
-第一轮按网卡在列表中的**序号**派生，有两个问题：`GetAdaptersAddresses` 与 `GetAdaptersInfo` 列出的网卡集合不同，同一块网卡在两个接口里序号不同、MAC 也不同；插拔 VPN / 虚拟网卡后序号整体错位，所有账号的 MAC 一起变。现在后 3 字节由 `derive(账号 MAC, 'M', 网卡 GUID)` 得出：同一块网卡在所有接口、所有重启之间都是同一个地址。实测 `ipconfig` 与 Node 对 VMnet1 报出同一个 `AA-6C-7B-7F-CD-F7`。只改长度为 6 的物理地址，隧道等其他长度的地址保持原样。
+第一轮按网卡在列表中的**序号**派生，有两个问题：`GetAdaptersAddresses` 与 `GetAdaptersInfo` 列出的网卡集合不同，同一块网卡在两个接口里序号不同、MAC 也不同；插拔 VPN / 虚拟网卡后序号整体错位，所有账号的 MAC 一起变。现在后 3 字节由 `derive(账号 MAC, 'M', 网卡 GUID)` 得出：同一块网卡在所有接口、所有重启之间都是同一个地址。只改长度为 6 的物理地址，隧道等其他长度的地址保持原样。
 
-### 主机名：连带的几个出口
+### 主机名与账号
 
 主机名不只出现在 `GetComputerName` 里：
 
-- 不在域里的机器上，`USERDOMAIN`、`USERDOMAIN_ROAMINGPROFILE` 等于计算机名，`LOGONSERVER` 是 `\\计算机名`。启动器现在把它们和 `COMPUTERNAME` 一起换掉（`identity::host_name_env`）；在域里时它们是域与域控，所有账号本来就共用，保持不变。
-- 本地账号的"域"就是计算机名：`whoami` 打印 `主机名\用户`，.NET 的 `UserDomainName` 也这样取。`LookupAccountSid/Name`、`GetUserNameEx(NameSamCompatible)` 现在把等于主机名的域换成派生名，缓冲区不够时按系统的方式报 `ERROR_INSUFFICIENT_BUFFER` / `ERROR_MORE_DATA` 和所需长度。
+- 不在域里的机器上，`USERDOMAIN`、`USERDOMAIN_ROAMINGPROFILE` 等于计算机名，`LOGONSERVER` 是 `\\计算机名`。启动器把它们和 `COMPUTERNAME` 一起换掉（`identity::identity_env`）；在域里时它们是域与域控，所有账号本来就共用，保持不变。
+- 本地账号的"域"就是计算机名：`whoami` 打印 `主机名\用户`。`LookupAccountSid/Name`、`GetUserNameEx(NameSamCompatible)` 把等于主机名的域换成派生名，缓冲区不够时按系统的方式报 `ERROR_INSUFFICIENT_BUFFER` / `ERROR_MORE_DATA` 和所需长度。
+- 账号名走 `GetUserNameW/A`（注意它的长度**含**终止符，与 `LookupAccount*` 不含终止符的约定不同）和 `GetUserNameEx(NameSamCompatible)`；`USERNAME` 环境变量由启动器一并换掉。
+- 账号 SID 的文本形式在 `ConvertSidToStringSidW/A` 里换（系统返回的字符串是 `LocalAlloc` 分配的，替换时按同样方式分配并释放原串）；`LookupAccountName` 拿到派生名时直接应答派生 SID，`LookupAccountSid` 拿到派生 SID 时直接应答派生名，真 SID 则调用系统查得名字后换成派生值。
+- 这些查询的 `*Local` 变体（`LookupAccountSidLocalW/A`、`LookupAccountNameLocalW/A`）由 `sechost.dll` 导出、`advapi32` 不转发，.NET 的账号类走的是这一组，所以单独挂钩。
+- **userenv 例外**：`GetUserProfileDirectoryW` 会用 `GetUserNameExW` / `ConvertSidToStringSidW` 得到账号再去打开 `C:\Users\<名>`。如果它也拿到派生账号，配置文件目录就不存在，函数失败并将长度留成 0 —— Node 的 `os.userInfo()` 会因此报 `ENOMEM`。防护 DLL 用 `RtlPcToFileHeader` 判断调用方：来自 `userenv.dll` 的调用返回主机自己的答案，其余调用仍返回派生值。
 
-### Claude Code 自己的设备 ID
+### WMI：盒内关闭
 
-Claude Code 的 `userID` 和遥测标识存在 `~/.claude.json`。第一轮里"独立 Code"默认关闭，沙箱会把主机的 `~/.claude`、`~/.claude.json*` 开放进去，于是每个沙箱的 MachineGuid 各不相同，Claude Code 设备 ID 却是同一个——这比完全不伪装更显眼。现在只要环境开了沙箱隔离，"独立 Code"就强制开启（`Environment::keeps_code_separate`），界面上的开关同时锁定并说明原因。已有账号下次启动时会改用自己的 Claude Code 目录，需要在该账号里重新登录一次 Claude Code。
+主板的序列号、BIOS 版本、产品 UUID、磁盘序列号还能经 WMI 读到，而 WMI 由盒外的 `WmiPrvSE.exe` 应答，进程内挂钩够不到。第三轮改为在盒子配置里 `append ClosedFilePath` 关闭 `C:\Windows\System32\wbem\*` 与 `C:\Windows\SysWOW64\wbem\*`（两个位数都要，32 位 `wmic.exe` 在 `SysWOW64` 下）。效果是盒内 `wmic`、`Get-CimInstance`、`Get-WmiObject`、`getmac.exe` 全部失败（实测 `Access is denied.`），而不是报出主机的值。
+
+MUST 用 `append` 而不是 `set`：`set` 会覆盖已有的 `ClosedFilePath` 列表，把别的封闭路径一起打开。
+
+### 固件与磁盘序列号
+
+WMI 关掉以后，进程内还剩两条路能读到硬件序列号，第三轮都改了：
+
+- `GetSystemFirmwareTable('RSMB')`：返回的是 `RawSMBIOSData`（8 字节头 + 结构表）和一块调用方自己的缓冲区。按结构类型找到序列号字符串（System 0x07、Baseboard 0x07、Memory Device 0x18），用 `derive(机器 GUID 文本, 'S', 原序列号)` 生成长度相同的序列号并**原地**覆盖；第二遍再按值替换其它结构里相同的字符串（本机 Type 3 机箱序列号与系统序列号相同）。Type 1 的 UUID（0x08 起 16 字节）按账号重新派生并置为 version 4 / RFC 4122 variant。只改内容、不改长度，所以字符串偏移不变；表尾如果带校验和（本机这张表的 Type 127 只有 4 字节，没有校验和字段），改完后重算。
+- `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)`：`STORAGE_DEVICE_DESCRIPTOR.SerialNumberOffset` 指向缓冲区内的序列号字符串，同样按原长度原地覆盖。重叠（overlapped）调用此时缓冲区里还没有结果，不改。
 
 ### 其他配套
 
 - 防护 DLL 对存在转发关系的函数在两个模块上都挂（`kernel32`/`kernelbase`、`advapi32`/`sechost`、`secur32`/`sspicli`），但同一地址只挂一次：转发导出经 `GetProcAddress` 会解析到同一个地址，重复挂钩会叠在自己身上。
-- 五项 `Hydra*` 值由 Rust 侧一次写全；缺 `HydraMachineGuid` 时防护 DLL 整体不启用。
-- `InjectDll` / `InjectDll64` 每个值只当一个 DLL 路径，多个 DLL 要重复写多行；`set_injection` 先清空再逐个 `append`，回归测试 `every_guard_is_its_own_injection_line` 守着。DLL 文件名带内容哈希，手工改 ini 追加新路径而不清空旧项，会继续加载旧一代 DLL——判据是 `SbieIni.exe query <box> InjectDll64` 里的文件名必须是 `sandbox\` 目录里当前那一代。
+- `InjectDllMain` 可能被 Sandboxie 调用不止一次；第二次执行时防护已经装好，会把派生值当成主机的值读走。入口用 `InterlockedCompareExchange` 只放行第一次。
+- 所有 `Hydra*` 值由 Rust 侧一次写全；缺 `HydraMachineGuid` 时防护 DLL 整体不启用。
+- `InjectDll` / `InjectDll64` 每个值只当一个 DLL 路径，多个 DLL 要重复写多行；`set_injection` 先清空再逐个 `append`，回归测试 `every_guard_is_its_own_injection_line` 守着。DLL 文件名带内容哈希，手工改 ini 追加新路径而不清空旧项，会继续加载旧一代 DLL。
 - **发布版必须带 32 位防护**：缺 x86 MSVC 工具链时，`build.rs` 在 release 构建里直接失败（debug 构建仍只警告）。否则盒内所有 32 位程序会报主机标识，也不受中继端口限制。
 
-代码位置：`app/src-tauri/src/identity.rs`（派生）、`app/src-tauri/src/idguard.c`（改写）、`app/src-tauri/src/sandbox.rs`（写入沙箱配置与注入）、`app/src-tauri/src/launcher.rs`（环境变量）、`app/src-tauri/src/environment.rs`（强制独立 Code）。
+代码位置：`app/src-tauri/src/identity.rs`（派生）、`app/src-tauri/src/idguard.c`（改写）、`app/src-tauri/src/sandbox.rs`（写入沙箱配置与注入）、`app/src-tauri/src/launcher.rs`（环境变量）。
 
 ## 已验证
 
-2026-11-12 第二轮，本机 Windows + Sandboxie-Plus，账号 `hydra-identity-test`（沙箱 `Hydra_e32311b88f`）。主机同一时刻：MachineGuid `9ce867b7-…`、主机名 `LAPTOP-UUCIGDOF`、C: 卷号 `04EF-9568`、首块网卡 `90-2E-16-6A-EF-19`。
+2026-11-13 第三轮，本机 Windows + Sandboxie-Plus，账号 `hydra-identity-test`（沙箱 `Hydra_e32311b88f`）。主机同一时刻：MachineGuid `9ce867b7-…`、主机名 `LAPTOP-UUCIGDOF`、用户 `24779`、用户 SID `S-1-5-21-1878996900-2321732902-594864897-1001`、BIOS/主板序列号 `PF31RA14`、C: 磁盘序列号 `001B_448B_4807_6193.`、C: 卷号 `04EF-9568`。
 
-集成测试 `CLAUDE_HYDRA_ROOT=<scratch> cargo test --lib sandboxie_identity -- --ignored --nocapture` 在盒内执行以下命令并逐条断言，全部通过（`<scratch>` 必须用反斜杠写成 Windows 路径，否则 `OpenFilePath` 匹配不上，探测输出会留在盒内，测试报 "boxed probe did not finish"）：
+集成测试 `CLAUDE_HYDRA_ROOT=<scratch> cargo test --lib sandboxie_identity -- --ignored --nocapture` 在盒内执行以下命令并逐条断言，全部通过：
 
 | 读法 | 盒内结果 |
 |---|---|
-| `reg query …\Cryptography /v MachineGuid` | `70c0f527-4f99-4023-80aa-87230068f939` |
-| `reg query …\Cryptography`（**枚举**，不带 `/v`） | 同上；输出中不含主机值（第一轮会泄漏） |
-| `reg query …\Hardware Profiles\0001 /v HwProfileGuid` | 派生值 |
-| `hostname` | `DESKTOP-F1JX9W6` |
-| `whoami` | `desktop-f1jx9w6\24779`（第一轮是主机名） |
+| `reg query …\Cryptography /v MachineGuid`、枚举同一键 | 派生值；枚举结果不含主机值 |
+| `hostname` / `whoami` | `DESKTOP-F1JX9W6` / `desktop-f1jx9w6\oqvh7l` |
 | `vol C:` / `vol D:` | 各自的派生值，互不相同，不等于主机值 |
 | `ipconfig /all` | 全部网卡 `AA-6C-7B-…`，互不相同 |
-| Node `os.hostname()` | `DESKTOP-F1JX9W6` |
-| Node `fs.statSync('C:/').dev` / `'D:/'` | `2309185786`（= `0x89A360FA`）/ D: 的派生值，与 Rust 侧计算一致 |
-| Node `os.networkInterfaces()` 的 MAC | 全部 `aa:6c:7b:…`；同一网卡与 `ipconfig` 报的相同 |
+| Node `os.hostname()`、`fs.statSync('C:/').dev`、`os.networkInterfaces()` | 派生值；MAC 与 `ipconfig` 一致 |
+| Node `os.userInfo().username` | `oqvh7l` |
+| `%USERNAME%` / `%USERDOMAIN%` | `oqvh7l` / `DESKTOP-F1JX9W6` |
+| 原生 `GetUserNameW` | `True`，长度 7（6 字符 + 终止符），`oqvh7l` |
+| 原生 `LookupAccountNameW`（派生名） | 派生 SID `S-1-5-21-1372292228-…`，域 `DESKTOP-F1JX9W6`；长度探测要 28 字节 |
+| 原生 `LookupAccountSidW` / `LookupAccountSidLocalW`（真 SID 的文本 → 二进制） | 名字 `oqvh7l`，域 `DESKTOP-F1JX9W6` |
+| 原生 `ConvertSidToStringSidW`（真 SID） | 派生 SID 文本 |
+| `whoami /user` | 名字是派生的；SID 仍是真 SID（见下文） |
+| `GetSystemFirmwareTable('RSMB')` 的字符串 | BIOS/主板序列号 `PF31RA14` → `JBWVL4ER`，内存条序列号同样改写；Type 3 机箱序列号按值替换；主机序列号一个都不出现 |
+| `DeviceIoControl(C:, IOCTL_STORAGE_QUERY_PROPERTY)` | 磁盘序列号 `001B_448B_4807_6193.` → 同长度的 `0S9YH7PCB5D87RUKA6ER` |
 
-另在盒内用 **32 位** `C:\Windows\SysWOW64\cmd.exe` 手工复核：MachineGuid（含枚举）、`hostname`、`whoami` 均为派生值，`vol C:` 为 `89A3-60FA`，与 64 位 Node 报的同一个值一致，说明 32 位防护已加载且两种位数的规则相同。
+另有一个 WMI 测试 `sandboxie_wmi_reports_no_hardware`：盒内 `wmic bios/baseboard/diskdrive/csproduct/computersystem`、32 位 `SysWOW64` 的 `wmic`、`Get-CimInstance Win32_BIOS`、`getmac` 全部失败（`Access is denied.`），并且主机的 BIOS / 主板 / 磁盘 / 内存序列号与主机名一个都没有出现。
 
-同一次运行在盒外读 MachineGuid 仍是主机原值：防护只作用于盒内进程。全部 64 个单元测试与 `every_guard_is_its_own_injection_line` 同样通过。
+同一次运行在盒外读 MachineGuid、序列号仍是主机原值：防护只作用于盒内进程。全部单元测试与其余需要 Sandboxie 的集成测试同样通过。
 
 启动器在账号进程没进沙箱、或防护 DLL 没加载时会关掉它并报错（`launcher.rs` 的 `confirm_boxed`），所以沙箱配置写错不会静默失效。
 
 ## 没有覆盖到的部分
 
-先区分两类：**盒外应答**的（防护 DLL 进不去，只能上虚拟机）和**能改但有意不改**的（改了会与盒外应答的值互相矛盾）。
+先区分两类：**盒外应答**的（防护 DLL 进不去，只能上虚拟机）和**能改但有意不改**的。
 
 盒外应答，值与主机一致：
 
-- **WMI**：`wmic csproduct get uuid`、`wmic baseboard/bios get serialnumber`、`wmic computersystem get name`、`Get-CimInstance` 都由盒外的 `WmiPrvSE.exe` 应答。`getmac.exe` 也属此类——它查询 `Win32_NetworkAdapter`，所以在盒内仍打印主机 MAC（已实测），这不是漏挂的 API。
 - **DHCPv6 DUID**：`ipconfig /all` 的 DUID 行由盒外提供，尾部是主机首块网卡的地址。
+- **虚拟化层本身**：CPU 型号、核心数、内存大小、显卡与驱动版本来自内核与硬件，进程内改不了。
 
-能在进程内改，但有意不改：
+能在进程内改，但有意不改或改不彻底：
 
-- **SMBIOS 固件表**（`GetSystemFirmwareTable`）、**磁盘序列号**（`IOCTL_STORAGE_QUERY_PROPERTY`）、`GetSystemInfo` / `NtQuerySystemInformation` 里的硬件信息。这些调用在进程内执行，技术上可以挂钩改写（第一轮文档把它们归为"Sandboxie 的能力边界"，这个说法不准确）。不改的原因是：同样的主板 UUID、序列号、磁盘序列号也能经 WMI 读到，而 WMI 改不了；进程内报派生值、WMI 报主机值，同一台"机器"给出两套答案，比统一报主机值更可疑。DUID 当初也是这样试过后撤回的。要改它们，前提是先让盒内的 WMI 失效或同样被改写。
-- **用户名与 SID**：`USERNAME`、`USERPROFILE`、`GetUserNameW`、`whoami /user` 的 SID（含机器 SID `S-1-5-21-…`）在每个沙箱里都一样。用户名出现在几乎所有路径里（`C:\Users\<名>\…`，包括账号数据目录和当前目录），只改 API 而路径不变，会造出明显自相矛盾的环境；SID 遍布令牌、注册表 `HKU\<SID>` 与文件 ACL，无法在进程内一致地替换。这是同一 Windows 用户下运行多账号的固有边界。
+- **二进制 SID**：令牌里的 SID 仍是主机的，防护只换文本形式。`whoami /user` 与 .NET 的 `WindowsIdentity.Name` / `SecurityIdentifier.Value` 走的是本地格式化或未挂钩的路径，仍会打印主机 SID 与主机用户名（实测）。要彻底改需要替换令牌 SID，Sandboxie 做不到。
+- **`USERPROFILE` 与路径**：用户名出现在 `C:\Users\24779\…`、账号数据目录、当前工作目录里。只改 API 而路径不变会造出明显自相矛盾的环境，所以路径保持主机用户；`userenv` 也因此按主机账号应答（见上）。
+- **SCSI pass-through**（`IOCTL_SCSI_PASS_THROUGH` 一类的裸设备查询）也能拿到磁盘序列号，本轮没有挂钩。
+- **WMI 整体不可用**：盒内 WMI 查询全部失败，这与真实机器不同。能读到硬件序列号远比"WMI 报错"更可疑，所以选前者；但依赖 WMI 的程序在盒内会失败，这是 Sandboxie 方案下无法避免的取舍。
 - **卷创建时间、卷对象 ID**（`FileFsVolumeInformation.VolumeCreationTime`、`FileFsObjectIdInformation`）、`NtQueryMultipleValueKey`：较少被用作指纹，本轮没有改。
-- **理解 B 本身**：共用内核，CPU 型号、核心数、内存、显卡、驱动版本完全一致。
+- **理解 B 本身**：共用内核，见上。
 
-另外，账号浏览器（WebView2）的 Canvas、WebGL、GPU、字体、屏幕等**网页指纹**在所有账号之间相同。对 claude.ai 的登录风控来说，这比 MachineGuid 是更强的信号。它不属于本文的"系统标识"范畴，也没有在本轮处理，需要单独评估。
+另外，账号浏览器（WebView2）的 Canvas、WebGL、GPU、字体、屏幕等**网页指纹**在所有账号之间相同。对 claude.ai 的登录风控来说，这比 MachineGuid 是更强的信号。它不属于本文的"系统标识"范畴，也没有在本轮处理，需要单独评估（WebView2 层面注入脚本或按账号独立的渲染参数）。
 
 ## 尚未完成的内容
 
 1. **虚拟机级隔离（理解 B）**：没有。
-2. **WMI / 固件 / 磁盘序列号 / DUID 层的标识**：没有，原因见上一节。
-3. **网页指纹**：没有，见上一节末段。
-4. **不开沙箱时的强制代理**：没有。不开沙箱时只有启动前的连通性核对和代理环境变量两条约束，自带网络栈或忽略代理变量的进程仍能直连；要做到与沙箱等价需要管理员权限下的 WFP 过滤或等价的内核层拦截。
-5. **用户名与 SID**：不打算在 Sandboxie 方案内处理，见上一节。
+2. **网页指纹**：没有，见上一节末段。
+3. **不开沙箱时的强制代理**：没有。不开沙箱时只有启动前的连通性核对和代理环境变量两条约束，自带网络栈或忽略代理变量的进程仍能直连；要做到与沙箱等价需要管理员权限下的 WFP 过滤或等价的内核层拦截。
+4. **二进制 SID 与 `%USERPROFILE%` 路径**：不打算在 Sandboxie 方案内处理，见上一节。
 
-## 本轮改动（第二轮）
+## 本轮改动（第三轮）
 
-- 开沙箱的环境强制"独立 Code"，消除各沙箱共用 Claude Code 设备 ID 的问题；界面开关锁定并说明。
-- 注册表标识改在 `NtQueryValueKey` / `NtEnumerateValueKey` 应答，覆盖枚举、ANSI 版本和所有 `RegGetValue` 变体；修正了 `RegQueryValueExW(…, NULL, NULL)` 存在性探测返回 `ERROR_INVALID_PARAMETER` 的偏差。
-- 卷序列号改在 `NtQueryVolumeInformationFile` / `NtQueryInformationFile(FileIdInformation)` 改写，以真实卷号为键、带账号键的非线性派生；Node `fs.stat().dev`、句柄类 API、`NULL` 根、挂载点卷全部一致。
-- MAC 改按网卡 GUID 派生，并新增 `GetIfTable`、`GetIfEntry`、`GetIfTable2[Ex]`、`GetIfEntry2[Ex]`。
-- 主机名补齐 `USERDOMAIN`、`USERDOMAIN_ROAMINGPROFILE`、`LOGONSERVER` 环境变量，以及 `LookupAccountSid/Name`、`GetUserNameEx` 返回的账号域。
-- release 构建缺 32 位防护时直接失败。
-- 集成测试新增枚举、`whoami`、Node 三组断言；单元测试新增跨账号关联、环境变量替换和一组真实沙箱观测值的钉住测试。
+- 账号：`GetUserNameW/A`、`GetUserNameEx(NameSamCompatible)` 的用户名，`LookupAccountSid/Name` 及其 `*Local` 变体，`ConvertSidToStringSid`，以及 `USERNAME` 环境变量；`userenv` 的调用按主机账号应答，避免 `GetUserProfileDirectoryW` 失败。
+- 固件与磁盘：改写 SMBIOS 表（Type 1/2/17 序列号、Type 1 UUID、同值字符串）与 `IOCTL_STORAGE_QUERY_PROPERTY` 的磁盘序列号，均在原缓冲区原地、原长度改写。
+- WMI：盒内关闭 `System32\wbem` 与 `SysWOW64\wbem`（`append ClosedFilePath`），所有 WMI 查询失败而不是泄漏主机硬件。
+- `InjectDllMain` 只执行一次，避免 Sandboxie 二次调用把派生值当成主机值。
+- 集成测试新增账号探测（原生 API）、SMBIOS 与磁盘序列号断言，以及独立的 WMI 测试。

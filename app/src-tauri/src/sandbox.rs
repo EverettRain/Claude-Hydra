@@ -240,7 +240,10 @@ pub fn forget(id: &str) {
         }
         // The derived identifiers first and by name: a box re-created for the same account must
         // not answer with the previous account's device if the wildcard wipe ever misses them.
-        for key in ["HydraMachineGuid", "HydraHwProfileGuid", "HydraComputerName", "HydraMac", "HydraVolumeSerial"] {
+        for key in [
+            "HydraMachineGuid", "HydraHwProfileGuid", "HydraComputerName", "HydraMac", "HydraVolumeSerial",
+            "HydraUserName", "HydraUserSid",
+        ] {
             let _ = ini(&dir, &["set", &name, key, ""]);
         }
         let _ = ini(&dir, &["set", &name, "*", ""]);
@@ -311,10 +314,8 @@ pub fn configure_quiet_start() -> Result<(), String> {
 }
 
 /// Creates or updates the account's box. `relay_port` = the only address the box may reach;
-/// `None` (no node) leaves the network unrestricted. `code_dir` = the account's own Claude
-/// Code folder when its environment keeps Claude Code separate; otherwise the shared
-/// `~/.claude` is opened to the box.
-pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, code_dir: Option<&Path>) -> Result<String, String> {
+/// `None` (no node) leaves the network unrestricted. Each box gets its own Code directory.
+pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<String, String> {
     let dir = available()?;
     let name = box_name(id);
     let drop = drop_dir();
@@ -343,18 +344,35 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, code_dir: Op
     set("HydraComputerName", &ids.computer_name)?;
     set("HydraMac", &ids.mac)?;
     set("HydraVolumeSerial", &ids.volume_serial)?;
+    // The account name and SID are what a program reads to tell "who ran me" from "on which
+    // machine". Only the text forms are rewritten; the token's own SID keeps the machine
+    // authority, which is why the value derived here has to look like a local account's (see
+    // `identity.rs` and the status document) rather than being obviously synthetic.
+    set("HydraUserName", &ids.user_name)?;
+    set("HydraUserSid", &ids.user_sid)?;
+    // WMI answers hardware questions from `WmiPrvSE.exe`, a service outside the box, so the box
+    // cannot derive those values: board, BIOS and disk-drive serials and the SMBIOS UUID would come
+    // back as this machine's. Closing the WMI client side makes the query fail instead, which is
+    // the honest outcome — a box without WMI reports no hardware rather than hardware belonging to
+    // another account. Both bitnesses are needed: `SysWOW64\wbem` holds the 32-bit `WMIC.exe`, and
+    // closing only `System32\wbem` still answers a 32-bit `wmic bios get serialnumber`.
+    // `append`, not `set`: `set` replaces every `ClosedFilePath` value of the box, which would drop
+    // the other bitness (and any path added later) and silently reopen the leak.
+    append("ClosedFilePath", r"C:\Windows\System32\wbem\*")?;
+    append("ClosedFilePath", r"C:\Windows\SysWOW64\wbem\*")?;
     set("OpenFilePath", data_dir)?;
     append("OpenFilePath", &drop.to_string_lossy())?;
-    // Claude Code's sessions and settings, shared with unboxed accounts as without a box, so
-    // Hydra (and other accounts) see what a boxed account did. `*` covers its temp-and-rename saves.
-    let code = match code_dir {
-        Some(dir) => {
-            std::fs::create_dir_all(dir).map_err(|e| format!("无法创建账号的 Claude Code 目录：{e}"))?;
-            vec![dir.to_path_buf()]
+    let code = code_dir(id);
+    std::fs::create_dir_all(&code).map_err(|e| e.to_string())?;
+    append("OpenFilePath", &code.to_string_lossy())?;
+    // Removing a passthrough rule still permits reading host files through copy-on-write.
+    if let Some(home) = home() {
+        for path in [home.join(".claude"), home.join(".claude.json*")] {
+            let path = path.to_string_lossy();
+            ini(&dir, &["delete", &name, "ClosedFilePath", &path])?;
+            append("ClosedFilePath", &path)?;
         }
-        None => claude_code_paths(),
-    };
-    for path in &code { append("OpenFilePath", &path.to_string_lossy())?; }
+    }
     match relay_port {
         Some(port) => {
             set("NetworkAccess", "*,Block")?;
@@ -384,13 +402,13 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, code_dir: Op
         sync_box_proxy(&dir, &name, relay_port.filter(|_| crate::sys::claude_egress_policy().is_some()))?;
         sync_box_proxy_values(&dir, &name, relay_port, true)?;
         sync_box_gitconfig(&root, relay_port)?;
-        recover_claude_code_data(&root, &code);
+        recover_claude_code_data(&root, std::slice::from_ref(&code));
         let legacy = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|s| !s.is_empty())
             .map(PathBuf::from).or_else(|| home().map(|p| p.join(".claude")));
-        if let (Some(code), Some(legacy)) = (code_dir, legacy.filter(|p| Some(p.as_path()) != code_dir)) {
+        if let Some(legacy) = legacy.filter(|p| p != &code) {
             let boxed = box_copy(&root, &legacy);
             let sources: Vec<_> = std::iter::once(legacy).chain(boxed).collect();
-            crate::sessions::recover_projects(Path::new(data_dir), code, &sources)?;
+            crate::sessions::recover_projects(Path::new(data_dir), &code, &sources)?;
         }
     }
     Ok(name)
@@ -399,17 +417,6 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, code_dir: Op
 /// The user profile folder (where Claude Code and git keep their per-user files).
 fn home() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
-}
-
-/// `~/.claude` (or `CLAUDE_CONFIG_DIR`) and the `~/.claude.json*` files next to the home folder.
-fn claude_code_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) { paths.push(PathBuf::from(dir)); }
-    if let Some(home) = home() {
-        if paths.is_empty() { paths.push(home.join(".claude")); }
-        paths.push(home.join(".claude.json*"));
-    }
-    paths
 }
 
 /// Where the box keeps its copy of `host_path`: Sandboxie maps the user profile to
@@ -657,6 +664,177 @@ pub fn box_of(_pid: u32) -> Option<String> { None }
 
 #[cfg(test)]
 mod tests {
+    /// Native probe of the account entry points, run inside the box by
+    /// `sandboxie_identity_is_per_account`. `GetUserNameW`, `LookupAccountNameW`,
+    /// `LookupAccountSidW` and `ConvertSidToStringSidW` are called directly, so a failure names the
+    /// function that answered rather than the caller that noticed; `LookupAccountSidLocalW` is the
+    /// sechost entry point .NET reaches without going through advapi32.
+    #[cfg(windows)]
+    const ACCOUNT_PROBE: &str = r#"
+$ErrorActionPreference = 'Continue'
+$hostUser = $args[0]
+$hostName = $args[1]
+$hostSid = $args[2]
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class P {
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool GetUserNameW(System.Text.StringBuilder b, ref uint n);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool LookupAccountNameW(string system, string account, IntPtr sid, ref uint sidSize, System.Text.StringBuilder domain, ref uint domainSize, out int use);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool LookupAccountSidW(string system, IntPtr sid, System.Text.StringBuilder name, ref uint nameSize, System.Text.StringBuilder domain, ref uint domainSize, out int use);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr text);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool ConvertStringSidToSidW(string text, out IntPtr sid);
+  [DllImport("sechost.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool LookupAccountSidLocalW(IntPtr sid, System.Text.StringBuilder name, ref uint nameSize, System.Text.StringBuilder domain, ref uint domainSize, out int use);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("userenv.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool GetUserProfileDirectoryW(IntPtr token, System.Text.StringBuilder path, ref uint size);
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr LocalFree(IntPtr h);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern uint GetSystemFirmwareTable(uint provider, uint id, byte[] buffer, uint size);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint create, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool DeviceIoControl(IntPtr handle, uint code, byte[] input, uint inputSize, byte[] output, uint outputSize, out uint returned, IntPtr overlapped);
+  [DllImport("kernel32.dll")]
+  public static extern bool CloseHandle(IntPtr handle);
+}
+"@
+function TestName($label, $account) {
+  $domain = New-Object System.Text.StringBuilder 300
+  $ds = [uint32]300
+  $size = [uint32]0
+  $use = 0
+  $probe = [P]::LookupAccountNameW($null, $account, [IntPtr]::Zero, [ref]$size, $domain, [ref]$ds, [ref]$use)
+  $probeErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  $sid = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(68)
+  $have = $size
+  if ($have -lt 68) { $have = 68 }
+  $ds = [uint32]300
+  $lookup = [P]::LookupAccountNameW($null, $account, $sid, [ref]$have, $domain, [ref]$ds, [ref]$use)
+  $lookupErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  $text = [IntPtr]::Zero
+  $conv = [P]::ConvertSidToStringSidW($sid, [ref]$text)
+  $sidText = ""
+  if ($text -ne [IntPtr]::Zero) { $sidText = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($text) }
+  Write-Output ($label + "=" + $probe + "," + $probeErr + "," + $size + "," + $lookup + "," + $lookupErr + "," + $have + "," + $ds + "," + $domain.ToString() + "," + $conv + "," + $sidText)
+  if ($text -ne [IntPtr]::Zero) { [P]::LocalFree($text) }
+  [System.Runtime.InteropServices.Marshal]::FreeHGlobal($sid)
+}
+$sb = New-Object System.Text.StringBuilder 300
+$n = [uint32]300
+$ok = [P]::GetUserNameW($sb, [ref]$n)
+$guiErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+Write-Output ("PGU=" + $ok + "," + $n + "," + $guiErr + "," + $sb.ToString())
+$account = $sb.ToString()
+$token = [IntPtr]::Zero
+$opened = [P]::OpenProcessToken([P]::GetCurrentProcess(), 0x20008, [ref]$token)
+$openErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+$psize = [uint32]0
+$profile = [P]::GetUserProfileDirectoryW($token, $null, [ref]$psize)
+$profileErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+Write-Output ("PGBUF=" + $profile + "," + $profileErr + "," + $psize)
+if ($psize -gt 0) {
+  $path = New-Object System.Text.StringBuilder ([int]$psize)
+  $profile2 = [P]::GetUserProfileDirectoryW($token, $path, [ref]$psize)
+  $profileErr2 = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  Write-Output ("PGDIR=" + $profile2 + "," + $profileErr2 + "," + $path.ToString())
+}
+TestName "POWN" $account
+TestName "PHOST" $hostUser
+TestName "PDOM" ($hostName + "\" + $hostUser)
+$id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$sidText = $id.User.Value
+$sidPtr = [IntPtr]::Zero
+$parsed = [P]::ConvertStringSidToSidW($sidText, [ref]$sidPtr)
+$parsedErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+$name = New-Object System.Text.StringBuilder 300
+$ns = [uint32]300
+$domain2 = New-Object System.Text.StringBuilder 300
+$ds2 = [uint32]300
+$use2 = 0
+$sidOk = [P]::LookupAccountSidW($null, $sidPtr, $name, [ref]$ns, $domain2, [ref]$ds2, [ref]$use2)
+$sidErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+Write-Output ("PSID=" + $parsed + "," + $parsedErr + "," + $sidText + "," + $sidOk + "," + $sidErr + "," + $ns + "," + $name.ToString() + "," + $domain2.ToString())
+$name2 = New-Object System.Text.StringBuilder 300
+$ns2 = [uint32]300
+$domain3 = New-Object System.Text.StringBuilder 300
+$ds3 = [uint32]300
+$use3 = 0
+$localOk = [P]::LookupAccountSidLocalW($sidPtr, $name2, [ref]$ns2, $domain3, [ref]$ds3, [ref]$use3)
+$localErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+Write-Output ("PLOCAL=" + $localOk + "," + $localErr + "," + $ns2 + "," + $name2.ToString() + "," + $domain3.ToString())
+Write-Output ("PSDOTNET=" + $id.Name + "," + $id.User.Value)
+$realPtr = [IntPtr]::Zero
+$realOk = [P]::ConvertStringSidToSidW($hostSid, [ref]$realPtr)
+$realText = [IntPtr]::Zero
+$realConv = [P]::ConvertSidToStringSidW($realPtr, [ref]$realText)
+$realOut = ""
+if ($realText -ne [IntPtr]::Zero) { $realOut = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($realText) }
+Write-Output ("PCONV=" + $realOk + "," + $realConv + "," + $realOut)
+if ($sidPtr -ne [IntPtr]::Zero) { [P]::LocalFree($sidPtr) }
+$mbSize = [P]::GetSystemFirmwareTable(0x52534D42, 0, $null, 0)
+$mb = New-Object byte[] ([int]$mbSize)
+$mbGot = [P]::GetSystemFirmwareTable(0x52534D42, 0, $mb, [uint32]$mbSize)
+$strings = New-Object System.Text.StringBuilder
+$run = New-Object System.Text.StringBuilder
+foreach ($b in $mb) {
+  if ($b -ge 32 -and $b -lt 127) { [void]$run.Append([char]$b) }
+  else {
+    if ($run.Length -ge 4) { [void]$strings.Append($run.ToString()).Append("|") }
+    [void]$run.Clear()
+  }
+}
+Write-Output ("PSMB=" + $mbGot + "," + $strings.ToString())
+$uuid = ""
+$at = 8
+while ($at + 2 -lt $mb.Length) {
+  $type = $mb[$at]
+  $len = $mb[$at + 1]
+  if ($type -eq 1 -and $len -gt 0x17) {
+    $p = $at + 8
+    $h1 = -join ($mb[($p+3)..($p+0)] | ForEach-Object { $_.ToString('x2') })
+    $h2 = -join ($mb[($p+5)..($p+4)] | ForEach-Object { $_.ToString('x2') })
+    $h3 = -join ($mb[($p+7)..($p+6)] | ForEach-Object { $_.ToString('x2') })
+    $h4 = -join ($mb[($p+9)..($p+8)] | ForEach-Object { $_.ToString('x2') })
+    $h5 = -join ($mb[($p+10)..($p+15)] | ForEach-Object { $_.ToString('x2') })
+    $uuid = $h1 + "-" + $h2 + "-" + $h3 + "-" + $h4 + "-" + $h5
+    break
+  }
+  $p2 = $at + $len
+  while ($p2 + 1 -lt $mb.Length -and -not ($mb[$p2] -eq 0 -and $mb[$p2 + 1] -eq 0)) { $p2++ }
+  $at = $p2 + 2
+}
+Write-Output ("PSMBUUID=" + $uuid)
+$handle = [P]::CreateFileW("\\.\C:", 0, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+$disk = ""
+if ($handle -ne [IntPtr](-1)) {
+  $in = New-Object byte[] 12
+  $out = New-Object byte[] 1024
+  $ret = [uint32]0
+  $diskOk = [P]::DeviceIoControl($handle, 0x2D1400, $in, 12, $out, 1024, [ref]$ret, [IntPtr]::Zero)
+  if ($diskOk) {
+    $off = [BitConverter]::ToUInt32($out, 24)
+    if ($off -gt 0 -and $off -lt $ret) {
+      $end = $off
+      while ($end -lt $ret -and $out[$end] -ne 0) { $end++ }
+      $disk = [Text.Encoding]::ASCII.GetString($out, [int]$off, [int]($end - $off))
+    }
+  }
+  [void][P]::CloseHandle($handle)
+}
+Write-Output ("PDISK=" + $disk)
+"#;
+
     #[cfg(windows)]
     #[test]
     #[ignore = "requires Sandboxie-Plus and CLAUDE_HYDRA_ROOT pointing to a scratch folder"]
@@ -666,7 +844,7 @@ mod tests {
         let data = crate::paths::storage_root().join("proxy-test");
         std::fs::create_dir_all(&data).unwrap();
         let id = "hydra-proxy-integration-test";
-        let name = super::configure(id, &data.to_string_lossy(), None, None).unwrap();
+        let name = super::configure(id, &data.to_string_lossy(), None).unwrap();
         let key = r"Software\Policies\Claude";
         let host = [true, false].map(|machine| crate::sys::reg_string(machine, key, "egressProxyUrl"));
         let host_https = crate::sys::reg_string(false, "Environment", "HTTPS_PROXY");
@@ -715,7 +893,7 @@ mod tests {
         let port = relay.local_addr().unwrap().port();
         let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let other_port = other.local_addr().unwrap().port();
-        let name = super::configure(id, &data.to_string_lossy(), Some(port), None).unwrap();
+        let name = super::configure(id, &data.to_string_lossy(), Some(port)).unwrap();
         println!("box {name}, relay port {port}");
 
         // 1) network rules, through `command` (what launcher uses).
@@ -769,9 +947,11 @@ mod tests {
         println!("claude log net lines: {}", log.lines().filter(|l| l.contains("net::") || l.contains("proxy")).take(4).collect::<Vec<_>>().join(" | "));
     }
 
-    /// Real Sandboxie-Plus check of the five identifiers: `CLAUDE_HYDRA_ROOT=<scratch> cargo test --lib
-    /// sandboxie_identity -- --ignored --nocapture`. System tools are used rather than a helper exe so
-    /// the test also proves the hooks reach programs that bind straight to kernelbase.
+    /// Real Sandboxie-Plus check of the identifiers: `CLAUDE_HYDRA_ROOT=<scratch> cargo test --lib
+    /// sandboxie_identity -- --ignored --nocapture`. System tools are used rather than a helper
+    /// exe so the test also proves the hooks reach programs that bind straight to kernelbase, and
+    /// a PowerShell probe calls the account and firmware entry points directly so a failure names
+    /// the function that answered.
     #[cfg(windows)]
     #[test]
     #[ignore = "requires Sandboxie-Plus and CLAUDE_HYDRA_ROOT pointing to a scratch folder"]
@@ -782,11 +962,23 @@ mod tests {
         let data = crate::paths::storage_root().join("identity-test");
         std::fs::create_dir_all(&data).unwrap();
         let ids = crate::identity::Identifiers::for_account("hydra-identity-test");
-        let name = super::configure("hydra-identity-test", &data.to_string_lossy(), None, None).unwrap();
+        let name = super::configure("hydra-identity-test", &data.to_string_lossy(), None).unwrap();
+        // What the host calls itself, for the probe to look up by name as a control.
+        let host_user = std::env::var("USERNAME").unwrap();
+        let host_name = std::env::var("COMPUTERNAME").unwrap();
+        let host_sid = {
+            let out = std::process::Command::new("whoami").arg("/user").output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.split_whitespace().find(|w| w.starts_with("S-1-5-21-")).expect("whoami /user printed a SID").to_string()
+        };
 
         let out = data.join("ids.txt");
         let _ = std::fs::remove_file(&out);
         let script = data.join("ids.cmd");
+        // A native probe of the account entry points, run in the same box as the tools above:
+        // PowerShell rather than a helper exe so the test does not need a compiler of its own.
+        let probe = data.join("account.ps1");
+        std::fs::write(&probe, ACCOUNT_PROBE).unwrap();
         std::fs::write(
             &script,
             format!(
@@ -802,15 +994,27 @@ mod tests {
                  echo HYDRA-WHOAMI\r\n\
                  whoami\r\n\
                  echo HYDRA-NODE\r\n\
-                 node -e \"const o=require('os'),f=require('fs');console.log('NODE-HOST='+o.hostname());console.log('NODE-DEV-C='+f.statSync('C:/').dev);console.log('NODE-DEV-D='+f.statSync('D:/').dev);for(const l of Object.values(o.networkInterfaces()))for(const a of l)if(a.mac!=='00:00:00:00:00:00')console.log('NODE-MAC='+a.mac)\"\r\n\
+                 node -e \"const o=require('os'),f=require('fs');console.log('NODE-HOST='+o.hostname());console.log('NODE-DEV-C='+f.statSync('C:/').dev);console.log('NODE-DEV-D='+f.statSync('D:/').dev);console.log('NODE-USER='+o.userInfo().username);for(const l of Object.values(o.networkInterfaces()))for(const a of l)if(a.mac!=='00:00:00:00:00:00')console.log('NODE-MAC='+a.mac)\"\r\n\
+                 echo HYDRA-ACCOUNT\r\n\
+                 echo USERNAME=%USERNAME%\r\n\
+                 echo USERDOMAIN=%USERDOMAIN%\r\n\
+                 whoami /user\r\n\
+                 \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"{}\" {} {} {}\r\n\
                  echo HYDRA-DONE\r\n\
                  ) > \"{}\" 2>&1\r\n",
+                probe.display(),
+                host_user,
+                host_name,
+                host_sid,
                 out.display()
             ),
         )
         .unwrap();
         let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
-        super::command("hydra-identity-test", &cmd, &format!("/d /c \"{}\"", script.display()), &[])
+        // The launcher passes the derived name and account into the box's environment; this test
+        // has to do the same or `%USERNAME%` inside the box is the host's.
+        let env = crate::identity::identity_env(&ids.computer_name, &ids.user_name, |k| std::env::var(k).ok());
+        super::command("hydra-identity-test", &cmd, &format!("/d /c \"{}\"", script.display()), &env)
             .unwrap()
             .spawn()
             .unwrap();
@@ -819,7 +1023,7 @@ mod tests {
         // UTF-8, so the bytes are decoded lossily — every value asserted below is ASCII.
         let started = Instant::now();
         let mut text = String::new();
-        while started.elapsed() < Duration::from_secs(60) {
+        while started.elapsed() < Duration::from_secs(120) {
             text = std::fs::read(&out).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             if text.contains("HYDRA-DONE") { break; }
             std::thread::sleep(Duration::from_millis(300));
@@ -880,18 +1084,22 @@ mod tests {
         let listed = section("HYDRA-ENUM", "HYDRA-WHOAMI");
         assert!(listed.contains(&ids.machine_guid), "enumerated MachineGuid is not the account's: {listed}");
         assert!(!listed.to_lowercase().contains(&host.to_lowercase()), "enumeration leaks the host MachineGuid: {listed}");
-        // `whoami` prints `DOMAIN\user`; for a local account the domain is the computer name.
+        // `whoami` prints `DOMAIN\user`; for a local account both halves are the box's.
         let who = section("HYDRA-WHOAMI", "HYDRA-NODE").to_lowercase();
         let host_name = std::env::var("COMPUTERNAME").unwrap().to_lowercase();
-        assert!(who.contains(&format!("{}\\", ids.computer_name.to_lowercase())), "whoami domain is not the account's: {who}");
+        let host_user = std::env::var("USERNAME").unwrap().to_lowercase();
+        let account_text = format!("{}\\{}", ids.computer_name.to_lowercase(), ids.user_name.to_lowercase());
+        assert!(who.contains(&account_text), "whoami is not the account's ({account_text}): {who}");
         assert!(!who.contains(&format!("{host_name}\\")), "whoami still names the host: {who}");
+        assert!(!who.contains(&host_user), "whoami still names the host user: {who}");
         // Claude Code is a Node program: what Node reads is what matters most.
-        let node = section("HYDRA-NODE", "HYDRA-DONE");
+        let node = section("HYDRA-NODE", "HYDRA-ACCOUNT");
         if node.contains("NODE-HOST=") {
             let value = |key: &str| node.lines().find_map(|l| l.trim().strip_prefix(key).map(str::to_owned)).unwrap_or_default();
             assert_eq!(value("NODE-HOST="), ids.computer_name, "os.hostname(): {node}");
             assert_eq!(value("NODE-DEV-C="), c_value.to_string(), "fs.stat('C:').dev: {node}");
             assert_eq!(value("NODE-DEV-D="), d_value.to_string(), "fs.stat('D:').dev: {node}");
+            assert_eq!(value("NODE-USER="), ids.user_name, "os.userInfo().username: {node}");
             let prefix = format!("{}:{}:{}", &ids.mac[..2], &ids.mac[2..4], &ids.mac[4..6]);
             let node_macs: Vec<&str> = node.lines().filter_map(|l| l.trim().strip_prefix("NODE-MAC=")).collect();
             assert!(!node_macs.is_empty(), "os.networkInterfaces() listed no adapter: {node}");
@@ -901,8 +1109,243 @@ mod tests {
         } else {
             println!("node is not on PATH: the Node checks were skipped");
         }
+        // The account: `%USERNAME%`, and the entry points a program reaches it through. The probe
+        // calls each one directly, so a wrong answer names the function rather than the caller.
+        let account = section("HYDRA-ACCOUNT", "HYDRA-DONE");
+        assert!(
+            account.contains(&format!("USERNAME={}", ids.user_name)),
+            "%USERNAME% is not the account's: {account}"
+        );
+        assert!(
+            account.contains(&format!("USERDOMAIN={}", ids.computer_name)),
+            "%USERDOMAIN% is not the account's: {account}"
+        );
+        let probe_line = |key: &str| -> Vec<String> {
+            account
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(key))
+                .map(|rest| rest.trim_start_matches('=').split(',').map(|f| f.trim().to_string()).collect())
+                .unwrap_or_default()
+        };
+        let gu = probe_line("PGU");
+        assert!(!gu.is_empty(), "GetUserNameW was not probed: {account}");
+        assert_eq!(gu[0], "True", "GetUserNameW failed: {account}");
+        // The call reports the buffer size it filled, terminator included.
+        assert_eq!(gu[1], (ids.user_name.len() + 1).to_string(), "GetUserNameW size: {account}");
+        assert_eq!(gu[3], ids.user_name, "GetUserNameW name: {account}");
+        // A lookup by the derived name resolves to the derived SID; the first call is the size
+        // probe, which must ask for the SID's own size.
+        let plan = probe_line("POWN");
+        assert!(plan.len() >= 10, "LookupAccountNameW was not probed: {account}");
+        assert_eq!(plan[2], "28", "LookupAccountNameW size probe: {account}");
+        assert_eq!(plan[3], "True", "LookupAccountNameW for the derived name failed: {account}");
+        assert_eq!(plan[7].to_lowercase(), ids.computer_name.to_lowercase(), "LookupAccountNameW domain: {account}");
+        assert_eq!(plan[9], ids.user_sid, "LookupAccountNameW SID: {account}");
+        // The real SID the token carries formats as the derived text.
+        let conv = probe_line("PCONV");
+        assert_eq!(conv.get(2).map(String::as_str), Some(ids.user_sid.as_str()), "ConvertSidToStringSidW: {account}");
+        // `LookupAccountSidW` on the real SID gives the derived name and domain; the sechost
+        // local-only entry point answers the same.
+        let sid = probe_line("PSID");
+        assert_eq!(sid.get(3).map(String::as_str), Some("True"), "LookupAccountSidW failed: {account}");
+        assert_eq!(sid.get(6).map(String::as_str), Some(ids.user_name.as_str()), "LookupAccountSidW name: {account}");
+        assert_eq!(
+            sid.get(7).map(|d| d.to_lowercase()),
+            Some(ids.computer_name.to_lowercase()),
+            "LookupAccountSidW domain: {account}"
+        );
+        let local = probe_line("PLOCAL");
+        assert_eq!(local.first().map(String::as_str), Some("True"), "LookupAccountSidLocalW failed: {account}");
+        assert_eq!(
+            local.get(3).map(String::as_str),
+            Some(ids.user_name.as_str()),
+            "LookupAccountSidLocalW name: {account}"
+        );
+        assert_eq!(
+            local.get(4).map(|d| d.to_lowercase()),
+            Some(ids.computer_name.to_lowercase()),
+            "LookupAccountSidLocalW domain: {account}"
+        );
+        // What .NET's own account classes report is informational: they reach the SID text and the
+        // name through paths of their own (the token's SID is real, and the status document says
+        // so), so a change there is noted, not failed.
+        println!("dotnet: {}", probe_line("PSDOTNET").join(","));
+        // The firmware and storage routes: the SMBIOS table and the C: volume's storage descriptor
+        // are rewritten in place, so the host's board, BIOS and disk serials do not appear there.
+        let cim = |class: &str, field: &str| -> Vec<String> {
+            let script = format!("Get-CimInstance {class} | ForEach-Object {{ $_.{field} }}");
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.len() >= 4 && *l != "None")
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut host_hardware = cim("Win32_BIOS", "SerialNumber");
+        host_hardware.extend(cim("Win32_BaseBoard", "SerialNumber"));
+        host_hardware.extend(cim("Win32_DiskDrive", "SerialNumber"));
+        host_hardware.extend(cim("Win32_PhysicalMemory", "SerialNumber"));
+        assert!(!host_hardware.is_empty(), "the host's serials could not be read");
+        let mbtable = account.lines().find_map(|l| l.trim().strip_prefix("PSMB=")).unwrap_or_default();
+        let (mb_got, mb_strings) = mbtable.split_once(',').unwrap_or(("", ""));
+        assert!(mb_got.parse::<u32>().unwrap_or(0) > 0, "GetSystemFirmwareTable returned nothing: {account}");
+        assert!(mb_strings.split('|').count() >= 5, "the SMBIOS table came back empty: {account}");
+        for value in &host_hardware {
+            assert!(
+                !mb_strings.to_lowercase().contains(&value.to_lowercase()),
+                "SMBIOS still reports the host's {value:?}: {account}"
+            );
+        }
+        let disk = account.lines().find_map(|l| l.trim().strip_prefix("PDISK=")).unwrap_or_default();
+        assert!(!disk.is_empty(), "the C: storage descriptor was not read: {account}");
+        for value in &host_hardware {
+            assert!(
+                !disk.eq_ignore_ascii_case(value),
+                "the disk serial is still the host's {value:?}: {account}"
+            );
+        }
+        // The system UUID (SMBIOS Type 1) is derived too, so the host's product UUID does not come
+        // back out of the table.
+        let smbios_uuid = account.lines().find_map(|l| l.trim().strip_prefix("PSMBUUID=")).unwrap_or_default();
+        let host_uuid = cim("Win32_ComputerSystemProduct", "UUID").join("");
+        assert!(!smbios_uuid.is_empty(), "the SMBIOS system UUID was not read: {account}");
+        assert!(!host_uuid.is_empty(), "the host's product UUID could not be read");
+        assert!(
+            !smbios_uuid.eq_ignore_ascii_case(&host_uuid),
+            "SMBIOS still reports the host UUID: {account}"
+        );
         assert_eq!(crate::identity::Identifiers::for_account("hydra-identity-test"), ids);
         assert_ne!(crate::identity::Identifiers::for_account("other-account"), ids);
+        let _ = std::process::Command::new(dir.join("Start.exe")).args([&format!("/box:{name}"), "/terminate"]).status();
+    }
+
+    /// The WMI client is closed off in the box (`ClosedFilePath` on `System32\wbem` and
+    /// `SysWOW64\wbem`), because WMI is answered by an out-of-box service that would report every
+    /// hardware identifier Hydra derives: BIOS, board and disk serials, the product UUID and the
+    /// computer name. This asserts each of those queries fails rather than naming the machine, with
+    /// the host's own answers read outside the box as the values that must not appear.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires Sandboxie-Plus and CLAUDE_HYDRA_ROOT pointing to a scratch folder"]
+    fn sandboxie_wmi_reports_no_hardware() {
+        use std::time::{Duration, Instant};
+        assert!(std::env::var_os("CLAUDE_HYDRA_ROOT").is_some());
+        let dir = super::available().unwrap();
+        let data = crate::paths::storage_root().join("wmi-test");
+        std::fs::create_dir_all(&data).unwrap();
+        let name = super::configure("hydra-wmi-test", &data.to_string_lossy(), None).unwrap();
+
+        // The host's real identifiers, read outside the box. A query inside the box that prints one
+        // of them is the leak this test exists for.
+        let query = |class: &str, field: &str| -> Vec<String> {
+            let script = format!(
+                "Get-CimInstance {class} | ForEach-Object {{ $_.{field} }}",
+            );
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && *l != "None")
+                .map(|l| l.trim_matches('"').to_string())
+                .filter(|l| l.len() >= 4)
+                .collect()
+        };
+        let mut host_values: Vec<String> = ["Win32_BIOS:SerialNumber", "Win32_BaseBoard:SerialNumber", "Win32_DiskDrive:SerialNumber", "Win32_ComputerSystemProduct:UUID"]
+            .iter()
+            .flat_map(|pair| {
+                let (class, field) = pair.split_once(':').unwrap();
+                query(class, field)
+            })
+            .collect();
+        let host_name = std::env::var("COMPUTERNAME").unwrap();
+        host_values.push(host_name.clone());
+        assert!(!host_values.is_empty(), "the host's own hardware identifiers could not be read");
+
+        let out = data.join("wmi.txt");
+        let _ = std::fs::remove_file(&out);
+        let script = data.join("wmi.cmd");
+        // Absolute paths: with `System32\wbem` closed the bare names may not resolve, and a missing
+        // command would look like a passing test.
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\n\
+                 chcp 65001 >nul\r\n\
+                 (\r\n\
+                 echo WMI-BIOS\r\n\
+                 C:\\Windows\\System32\\wbem\\wmic.exe bios get serialnumber\r\n\
+                 echo WMI-BOARD\r\n\
+                 C:\\Windows\\System32\\wbem\\wmic.exe baseboard get serialnumber\r\n\
+                 echo WMI-DISK\r\n\
+                 C:\\Windows\\System32\\wbem\\wmic.exe diskdrive get serialnumber\r\n\
+                 echo WMI-UUID\r\n\
+                 C:\\Windows\\System32\\wbem\\wmic.exe csproduct get uuid\r\n\
+                 echo WMI-NAME\r\n\
+                 C:\\Windows\\System32\\wbem\\wmic.exe computersystem get name\r\n\
+                 echo WMI-32\r\n\
+                 C:\\Windows\\SysWOW64\\wbem\\wmic.exe bios get serialnumber\r\n\
+                 echo WMI-GETMAC\r\n\
+                 C:\\Windows\\System32\\getmac.exe\r\n\
+                 echo WMI-CIM\r\n\
+                 \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -Command \"Get-CimInstance Win32_BIOS | Select-Object -ExpandProperty SerialNumber\"\r\n\
+                 echo WMI-DONE\r\n\
+                 ) > \"{}\" 2>&1\r\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        super::command("hydra-wmi-test", &cmd, &format!("/d /c \"{}\"", script.display()), &[])
+            .unwrap()
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let mut text = String::new();
+        while started.elapsed() < Duration::from_secs(120) {
+            text = std::fs::read(&out).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            if text.contains("WMI-DONE") { break; }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        assert!(text.contains("WMI-DONE"), "boxed probe did not finish: {text}");
+        println!("{text}");
+
+        let lower = text.to_lowercase();
+        for value in &host_values {
+            assert!(
+                !lower.contains(&value.to_lowercase()),
+                "the box reported the host's {value:?} through WMI: {text}"
+            );
+        }
+        // Every WMI route must fail, and `getmac` reads `Win32_NetworkAdapter`, so it fails too
+        // rather than printing an address at all.
+        let section = |from: &str, to: &str| text.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or("").to_string();
+        let macs: Vec<&str> = text
+            .split_whitespace()
+            .filter(|w| w.len() == 17 && w.split('-').count() == 6 && w.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+            .collect();
+        assert!(macs.is_empty(), "a WMI query inside the box printed an adapter address: {macs:?}\n{text}");
+        for (from, to) in [
+            ("WMI-BIOS", "WMI-BOARD"),
+            ("WMI-BOARD", "WMI-DISK"),
+            ("WMI-DISK", "WMI-UUID"),
+            ("WMI-UUID", "WMI-NAME"),
+            ("WMI-NAME", "WMI-32"),
+            ("WMI-32", "WMI-GETMAC"),
+            ("WMI-CIM", "WMI-DONE"),
+        ] {
+            let body = section(from, to);
+            assert!(
+                body.contains("拒绝") || body.to_lowercase().contains("access is denied") || body.to_lowercase().contains("denied"),
+                "{from} did not report access denied: {body:?}\n{text}"
+            );
+        }
         let _ = std::process::Command::new(dir.join("Start.exe")).args([&format!("/box:{name}"), "/terminate"]).status();
     }
 
@@ -917,7 +1360,7 @@ mod tests {
         let dir = super::available().unwrap();
         use std::os::windows::process::CommandExt;
         let id = "hydra-injection-test";
-        let name = super::configure(id, &crate::paths::storage_root().join("injection-test").to_string_lossy(), None, None).unwrap();
+        let name = super::configure(id, &crate::paths::storage_root().join("injection-test").to_string_lossy(), None).unwrap();
         let count = |key: &str| {
             let out = std::process::Command::new(dir.join("SbieIni.exe")).args(["query", &name, key]).creation_flags(0x0800_0000).output().unwrap();
             assert!(out.status.success(), "query {key} failed");

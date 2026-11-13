@@ -76,18 +76,21 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         env.push(("TZ".into(), tz));
     }
     if sandboxed {
-        // The box's identity guard answers `GetComputerNameEx` with this name; the environment
-        // variable is inherited instead of queried, so it has to be set to the same value or a
-        // program reading `COMPUTERNAME` would see two different machines.
-        let name = crate::identity::Identifiers::for_account(&p.id).computer_name;
-        for (key, value) in crate::identity::host_name_env(&name, |k| std::env::var(k).ok()) {
+        // The box's identity guard answers `GetComputerNameEx` and `GetUserNameEx` with these
+        // values; the environment variables are inherited instead of queried, so they have to be
+        // set to the same values or a program reading `COMPUTERNAME`/`USERNAME` would see two
+        // different machines and accounts.
+        let ids = crate::identity::Identifiers::for_account(&p.id);
+        for (key, value) in
+            crate::identity::identity_env(&ids.computer_name, &ids.user_name, |k| std::env::var(k).ok())
+        {
             env.retain(|(k, _)| !k.eq_ignore_ascii_case(&key));
             env.push((key, value));
         }
     }
     // Claude Code started by this account keeps its sign-in, settings and sessions in the
     // account's own folder instead of the `~/.claude` every account shares.
-    let code_dir = (effective.separate_code && !p.is_default).then(|| crate::sandbox::code_dir(&p.id));
+    let code_dir = (effective.separate_code && (!p.is_default || sandboxed)).then(|| crate::sandbox::code_dir(&p.id));
     if let Some(dir) = &code_dir {
         std::fs::create_dir_all(dir).map_err(|e| format!("账号未启动：无法创建 Claude Code 目录：{e}"))?;
         env.retain(|(k, _)| !k.eq_ignore_ascii_case("CLAUDE_CONFIG_DIR"));
@@ -159,7 +162,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
             line.push(extra);
         }
         let mut cmd = if sandboxed {
-            crate::sandbox::configure(&p.id, &p.path, relay_port, code_dir.as_deref()).map_err(|e| format!("账号未启动：{e}"))?;
+            crate::sandbox::configure(&p.id, &p.path, relay_port).map_err(|e| format!("账号未启动：{e}"))?;
             crate::sandbox::command(&p.id, &exe, &line.join(" "), &env)?
         } else {
             let mut cmd = Command::new(&exe);

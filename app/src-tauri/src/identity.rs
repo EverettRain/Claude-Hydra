@@ -1,12 +1,13 @@
 //! Per-account system identifiers for a sandboxed account.
 //!
 //! A Sandboxie box virtualizes files and the registry, but not what the system reports about
-//! itself: the machine GUID, the hardware profile GUID, volume serials, MAC addresses and the
-//! computer name a boxed program reads are still this computer's, so accounts kept side by side
-//! on one machine look like one device. This module derives a stable set per account instead —
-//! the same account always sees the same device, different accounts see different ones — and
-//! `sandbox::configure` hands the values to the box, where `idguard.c` answers the matching
-//! system calls with them.
+//! itself: the machine GUID, the hardware profile GUID, volume serials, MAC addresses, the
+//! computer name and the account a boxed program reads are still this computer's, as are the
+//! board, BIOS, memory and disk serials in the SMBIOS table and the storage descriptor (WMI, the
+//! other route to them, is closed off in the box). So accounts kept side by side on one machine
+//! look like one device. This module derives a stable set per account instead — the same account
+//! always sees the same device, different accounts see different ones — and `sandbox::configure`
+//! hands the values to the box, where `idguard.c` answers the matching system calls with them.
 //!
 //! The values are derived, not random: they stay the same as long as the account id does, so an
 //! account does not look like new hardware after every Hydra update.
@@ -32,6 +33,16 @@ pub struct Identifiers {
     /// Computer name (`GetComputerNameExW`, `GetComputerNameW`), shaped like a default Windows
     /// name and within the 15-character NetBIOS limit.
     pub computer_name: String,
+    /// Account name (`GetUserNameW`, `GetUserNameExW`, `USERNAME`, `whoami`), shaped like a
+    /// local account name. The guard replaces the name in the strings the system returns; it
+    /// does not and cannot rename the profile folder behind it.
+    pub user_name: String,
+    /// The account's SID as text (`S-1-5-21-…-1001`). Derived from the account key, so two
+    /// accounts on one machine do not report one identity. `ConvertSidToStringSid`,
+    /// `LookupAccountName` and `LookupAccountSid` answer with it; the token still carries the
+    /// machine's real SID, so `whoami /user` and .NET's account classes still format the real one
+    /// (see the status document).
+    pub user_sid: String,
 }
 
 impl Identifiers {
@@ -46,6 +57,8 @@ impl Identifiers {
             volume_serial: hex_text(&bytes(seed, b"volume-serial")[..4]).to_uppercase(),
             mac: mac_text(&bytes(seed, b"mac")),
             computer_name: computer_name(&bytes(seed, b"computer-name")),
+            user_name: user_name(&bytes(seed, b"user-name")),
+            user_sid: user_sid(&bytes(seed, b"user-sid")),
         }
     }
 }
@@ -106,14 +119,23 @@ pub fn derive(key: &[u8], tag: u8, data: &[u8]) -> u32 {
     hash ^ (hash >> 16)
 }
 
-/// Environment variables that carry the computer name, with the derived `name` in place of the
-/// host's. On a machine outside a domain Windows sets `USERDOMAIN` (and its roaming twin) to the
-/// computer name and `LOGONSERVER` to `\\<computer name>`; replacing only `COMPUTERNAME` would
-/// leave the host's name one variable away. On a domain-joined machine these name the domain and
-/// its controller, which every account shares anyway, so they are kept.
-pub fn host_name_env(name: &str, var: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+/// Environment variables that carry the computer name or the account's own name, with the derived
+/// `name` and `user` in place of the host's. On a machine outside a domain Windows sets
+/// `USERDOMAIN` (and its roaming twin) to the computer name and `LOGONSERVER` to
+/// `\\<computer name>`; replacing only `COMPUTERNAME` would leave the host's name one variable
+/// away. On a domain-joined machine these name the domain and its controller, which every account
+/// shares anyway, so they are kept. `USERNAME` is the account's name rather than the machine's, so
+/// it follows the derived account for the same reason.
+pub fn identity_env(
+    name: &str,
+    user: &str,
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
     let host = var("COMPUTERNAME").unwrap_or_default();
-    let mut out = vec![("COMPUTERNAME".to_string(), name.to_string())];
+    let mut out = vec![
+        ("COMPUTERNAME".to_string(), name.to_string()),
+        ("USERNAME".to_string(), user.to_string()),
+    ];
     for key in ["USERDOMAIN", "USERDOMAIN_ROAMINGPROFILE"] {
         if var(key).is_some_and(|v| !host.is_empty() && v.eq_ignore_ascii_case(&host)) {
             out.push((key.to_string(), name.to_string()));
@@ -156,6 +178,36 @@ fn computer_name(digits: &[u8]) -> String {
     const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let suffix: String = digits[..7].iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
     format!("DESKTOP-{suffix}")
+}
+
+/// A local account name: lower case, starts with a letter, no spaces or punctuation, six
+/// characters. Windows compares account names case-insensitively, so a name that is already
+/// lower case reads the same however a program prints it.
+fn user_name(digits: &[u8]) -> String {
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const REST: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut name = String::new();
+    name.push(LETTERS[digits[0] as usize % LETTERS.len()] as char);
+    for byte in &digits[1..6] {
+        name.push(REST[*byte as usize % REST.len()] as char);
+    }
+    name
+}
+
+/// A local account SID in the form Windows prints it: `S-1-5-21-<three authorities>-<rid>`.
+///
+/// The three sub-authorities are the machine part of the SID and the RID names the account, so
+/// they must look like the ones a real installation derives — large, unremarkable numbers — or
+/// the value marks itself out as made up. The RID is 1001, the first account a new installation
+/// creates.
+fn user_sid(digits: &[u8]) -> String {
+    let authority = |at: usize| 200_000_000u32 + (u32::from_be_bytes([digits[at], digits[at + 1], digits[at + 2], digits[at + 3]]) % 1_500_000_000);
+    format!(
+        "S-1-5-21-{}-{}-{}-1001",
+        authority(0),
+        authority(4),
+        authority(8)
+    )
 }
 
 #[cfg(test)]
@@ -242,16 +294,18 @@ mod tests {
     }
 
     #[test]
-    fn host_name_variables_follow_the_derived_name() {
+    fn account_variables_follow_the_derived_identity() {
         let host = |k: &str| match k {
             "COMPUTERNAME" => Some("LAPTOP-UUCIGDOF".to_string()),
             "USERDOMAIN" | "USERDOMAIN_ROAMINGPROFILE" => Some("LAPTOP-UUCIGDOF".to_string()),
             "LOGONSERVER" => Some(r"\\LAPTOP-UUCIGDOF".to_string()),
+            "USERNAME" => Some("24779".to_string()),
             _ => None,
         };
-        let env = host_name_env("DESKTOP-ABC1234", host);
+        let env = identity_env("DESKTOP-ABC1234", "abcdef", host);
         let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
         assert_eq!(get("COMPUTERNAME"), Some("DESKTOP-ABC1234"));
+        assert_eq!(get("USERNAME"), Some("abcdef"));
         assert_eq!(get("USERDOMAIN"), Some("DESKTOP-ABC1234"));
         assert_eq!(get("USERDOMAIN_ROAMINGPROFILE"), Some("DESKTOP-ABC1234"));
         assert_eq!(get("LOGONSERVER"), Some(r"\\DESKTOP-ABC1234"));
@@ -262,6 +316,6 @@ mod tests {
             "LOGONSERVER" => Some(r"\\DC01".to_string()),
             _ => None,
         };
-        assert_eq!(host_name_env("DESKTOP-ABC1234", domain).len(), 1);
+        assert_eq!(identity_env("DESKTOP-ABC1234", "abcdef", domain).len(), 2);
     }
 }

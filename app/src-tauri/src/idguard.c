@@ -17,17 +17,29 @@
  *     RegEnumValueW/A, and anything else reading the value);
  *   - volume serials: NtQueryVolumeInformationFile (GetVolumeInformationW/A, ...ByHandleW,
  *     GetFileInformationByHandle, Node's fs.stat().dev) and NtQueryInformationFile
- *     (FileIdInformation, the 64-bit serial).
+ *     (FileIdInformation, the 64-bit serial);
+ *   - the computer name: GetComputerNameW/A, GetComputerNameExW/A, and the `Hostname` value
+ *     `hostname.exe` prints;
+ *   - the account: GetUserNameW/A, GetUserNameExW/A, LookupAccountSidW/A, LookupAccountNameW/A
+ *     (and the sechost *Local* forms .NET uses, which advapi32 does not forward), and
+ *     ConvertSidToStringSidW/A. A local account's domain is the computer name, so both halves are
+ *     answered with the box's values, and a SID in either direction maps between the derived name
+ *     and the derived SID text. userenv is answered with the host's own account: it builds the
+ *     profile directory from the name, and the profile that exists is the host user's;
+ *   - the board, BIOS and disk serials: GetSystemFirmwareTable('RSMB') and the storage descriptor
+ *     behind IOCTL_STORAGE_QUERY_PROPERTY. WMI, the other route to them, is closed off in the box.
  *
- * Not covered: WMI (answered by WmiPrvSE outside the box), the SMBIOS tables behind
- * GetSystemFirmwareTable and the disk serial behind IOCTL_STORAGE_QUERY_PROPERTY (both could be
- * rewritten here, but WMI would keep reporting the host's values, and two answers that disagree
- * are a stronger signal than one shared answer), the DHCPv6 DUID (same reason: `ipconfig` prints
- * the host's copy from outside the box), the user name and SIDs, and NtQueryMultipleValueKey.
+ * Not covered: the DHCPv6 DUID (`ipconfig` prints the host's copy from outside the box),
+ * NtQueryMultipleValueKey, the SCSI pass-through IOCTLs that can report a disk serial, and the
+ * binary SIDs - the string form is rewritten, but the token still carries the host's SID, so
+ * `whoami /user` and anything reading the SID as bytes rather than text report the machine it
+ * really is.
  */
 #include <winsock2.h>
 #include <windows.h>
 #include <winternl.h>
+#include <winioctl.h>
+#include <intrin.h>
 #include <ws2ipdef.h>
 #include <iphlpapi.h>
 
@@ -40,6 +52,7 @@
 typedef void *(__stdcall *P_SbieDll_Hook)(const char *name, void *source, void *detour, HMODULE module);
 typedef LONG(__stdcall *P_QueryProcess)(HANDLE, WCHAR *, WCHAR *, WCHAR *, ULONG *);
 typedef LONG(__stdcall *P_QueryConf)(const WCHAR *, const WCHAR *, ULONG, WCHAR *, ULONG);
+typedef PVOID(NTAPI *P_RtlPcToFileHeader)(PVOID, PVOID *);
 
 /* x86 decorates the stdcall export; Sandboxie looks the entry point up by its plain name. */
 #ifndef _WIN64
@@ -59,6 +72,8 @@ typedef DWORD(WINAPI *P_GetIfTable2)(PMIB_IF_TABLE2 *);
 typedef DWORD(WINAPI *P_GetIfTable2Ex)(MIB_IF_TABLE_LEVEL, PMIB_IF_TABLE2 *);
 typedef DWORD(WINAPI *P_GetIfEntry2)(PMIB_IF_ROW2);
 typedef DWORD(WINAPI *P_GetIfEntry2Ex)(MIB_IF_ENTRY_LEVEL, PMIB_IF_ROW2);
+typedef UINT(WINAPI *P_GetSystemFirmwareTable)(DWORD, DWORD, PVOID, DWORD);
+typedef BOOL(WINAPI *P_DeviceIoControl)(HANDLE, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI *P_GetComputerNameExW)(COMPUTER_NAME_FORMAT, LPWSTR, LPDWORD);
 typedef BOOL(WINAPI *P_GetComputerNameExA)(COMPUTER_NAME_FORMAT, LPSTR, LPDWORD);
 typedef BOOL(WINAPI *P_GetComputerNameW)(LPWSTR, LPDWORD);
@@ -67,8 +82,17 @@ typedef BOOL(WINAPI *P_LookupAccountSidW)(LPCWSTR, PSID, LPWSTR, LPDWORD, LPWSTR
 typedef BOOL(WINAPI *P_LookupAccountSidA)(LPCSTR, PSID, LPSTR, LPDWORD, LPSTR, LPDWORD, PSID_NAME_USE);
 typedef BOOL(WINAPI *P_LookupAccountNameW)(LPCWSTR, LPCWSTR, PSID, LPDWORD, LPWSTR, LPDWORD, PSID_NAME_USE);
 typedef BOOL(WINAPI *P_LookupAccountNameA)(LPCSTR, LPCSTR, PSID, LPDWORD, LPSTR, LPDWORD, PSID_NAME_USE);
+typedef BOOL(WINAPI *P_LookupAccountSidLocalW)(PSID, LPWSTR, LPDWORD, LPWSTR, LPDWORD, PSID_NAME_USE);
+typedef BOOL(WINAPI *P_LookupAccountSidLocalA)(PSID, LPSTR, LPDWORD, LPSTR, LPDWORD, PSID_NAME_USE);
+typedef BOOL(WINAPI *P_LookupAccountNameLocalW)(LPCWSTR, PSID, LPDWORD, LPWSTR, LPDWORD, PSID_NAME_USE);
+typedef BOOL(WINAPI *P_LookupAccountNameLocalA)(LPCSTR, PSID, LPDWORD, LPSTR, LPDWORD, PSID_NAME_USE);
 typedef BOOLEAN(WINAPI *P_GetUserNameExW)(int, LPWSTR, PULONG);
 typedef BOOLEAN(WINAPI *P_GetUserNameExA)(int, LPSTR, PULONG);
+typedef BOOL(WINAPI *P_GetUserNameW)(LPWSTR, LPDWORD);
+typedef BOOL(WINAPI *P_GetUserNameA)(LPSTR, LPDWORD);
+typedef BOOL(WINAPI *P_ConvertSidToStringSidW)(PSID, LPWSTR *);
+typedef BOOL(WINAPI *P_ConvertSidToStringSidA)(PSID, LPSTR *);
+typedef BOOL(WINAPI *P_ConvertStringSidToSidW)(LPCWSTR, PSID *);
 
 /* A function can be exported by two modules (a forwarder and its target). Both copies are
    hooked so programs bound to either reach the detour; `b` is the target's trampoline and is
@@ -79,6 +103,9 @@ typedef BOOLEAN(WINAPI *P_GetUserNameExA)(int, LPSTR, PULONG);
 static P_NtQueryValueKey sys_NtQueryValueKey;
 static P_NtEnumerateValueKey sys_NtEnumerateValueKey;
 static P_NtQueryKey sys_NtQueryKey;
+/* Not hooked, only called: the caller's module behind a detour, so the system's own profile code
+   can be left alone (see `from_userenv`). */
+static P_RtlPcToFileHeader sys_RtlPcToFileHeader;
 static P_NtQueryVolumeInformationFile sys_NtQueryVolumeInformationFile;
 static P_NtQueryInformationFile sys_NtQueryInformationFile;
 static P_GetAdaptersAddresses sys_GetAdaptersAddresses;
@@ -89,6 +116,8 @@ static P_GetIfTable2 sys_GetIfTable2;
 static P_GetIfTable2Ex sys_GetIfTable2Ex;
 static P_GetIfEntry2 sys_GetIfEntry2;
 static P_GetIfEntry2Ex sys_GetIfEntry2Ex;
+static PAIR(P_GetSystemFirmwareTable) sys_GetSystemFirmwareTable;
+static PAIR(P_DeviceIoControl) sys_DeviceIoControl;
 static PAIR(P_GetComputerNameExW) sys_GetComputerNameExW;
 static PAIR(P_GetComputerNameExA) sys_GetComputerNameExA;
 static PAIR(P_GetComputerNameW) sys_GetComputerNameW;
@@ -97,8 +126,17 @@ static PAIR(P_LookupAccountSidW) sys_LookupAccountSidW;
 static PAIR(P_LookupAccountSidA) sys_LookupAccountSidA;
 static PAIR(P_LookupAccountNameW) sys_LookupAccountNameW;
 static PAIR(P_LookupAccountNameA) sys_LookupAccountNameA;
+/* Only sechost exports the local-only lookups, which do not take a system name. */
+static P_LookupAccountSidLocalW sys_LookupAccountSidLocalW;
+static P_LookupAccountSidLocalA sys_LookupAccountSidLocalA;
+static P_LookupAccountNameLocalW sys_LookupAccountNameLocalW;
+static P_LookupAccountNameLocalA sys_LookupAccountNameLocalA;
 static PAIR(P_GetUserNameExW) sys_GetUserNameExW;
 static PAIR(P_GetUserNameExA) sys_GetUserNameExA;
+static PAIR(P_GetUserNameW) sys_GetUserNameW;
+static PAIR(P_GetUserNameA) sys_GetUserNameA;
+static PAIR(P_ConvertSidToStringSidW) sys_ConvertSidToStringSidW;
+static PAIR(P_ConvertSidToStringSidA) sys_ConvertSidToStringSidA;
 
 /* What this box reports, as configured on it by sandbox.rs. An empty field is left to the host. */
 static WCHAR id_machine_guid[64];
@@ -108,9 +146,23 @@ static BYTE id_mac[6];
 static int have_mac;
 static BYTE id_volume_key[4];
 static int have_volume_serial;
+/* The account the box reports. The name is what the system answers for "who am I"; the SID is
+   the text form only — the token keeps the real one, so binary comparisons still see the host. */
+static WCHAR id_user_name[64];
+static WCHAR id_user_sid[64];
 /* This computer's NetBIOS name, read before any hook: account lookups report it as the domain
    of local accounts, and only that exact domain is swapped for the derived name. */
 static WCHAR host_name[64];
+/* The account this box really runs as, read before the account hooks exist. A lookup still has
+   to reach it, and what it answers is rewritten on the way out. */
+static WCHAR real_user[64];
+static char real_user_a[64];
+static BYTE real_sid[68];
+static DWORD real_sid_size;
+static BYTE derived_sid[68];
+static DWORD derived_sid_size;
+
+static int have_account(void) { return id_user_name[0] || id_user_sid[0]; }
 
 /* --- settings -------------------------------------------------------------- */
 
@@ -140,6 +192,45 @@ static int conf_text(P_QueryConf query_conf, const WCHAR *box, const WCHAR *name
     return value[0] != 0;
 }
 
+/* The account the box really runs as, read before any account hook exists: the name from
+   GetUserNameW, its SID from LookupAccountNameW (which needs a full-size SID buffer or it
+   falsely reports a short one), and the derived SID text converted to binary so a lookup of
+   either form can be answered. Nothing here can be done after the hooks are in place. */
+static void load_account(HMODULE advapi32) {
+    P_GetUserNameW get_user = (P_GetUserNameW)(void *)GetProcAddress(advapi32, "GetUserNameW");
+    P_LookupAccountNameW lookup_name = (P_LookupAccountNameW)(void *)GetProcAddress(advapi32, "LookupAccountNameW");
+    P_ConvertStringSidToSidW from_text =
+        (P_ConvertStringSidToSidW)(void *)GetProcAddress(advapi32, "ConvertStringSidToSidW");
+    WCHAR domain[64];
+    DWORD size = (DWORD)(sizeof(real_user) / sizeof(real_user[0])), domain_size = 64, sid_size = sizeof(real_sid);
+    SID_NAME_USE use = SidTypeUnknown;
+    PSID sid = NULL;
+    int i;
+
+    /* Neither half is required on its own: the name is what a caller is answered with, the SID is
+       what the text form is answered with, and each is skipped when the box does not claim it. */
+    if (id_user_name[0] && get_user && get_user(real_user, &size) && real_user[0]) {
+        for (i = 0; real_user[i] && i < (int)(sizeof(real_user_a) - 1); i++) real_user_a[i] = (char)real_user[i];
+        real_user_a[i] = 0;
+    } else {
+        real_user[0] = 0;
+        real_user_a[0] = 0;
+    }
+    /* The call reports the capacity it was handed, not the length it wrote, so the length comes
+       from the SID itself; a full-size buffer is what makes the call succeed in the first place. */
+    if (lookup_name && real_user[0] &&
+        lookup_name(NULL, real_user, real_sid, &sid_size, domain, &domain_size, &use) && ((BYTE *)real_sid)[0] == 1)
+        real_sid_size = 8 + 4 * (DWORD)((BYTE *)real_sid)[1];
+    if (from_text && id_user_sid[0] && from_text(id_user_sid, &sid) && sid) {
+        DWORD length = 8 + 4 * (DWORD)((BYTE *)sid)[1];
+        if (length <= sizeof(derived_sid)) {
+            memcpy(derived_sid, sid, length);
+            derived_sid_size = length;
+        }
+        LocalFree(sid);
+    }
+}
+
 /* Reads this box's identifiers; without a machine GUID the option is off and nothing is hooked. */
 static int load_identity(HMODULE sbie) {
     WCHAR own_box[34], image[96], sid[96], hex[64];
@@ -156,6 +247,8 @@ static int load_identity(HMODULE sbie) {
     have_mac = conf_text(query_conf, own_box, L"HydraMac", hex, sizeof(hex)) && parse_hex(hex, id_mac, 6);
     have_volume_serial =
         conf_text(query_conf, own_box, L"HydraVolumeSerial", hex, sizeof(hex)) && parse_hex(hex, id_volume_key, 4);
+    if (!conf_text(query_conf, own_box, L"HydraUserName", id_user_name, sizeof(id_user_name))) id_user_name[0] = 0;
+    if (!conf_text(query_conf, own_box, L"HydraUserSid", id_user_sid, sizeof(id_user_sid))) id_user_sid[0] = 0;
     return 1;
 }
 
@@ -340,6 +433,160 @@ static void adapter_mac(const char *name, BYTE out[6]) {
     out[5] = (BYTE)(mix >> 8);
 }
 
+/* Values with no host value to key them on (SMBIOS serials, the system UUID, a disk's serial)
+   are keyed on the account's machine GUID text, which is already per account and stable. */
+static int seed_key(BYTE *out, int capacity) {
+    int i;
+    for (i = 0; i < capacity && i < 36 && id_machine_guid[i]; i++) out[i] = (BYTE)id_machine_guid[i];
+    return i;
+}
+
+/* A serial of the host serial's own length, drawn from the characters serials are printed with.
+   Both callers rewrite in place, where a different length would move everything after it. */
+static void rewrite_serial(char *text, int length, BYTE tag) {
+    static const char alphabet[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    char host[128];
+    BYTE key[36];
+    int key_len = seed_key(key, sizeof(key)), i;
+    if (!text || length <= 0 || key_len <= 0) return;
+    if (length > (int)sizeof(host)) length = (int)sizeof(host);
+    memcpy(host, text, (size_t)length);
+    for (i = 0; i < length; i++) {
+        DWORD mix = derive(key, key_len, (BYTE)(tag + i), (const BYTE *)host, length);
+        text[i] = alphabet[mix % (sizeof(alphabet) - 1)];
+    }
+}
+
+/* The table `GetSystemFirmwareTable('RSMB')` returns: RawSMBIOSData, an 8-byte header and then the
+   structures. A structure's size is the first length byte, and its strings follow the fixed part
+   up to a double NUL. Serial numbers and the system UUID are rewritten in place, so lengths,
+   offsets and checksums stay exactly as the system wrote them. */
+static DWORD smbios_end(const BYTE *table, DWORD at, DWORD length) {
+    DWORD pos = at + table[at + 1];
+    while (pos + 1 < length) {
+        if (table[pos] == 0 && table[pos + 1] == 0) return pos + 2;
+        pos++;
+    }
+    return length;
+}
+
+static char *smbios_string(const BYTE *table, DWORD at, DWORD end, int index) {
+    DWORD pos = at + table[at + 1];
+    int i;
+    if (index < 1) return NULL;
+    for (i = 1; i <= index; i++) {
+        if (pos >= end) return NULL;
+        if (i == index) return (char *)(table + pos);
+        while (pos < end && table[pos]) pos++;
+        pos++;
+    }
+    return NULL;
+}
+
+/* The field that names a structure's own serial, by structure type: SMBIOS puts it at a different
+   offset in each one, and a serial is the only string there is any reason to change. Type 3
+   (chassis) is not listed on purpose: its serial usually repeats the system serial, which the
+   second pass below catches by value, and this machine's table does not put the fields where the
+   specification says they are. */
+static int serial_field(BYTE type) {
+    switch (type) {
+        case 1: return 0x07;  /* System: serial (what Win32_BIOS reports) */
+        case 2: return 0x07;  /* Baseboard: board serial */
+        case 17: return 0x18; /* Memory device: module serial */
+        default: return 0;
+    }
+}
+
+/* A string in the structure's string set: how long it is, bounded by the set's end. */
+static int smbios_text_length(const char *text, const char *limit) {
+    int chars = 0;
+    while (text + chars < limit && text[chars]) chars++;
+    return chars;
+}
+
+/* The table `GetSystemFirmwareTable('RSMB')` returns: RawSMBIOSData, an 8-byte header and then the
+   structures. A structure's fixed part starts with its type and length; its strings follow up to a
+   double NUL. Everything is rewritten in place at its original length, so offsets and checksums
+   stay exactly as the system wrote them. Two passes: the first derives the serials it finds where
+   the specification puts them, and the second replaces any string holding one of those values -
+   vendors repeat the system serial in the chassis and elsewhere, and one leftover copy is a leak. */
+static void rewrite_smbios(BYTE *table, DWORD length) {
+#define HYDRA_SMB_SERIALS 6
+    char host[HYDRA_SMB_SERIALS][64], derived[HYDRA_SMB_SERIALS][64];
+    int host_length[HYDRA_SMB_SERIALS];
+    int count = 0, pass, i;
+    BYTE key[36];
+    int key_len = seed_key(key, sizeof(key));
+    DWORD checksum_at = 0, checksum_end = 0;
+    if (key_len <= 0) return;
+    for (pass = 0; pass < 2; pass++) {
+        DWORD at = 8;
+        while (at + 2 <= length && (DWORD)at + table[at + 1] <= length) {
+            BYTE type = table[at], size = table[at + 1];
+            DWORD end = smbios_end(table, at, length);
+            char *limit = (char *)table + end;
+            int field = serial_field(type);
+            if (pass == 0 && field && size > field) {
+                char *serial = smbios_string(table, at, end, table[at + field]);
+                int chars = serial ? smbios_text_length(serial, limit) : 0;
+                if (chars >= 3 && chars < (int)sizeof(host[0]) && count < HYDRA_SMB_SERIALS) {
+                    memcpy(host[count], serial, (size_t)chars);
+                    host_length[count] = chars;
+                    memcpy(derived[count], serial, (size_t)chars);
+                    rewrite_serial(derived[count], chars, 'S');
+                    memcpy(serial, derived[count], (size_t)chars);
+                    count++;
+                }
+            } else if (pass == 1) {
+                DWORD pos = at + size;
+                while (pos < end && table[pos]) {
+                    char *text = (char *)table + pos;
+                    int chars = smbios_text_length(text, limit);
+                    for (i = 0; i < count; i++) {
+                        if (chars == host_length[i] && memcmp(text, host[i], (size_t)chars) == 0)
+                            memcpy(text, derived[i], (size_t)chars);
+                    }
+                    pos += (DWORD)chars + 1;
+                }
+                if (type == 1 && size > 0x17) {
+                    BYTE uuid[16];
+                    memcpy(uuid, table + at + 8, 16);
+                    for (i = 0; i < 4; i++) {
+                        DWORD mix = derive(key, key_len, (BYTE)('U' + i), uuid, 16);
+                        table[at + 8 + i * 4 + 0] = (BYTE)(mix >> 24);
+                        table[at + 8 + i * 4 + 1] = (BYTE)(mix >> 16);
+                        table[at + 8 + i * 4 + 2] = (BYTE)(mix >> 8);
+                        table[at + 8 + i * 4 + 3] = (BYTE)mix;
+                    }
+                    /* The SMBIOS UUID is a GUID in memory order, so the version nibble (the high
+                       nibble of the canonical string's third group) is byte 7, and the variant is
+                       byte 8. */
+                    table[at + 8 + 7] = (BYTE)((table[at + 8 + 7] & 0x0f) | 0x40);
+                    table[at + 8 + 8] = (BYTE)((table[at + 8 + 8] & 0x3f) | 0x80);
+                }
+                /* A table that carries an end-of-table checksum has it covering the whole table,
+                   strings included: those just changed, so it is recomputed last. Firmware that
+                   omits the field (this machine's table ends with a four-byte Type 127) has
+                   nothing to fix. */
+                if (type == 127 && size > 4) {
+                    checksum_at = at + 4;
+                    checksum_end = (DWORD)at + size;
+                }
+            }
+            at = end;
+            if (type == 127) break;
+        }
+    }
+    if (checksum_at && checksum_end > 8) {
+        BYTE sum = 0;
+        DWORD at;
+        table[checksum_at] = 0;
+        for (at = 8; at < checksum_end; at++) sum = (BYTE)(sum + table[at]);
+        table[checksum_at] = (BYTE)(0x100 - sum);
+    }
+#undef HYDRA_SMB_SERIALS
+}
+
 static void guid_name(const GUID *id, char out[40]) {
     static const char digits[] = "0123456789ABCDEF";
     BYTE bytes[16];
@@ -440,7 +687,7 @@ static int is_host_a(const char *text, int chars) {
    not fit, the call fails the way the system's does, asking for the size it needs. */
 static BOOL swap_domain_w(LPWSTR domain, LPDWORD domain_size, DWORD capacity) {
     DWORD length = (DWORD)lstrlenW(id_computer_name);
-    if (!domain || !domain_size || !is_host_w(domain, (int)*domain_size)) return TRUE;
+    if (!id_computer_name[0] || !domain || !domain_size || !is_host_w(domain, (int)*domain_size)) return TRUE;
     if (capacity < length + 1) {
         *domain_size = length + 1;
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -453,7 +700,7 @@ static BOOL swap_domain_w(LPWSTR domain, LPDWORD domain_size, DWORD capacity) {
 
 static BOOL swap_domain_a(LPSTR domain, LPDWORD domain_size, DWORD capacity) {
     DWORD length = (DWORD)lstrlenW(id_computer_name), i;
-    if (!domain || !domain_size || !is_host_a(domain, (int)*domain_size)) return TRUE;
+    if (!id_computer_name[0] || !domain || !domain_size || !is_host_a(domain, (int)*domain_size)) return TRUE;
     if (capacity < length + 1) {
         *domain_size = length + 1;
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -470,8 +717,258 @@ static void grow_domain_size(LPDWORD domain_size) {
     if (domain_size && GetLastError() == ERROR_INSUFFICIENT_BUFFER && *domain_size < need) *domain_size = need;
 }
 
-/* --- detours: registry ------------------------------------------------------ */
+static void grow_name_size(LPDWORD name_size) {
+    DWORD need = (DWORD)lstrlenW(id_user_name) + 1;
+    if (name_size && GetLastError() == ERROR_INSUFFICIENT_BUFFER && id_user_name[0] && *name_size < need)
+        *name_size = need;
+}
 
+/* Case-insensitive (ASCII) equality of a counted narrow string with a terminated wide one. */
+static int same_text_a(const char *text, int chars, const WCHAR *other) {
+    int i;
+    for (i = 0; i < chars; i++) {
+        if (!other[i] || upper_w((WCHAR)(BYTE)text[i]) != upper_w(other[i])) return 0;
+    }
+    return other[chars] == 0;
+}
+
+/* After a successful lookup: the account's own name is swapped for the derived one. The size it
+   reports on success does not count the terminator, and a short buffer fails asking for one. */
+static BOOL swap_name_w(LPWSTR name, LPDWORD name_size, DWORD capacity) {
+    DWORD length;
+    if (!name || !name_size || !id_user_name[0] || !real_user[0]) return TRUE;
+    if (!same_text(name, (int)*name_size, real_user)) return TRUE;
+    length = (DWORD)lstrlenW(id_user_name);
+    if (capacity < length + 1) {
+        *name_size = length + 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(name, id_user_name, (length + 1) * sizeof(WCHAR));
+    *name_size = length;
+    return TRUE;
+}
+
+static BOOL swap_name_a(LPSTR name, LPDWORD name_size, DWORD capacity) {
+    DWORD length = (DWORD)lstrlenW(id_user_name), i;
+    if (!name || !name_size || !id_user_name[0] || !real_user[0]) return TRUE;
+    if (!same_text_a(name, (int)*name_size, real_user)) return TRUE;
+    if (capacity < length + 1) {
+        *name_size = length + 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    for (i = 0; i <= length; i++) name[i] = (CHAR)id_user_name[i];
+    *name_size = length;
+    return TRUE;
+}
+
+/* The same `LookupAccount*` contract, for a name this DLL answers itself. */
+static BOOL fill_text_w(const WCHAR *text, LPWSTR buffer, LPDWORD size, DWORD capacity) {
+    DWORD length = (DWORD)lstrlenW(text);
+    if (!size) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!buffer || capacity < length + 1) {
+        *size = length + 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(buffer, text, (length + 1) * sizeof(WCHAR));
+    *size = length;
+    return TRUE;
+}
+
+static BOOL fill_text_a(const WCHAR *text, LPSTR buffer, LPDWORD size, DWORD capacity) {
+    DWORD length = (DWORD)lstrlenW(text), i;
+    if (!size) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!buffer || capacity < length + 1) {
+        *size = length + 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    for (i = 0; i <= length; i++) buffer[i] = (CHAR)text[i];
+    *size = length;
+    return TRUE;
+}
+
+/* `GetUserName*` counts the terminator in the size it reports, unlike every `LookupAccount*`
+   call above, so its answer is filled by its own pair rather than through fill_text_*. */
+static BOOL fill_user_w(const WCHAR *text, LPWSTR buffer, LPDWORD size, DWORD capacity) {
+    DWORD length = (DWORD)lstrlenW(text);
+    if (!size) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!buffer || capacity < length + 1) {
+        *size = length + 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(buffer, text, (length + 1) * sizeof(WCHAR));
+    *size = length + 1;
+    return TRUE;
+}
+
+static BOOL fill_user_a(const WCHAR *text, LPSTR buffer, LPDWORD size, DWORD capacity) {
+    DWORD length = (DWORD)lstrlenW(text), i;
+    if (!size) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!buffer || capacity < length + 1) {
+        *size = length + 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    for (i = 0; i <= length; i++) buffer[i] = (CHAR)text[i];
+    *size = length + 1;
+    return TRUE;
+}
+
+/* The box claims one SID: the token's own, and the text Hydra derived, which is a real SID shape
+   and is answered as if it were the account's. Every other SID is the caller's business. */
+static int is_sid_named(const BYTE *sid, const BYTE *own, DWORD own_size) {
+    DWORD length;
+    if (!sid || !own_size || sid[0] != 1 || sid[1] > 15) return 0;
+    length = 8 + 4 * (DWORD)sid[1];
+    return length == own_size && memcmp(sid, own, length) == 0;
+}
+
+/* The derived SID has no account behind it, so the system cannot answer a lookup for it. */
+static int is_derived_sid(const BYTE *sid) { return is_sid_named(sid, derived_sid, derived_sid_size); }
+
+static int is_own_sid(const BYTE *sid) {
+    return is_sid_named(sid, real_sid, real_sid_size) || is_derived_sid(sid);
+}
+
+/* A name lookup answers with the SID of the account it resolved; the box hands back the one it
+   claims instead. Both are the same length, so a buffer the caller made large enough still is.
+   What the caller's buffer holds decides, not the capacity it offered: the system reports the
+   capacity back, so that number says nothing about the length of the SID inside. */
+static BOOL swap_sid(PSID sid, LPDWORD sid_size, DWORD capacity) {
+    if (!sid || !sid_size || !real_sid_size || !derived_sid_size) return TRUE;
+    if (!is_own_sid((const BYTE *)sid)) return TRUE;
+    if (capacity < derived_sid_size) {
+        *sid_size = derived_sid_size;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(sid, derived_sid, derived_sid_size);
+    return TRUE;
+}
+
+/* The derived SID has no account behind it, so the system cannot answer for it: this DLL does. */
+static BOOL answer_own_sid_w(LPWSTR name, LPDWORD name_size, LPWSTR domain, LPDWORD domain_size,
+                             PSID_NAME_USE use) {
+    DWORD name_capacity = name_size ? *name_size : 0, domain_capacity = domain_size ? *domain_size : 0;
+    if (!fill_text_w(id_user_name, name, name_size, name_capacity)) return FALSE;
+    if (!fill_text_w(id_computer_name[0] ? id_computer_name : host_name, domain, domain_size, domain_capacity))
+        return FALSE;
+    if (use) *use = SidTypeUser;
+    return TRUE;
+}
+
+static BOOL answer_own_sid_a(LPSTR name, LPDWORD name_size, LPSTR domain, LPDWORD domain_size,
+                             PSID_NAME_USE use) {
+    DWORD name_capacity = name_size ? *name_size : 0, domain_capacity = domain_size ? *domain_size : 0;
+    if (!fill_text_a(id_user_name, name, name_size, name_capacity)) return FALSE;
+    if (!fill_text_a(id_computer_name[0] ? id_computer_name : host_name, domain, domain_size, domain_capacity))
+        return FALSE;
+    if (use) *use = SidTypeUser;
+    return TRUE;
+}
+
+/* The name a lookup is for, with any domain in front removed: a local account is accepted with
+   the computer name in front of it, and the box accepts any domain for its own name. */
+static LPCWSTR bare_name_w(LPCWSTR account) {
+    LPCWSTR name;
+    if (!account) return NULL;
+    for (name = account; *name && *name != L'\\'; name++) {
+    }
+    return *name ? name + 1 : account;
+}
+
+static LPCSTR bare_name_a(LPCSTR account) {
+    LPCSTR name;
+    if (!account) return NULL;
+    for (name = account; *name && *name != '\\'; name++) {
+    }
+    return *name ? name + 1 : account;
+}
+
+static int name_is_derived_w(LPCWSTR account) {
+    LPCWSTR name = bare_name_w(account);
+    return name && id_user_name[0] && same_text(name, (int)lstrlenW(name), id_user_name);
+}
+
+static int name_is_derived_a(LPCSTR account) {
+    LPCSTR name = bare_name_a(account);
+    int chars;
+    if (!name || !id_user_name[0]) return 0;
+    for (chars = 0; name[chars]; chars++) {
+    }
+    return same_text_a(name, chars, id_user_name);
+}
+
+/* The derived name has no account behind it either, so the system would answer that it cannot be
+   mapped. The box answers with the SID it claims, under the system's contract: the size on
+   success is the one the caller offered, and a short buffer asks for the size it needs. */
+static BOOL answer_sid_w(PSID sid, LPDWORD sid_size, LPWSTR domain, LPDWORD domain_size, PSID_NAME_USE use) {
+    DWORD capacity = sid_size ? *sid_size : 0, domain_capacity = domain_size ? *domain_size : 0;
+    if (!sid_size) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!sid || capacity < derived_sid_size) {
+        *sid_size = derived_sid_size;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(sid, derived_sid, derived_sid_size);
+    if (!fill_text_w(id_computer_name[0] ? id_computer_name : host_name, domain, domain_size, domain_capacity))
+        return FALSE;
+    if (use) *use = SidTypeUser;
+    return TRUE;
+}
+
+static BOOL answer_sid_a(PSID sid, LPDWORD sid_size, LPSTR domain, LPDWORD domain_size, PSID_NAME_USE use) {
+    DWORD capacity = sid_size ? *sid_size : 0, domain_capacity = domain_size ? *domain_size : 0;
+    if (!sid_size) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!sid || capacity < derived_sid_size) {
+        *sid_size = derived_sid_size;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(sid, derived_sid, derived_sid_size);
+    if (!fill_text_a(id_computer_name[0] ? id_computer_name : host_name, domain, domain_size, domain_capacity))
+        return FALSE;
+    if (use) *use = SidTypeUser;
+    return TRUE;
+}
+
+/* userenv names the account in order to open its profile directory, and the profile behind the
+   host's account is the one that exists. Answering that one question with the derived account
+   points it at a directory that is not there, and `GetUserProfileDirectoryW` then fails with the
+   size still zero - which is what Node's `os.userInfo()` reports as out of memory. The system
+   component therefore gets the host's own answer, and only its own calls: everything else still
+   sees the box's account. */
+static int from_userenv(void *caller) {
+    static HMODULE userenv;
+    void *base = NULL;
+    if (!userenv) userenv = GetModuleHandleW(L"userenv.dll");
+    if (!userenv || !sys_RtlPcToFileHeader || !caller) return 0;
+    return sys_RtlPcToFileHeader(caller, &base) && base == (void *)userenv;
+}
+
+/* --- detours: registry ------------------------------------------------------ */
 static NTSTATUS NTAPI my_NtQueryValueKey(HANDLE key, PUNICODE_STRING name, ULONG info_class, PVOID info,
                                          ULONG length, PULONG result) {
     const WCHAR *value = NULL, *text;
@@ -600,6 +1097,41 @@ static DWORD WINAPI my_GetIfEntry2Ex(MIB_IF_ENTRY_LEVEL level, PMIB_IF_ROW2 row)
     return result;
 }
 
+/* --- detours: firmware and disks ------------------------------------------- */
+
+/* The SMBIOS table is where the board, BIOS and system serial numbers and the product UUID come
+   from, and it is a buffer this process owns: rewriting it covers `GetSystemFirmwareTable` as well
+   as the tools built on it, while WMI itself stays closed. The size probe asks with no buffer and
+   is left alone. */
+static UINT WINAPI my_GetSystemFirmwareTable(DWORD provider, DWORD id, PVOID buffer, DWORD size) {
+    UINT result = REAL(sys_GetSystemFirmwareTable)(provider, id, buffer, size);
+    if (buffer && provider == 'RSMB' && result > 8 && result <= size) rewrite_smbios((BYTE *)buffer, result);
+    return result;
+}
+
+/* A disk's serial comes back inside the caller's storage descriptor as a NUL-terminated string at
+   an offset the descriptor carries. Rewriting it at the same length keeps every offset valid.
+   Overlapped calls have no result in the buffer yet, so they are left alone. */
+static BOOL WINAPI my_DeviceIoControl(HANDLE device, DWORD code, LPVOID in, DWORD in_size, LPVOID out, DWORD out_size,
+                                      LPDWORD returned, LPOVERLAPPED overlapped) {
+    BOOL ok = REAL(sys_DeviceIoControl)(device, code, in, in_size, out, out_size, returned, overlapped);
+    STORAGE_PROPERTY_QUERY *query = (STORAGE_PROPERTY_QUERY *)in;
+    STORAGE_DEVICE_DESCRIPTOR *descriptor = (STORAGE_DEVICE_DESCRIPTOR *)out;
+    DWORD offset, limit, chars;
+    char *serial;
+    if (!ok || overlapped || code != IOCTL_STORAGE_QUERY_PROPERTY || !in || !out || !returned) return ok;
+    if (in_size < sizeof(STORAGE_PROPERTY_QUERY) || query->PropertyId != StorageDeviceProperty) return ok;
+    if (*returned < sizeof(STORAGE_DEVICE_DESCRIPTOR)) return ok;
+    offset = descriptor->SerialNumberOffset;
+    if (!offset || offset >= *returned) return ok;
+    serial = (char *)out + offset;
+    limit = *returned - offset;
+    for (chars = 0; chars < limit && serial[chars]; chars++) {
+    }
+    if (chars) rewrite_serial(serial, (int)chars, 'D');
+    return ok;
+}
+
 /* --- detours: computer name ------------------------------------------------- */
 
 /* Every COMPUTER_NAME_FORMAT is answered with the same name: they all describe one machine. */
@@ -626,101 +1158,300 @@ static BOOL WINAPI my_GetComputerNameA(LPSTR buffer, LPDWORD size) {
 /* --- detours: account domain ------------------------------------------------ */
 
 /* A local account's domain is the computer name: `whoami` prints `HOST\user`, and .NET's
-   UserDomainName reads it the same way. */
+   UserDomainName reads it the same way. A SID gives back the name too, and that is the derived
+   name: the box claims one account, whichever text is handed in. */
 static BOOL WINAPI my_LookupAccountSidW(LPCWSTR system, PSID sid, LPWSTR name, LPDWORD name_size, LPWSTR domain,
                                        LPDWORD domain_size, PSID_NAME_USE use) {
-    DWORD capacity = domain_size ? *domain_size : 0;
-    BOOL ok = REAL(sys_LookupAccountSidW)(system, sid, name, name_size, domain, domain_size, use);
-    if (!id_computer_name[0]) return ok;
+    DWORD domain_capacity = domain_size ? *domain_size : 0, name_capacity = name_size ? *name_size : 0;
+    BOOL ok;
+    /* The derived SID has no account behind it, so the system cannot answer; this DLL does. */
+    if (id_user_name[0] && (!system || !system[0]) && is_derived_sid((const BYTE *)sid))
+        return answer_own_sid_w(name, name_size, domain, domain_size, use);
+    ok = REAL(sys_LookupAccountSidW)(system, sid, name, name_size, domain, domain_size, use);
     if (!ok) {
         grow_domain_size(domain_size);
         return ok;
     }
-    return swap_domain_w(domain, domain_size, capacity);
+    if (!swap_name_w(name, name_size, name_capacity)) return FALSE;
+    return swap_domain_w(domain, domain_size, domain_capacity);
 }
 
 static BOOL WINAPI my_LookupAccountSidA(LPCSTR system, PSID sid, LPSTR name, LPDWORD name_size, LPSTR domain,
                                        LPDWORD domain_size, PSID_NAME_USE use) {
-    DWORD capacity = domain_size ? *domain_size : 0;
-    BOOL ok = REAL(sys_LookupAccountSidA)(system, sid, name, name_size, domain, domain_size, use);
-    if (!id_computer_name[0]) return ok;
+    DWORD domain_capacity = domain_size ? *domain_size : 0, name_capacity = name_size ? *name_size : 0;
+    BOOL ok;
+    if (id_user_name[0] && (!system || !system[0]) && is_derived_sid((const BYTE *)sid))
+        return answer_own_sid_a(name, name_size, domain, domain_size, use);
+    ok = REAL(sys_LookupAccountSidA)(system, sid, name, name_size, domain, domain_size, use);
     if (!ok) {
         grow_domain_size(domain_size);
         return ok;
     }
-    return swap_domain_a(domain, domain_size, capacity);
+    if (!swap_name_a(name, name_size, name_capacity)) return FALSE;
+    return swap_domain_a(domain, domain_size, domain_capacity);
 }
 
+/* A name lookup still has to reach the real account: the derived name is turned into the real
+   one, the system resolves it, and the SID it answers with becomes the derived one. */
 static BOOL WINAPI my_LookupAccountNameW(LPCWSTR system, LPCWSTR account, PSID sid, LPDWORD sid_size, LPWSTR domain,
                                         LPDWORD domain_size, PSID_NAME_USE use) {
-    DWORD capacity = domain_size ? *domain_size : 0;
-    BOOL ok = REAL(sys_LookupAccountNameW)(system, account, sid, sid_size, domain, domain_size, use);
-    if (!id_computer_name[0]) return ok;
+    DWORD domain_capacity = domain_size ? *domain_size : 0, sid_capacity = sid_size ? *sid_size : 0;
+    BOOL ok;
+    if (derived_sid_size && (!system || !system[0]) && name_is_derived_w(account))
+        return answer_sid_w(sid, sid_size, domain, domain_size, use);
+    ok = REAL(sys_LookupAccountNameW)(system, account, sid, sid_size, domain, domain_size, use);
     if (!ok) {
         grow_domain_size(domain_size);
         return ok;
     }
-    return swap_domain_w(domain, domain_size, capacity);
+    if (!swap_sid(sid, sid_size, sid_capacity)) return FALSE;
+    return swap_domain_w(domain, domain_size, domain_capacity);
 }
 
 static BOOL WINAPI my_LookupAccountNameA(LPCSTR system, LPCSTR account, PSID sid, LPDWORD sid_size, LPSTR domain,
                                         LPDWORD domain_size, PSID_NAME_USE use) {
-    DWORD capacity = domain_size ? *domain_size : 0;
-    BOOL ok = REAL(sys_LookupAccountNameA)(system, account, sid, sid_size, domain, domain_size, use);
-    if (!id_computer_name[0]) return ok;
+    DWORD domain_capacity = domain_size ? *domain_size : 0, sid_capacity = sid_size ? *sid_size : 0;
+    BOOL ok;
+    if (derived_sid_size && (!system || !system[0]) && name_is_derived_a(account))
+        return answer_sid_a(sid, sid_size, domain, domain_size, use);
+    ok = REAL(sys_LookupAccountNameA)(system, account, sid, sid_size, domain, domain_size, use);
     if (!ok) {
         grow_domain_size(domain_size);
         return ok;
     }
-    return swap_domain_a(domain, domain_size, capacity);
+    if (!swap_sid(sid, sid_size, sid_capacity)) return FALSE;
+    return swap_domain_a(domain, domain_size, domain_capacity);
+}
+
+/* `LookupAccountSidLocal` and `LookupAccountNameLocal` are the same lookups without the system
+   parameter, exported only by sechost. .NET's account APIs go through them, and a hook on
+   advapi32 alone would leave every one of them reporting the host. They call their own
+   implementation, not advapi32's, so they need their own detours and their own trampolines. */
+static BOOL WINAPI my_LookupAccountSidLocalW(PSID sid, LPWSTR name, LPDWORD name_size, LPWSTR domain,
+                                             LPDWORD domain_size, PSID_NAME_USE use) {
+    DWORD domain_capacity = domain_size ? *domain_size : 0, name_capacity = name_size ? *name_size : 0;
+    BOOL ok;
+    if (id_user_name[0] && is_derived_sid((const BYTE *)sid))
+        return answer_own_sid_w(name, name_size, domain, domain_size, use);
+    ok = sys_LookupAccountSidLocalW(sid, name, name_size, domain, domain_size, use);
+    if (!ok) {
+        grow_domain_size(domain_size);
+        return ok;
+    }
+    if (!swap_name_w(name, name_size, name_capacity)) return FALSE;
+    return swap_domain_w(domain, domain_size, domain_capacity);
+}
+
+static BOOL WINAPI my_LookupAccountSidLocalA(PSID sid, LPSTR name, LPDWORD name_size, LPSTR domain,
+                                             LPDWORD domain_size, PSID_NAME_USE use) {
+    DWORD domain_capacity = domain_size ? *domain_size : 0, name_capacity = name_size ? *name_size : 0;
+    BOOL ok;
+    if (id_user_name[0] && is_derived_sid((const BYTE *)sid))
+        return answer_own_sid_a(name, name_size, domain, domain_size, use);
+    ok = sys_LookupAccountSidLocalA(sid, name, name_size, domain, domain_size, use);
+    if (!ok) {
+        grow_domain_size(domain_size);
+        return ok;
+    }
+    if (!swap_name_a(name, name_size, name_capacity)) return FALSE;
+    return swap_domain_a(domain, domain_size, domain_capacity);
+}
+
+static BOOL WINAPI my_LookupAccountNameLocalW(LPCWSTR account, PSID sid, LPDWORD sid_size, LPWSTR domain,
+                                              LPDWORD domain_size, PSID_NAME_USE use) {
+    DWORD domain_capacity = domain_size ? *domain_size : 0, sid_capacity = sid_size ? *sid_size : 0;
+    BOOL ok;
+    if (derived_sid_size && name_is_derived_w(account)) return answer_sid_w(sid, sid_size, domain, domain_size, use);
+    ok = sys_LookupAccountNameLocalW(account, sid, sid_size, domain, domain_size, use);
+    if (!ok) {
+        grow_domain_size(domain_size);
+        return ok;
+    }
+    if (!swap_sid(sid, sid_size, sid_capacity)) return FALSE;
+    return swap_domain_w(domain, domain_size, domain_capacity);
+}
+
+static BOOL WINAPI my_LookupAccountNameLocalA(LPCSTR account, PSID sid, LPDWORD sid_size, LPSTR domain,
+                                              LPDWORD domain_size, PSID_NAME_USE use) {
+    DWORD domain_capacity = domain_size ? *domain_size : 0, sid_capacity = sid_size ? *sid_size : 0;
+    BOOL ok;
+    if (derived_sid_size && name_is_derived_a(account)) return answer_sid_a(sid, sid_size, domain, domain_size, use);
+    ok = sys_LookupAccountNameLocalA(account, sid, sid_size, domain, domain_size, use);
+    if (!ok) {
+        grow_domain_size(domain_size);
+        return ok;
+    }
+    if (!swap_sid(sid, sid_size, sid_capacity)) return FALSE;
+    return swap_domain_a(domain, domain_size, domain_capacity);
 }
 
 /* NameSamCompatible is `HOST\user` for a local account; the other formats do not carry the
-   computer name. */
+   computer name. Both halves are the box's, so the answer is rebuilt from the two values. */
 static BOOLEAN WINAPI my_GetUserNameExW(int format, LPWSTR buffer, PULONG size) {
-    ULONG capacity = size ? *size : 0, host_length = (ULONG)lstrlenW(host_name), length, rest;
-    BOOLEAN ok = REAL(sys_GetUserNameExW)(format, buffer, size);
-    length = (ULONG)lstrlenW(id_computer_name);
+    void *caller = _ReturnAddress();
+    ULONG capacity = size ? *size : 0, host_length = (ULONG)lstrlenW(host_name), length, name_length, rest, total;
+    BOOLEAN ok;
+    if (from_userenv(caller)) return REAL(sys_GetUserNameExW)(format, buffer, size);
+    ok = REAL(sys_GetUserNameExW)(format, buffer, size);
     if (format != 2 || !id_computer_name[0] || !size) return ok;
+    length = (ULONG)lstrlenW(id_computer_name);
+    name_length = (ULONG)lstrlenW(id_user_name);
     if (!ok) {
-        if (GetLastError() == ERROR_MORE_DATA && length > host_length) *size += length - host_length;
+        if (GetLastError() == ERROR_MORE_DATA) {
+            if (id_user_name[0] && real_user[0]) {
+                total = length + 1 + name_length + 1; /* `HOST\user` and its terminator */
+                if (*size < total) *size = total;
+            } else if (length > host_length) {
+                *size += length - host_length;
+            }
+        }
         return ok;
     }
     if (!buffer || *size <= host_length || buffer[host_length] != L'\\' || !is_host_w(buffer, (int)host_length))
         return ok;
     rest = *size - host_length; /* `\user`, without the terminator */
-    if (capacity < length + rest + 1) {
-        *size = length + rest + 1;
+    if (!id_user_name[0] || !real_user[0]) {
+        /* Only the computer name is claimed: move the host and keep the account the system named. */
+        if (capacity < length + rest + 1) {
+            *size = length + rest + 1;
+            SetLastError(ERROR_MORE_DATA);
+            return FALSE;
+        }
+        memmove(buffer + length, buffer + host_length, (rest + 1) * sizeof(WCHAR));
+        memcpy(buffer, id_computer_name, length * sizeof(WCHAR));
+        *size = length + rest;
+        return ok;
+    }
+    /* The account's half is the real user for a local account; if it is not, this is not the
+       account the box claims, and the system's answer stands. */
+    if (!same_text(buffer + host_length + 1, (int)(rest - 1), real_user)) return ok;
+    total = length + 1 + name_length;
+    if (capacity < total + 1) {
+        *size = total + 1;
         SetLastError(ERROR_MORE_DATA);
         return FALSE;
     }
-    memmove(buffer + length, buffer + host_length, (rest + 1) * sizeof(WCHAR));
+    memcpy(buffer + length + 1, id_user_name, (name_length + 1) * sizeof(WCHAR));
     memcpy(buffer, id_computer_name, length * sizeof(WCHAR));
-    *size = length + rest;
+    buffer[length] = L'\\';
+    *size = total;
     return ok;
 }
 
 static BOOLEAN WINAPI my_GetUserNameExA(int format, LPSTR buffer, PULONG size) {
-    ULONG capacity = size ? *size : 0, host_length = (ULONG)lstrlenW(host_name), length, rest, i;
-    BOOLEAN ok = REAL(sys_GetUserNameExA)(format, buffer, size);
-    length = (ULONG)lstrlenW(id_computer_name);
+    void *caller = _ReturnAddress();
+    ULONG capacity = size ? *size : 0, host_length = (ULONG)lstrlenW(host_name), length, name_length, rest, total, i;
+    BOOLEAN ok;
+    if (from_userenv(caller)) return REAL(sys_GetUserNameExA)(format, buffer, size);
+    ok = REAL(sys_GetUserNameExA)(format, buffer, size);
     if (format != 2 || !id_computer_name[0] || !size) return ok;
+    length = (ULONG)lstrlenW(id_computer_name);
+    name_length = (ULONG)lstrlenW(id_user_name);
     if (!ok) {
-        if (GetLastError() == ERROR_MORE_DATA && length > host_length) *size += length - host_length;
+        if (GetLastError() == ERROR_MORE_DATA) {
+            if (id_user_name[0] && real_user[0]) {
+                total = length + 1 + name_length + 1;
+                if (*size < total) *size = total;
+            } else if (length > host_length) {
+                *size += length - host_length;
+            }
+        }
         return ok;
     }
     if (!buffer || *size <= host_length || buffer[host_length] != '\\' || !is_host_a(buffer, (int)host_length))
         return ok;
     rest = *size - host_length;
-    if (capacity < length + rest + 1) {
-        *size = length + rest + 1;
+    if (!id_user_name[0] || !real_user[0]) {
+        if (capacity < length + rest + 1) {
+            *size = length + rest + 1;
+            SetLastError(ERROR_MORE_DATA);
+            return FALSE;
+        }
+        memmove(buffer + length, buffer + host_length, rest + 1);
+        for (i = 0; i < length; i++) buffer[i] = (CHAR)id_computer_name[i];
+        *size = length + rest;
+        return ok;
+    }
+    if (!same_text_a(buffer + host_length + 1, (int)(rest - 1), real_user)) return ok;
+    total = length + 1 + name_length;
+    if (capacity < total + 1) {
+        *size = total + 1;
         SetLastError(ERROR_MORE_DATA);
         return FALSE;
     }
-    memmove(buffer + length, buffer + host_length, rest + 1);
+    for (i = 0; i <= name_length; i++) buffer[length + 1 + i] = (CHAR)id_user_name[i];
     for (i = 0; i < length; i++) buffer[i] = (CHAR)id_computer_name[i];
-    *size = length + rest;
+    buffer[length] = '\\';
+    *size = total;
     return ok;
+}
+
+/* `GetUserName` names the account the process runs as, in that call's own terms: a bare name and
+   a size that counts its terminator. A thread impersonating someone else is not the box's
+   account, so only the real user's own name is answered with the derived one. */
+static BOOL WINAPI my_GetUserNameW(LPWSTR name, LPDWORD size) {
+    DWORD capacity = size ? *size : 0;
+    BOOL ok = REAL(sys_GetUserNameW)(name, size);
+    if (!id_user_name[0]) return ok;
+    if (!ok) {
+        grow_name_size(size);
+        return ok;
+    }
+    if (!name || !size || !real_user[0] || !same_text(name, (int)lstrlenW(name), real_user)) return ok;
+    return fill_user_w(id_user_name, name, size, capacity);
+}
+
+static BOOL WINAPI my_GetUserNameA(LPSTR name, LPDWORD size) {
+    DWORD capacity = size ? *size : 0;
+    BOOL ok = REAL(sys_GetUserNameA)(name, size);
+    if (!id_user_name[0]) return ok;
+    if (!ok) {
+        grow_name_size(size);
+        return ok;
+    }
+    if (!name || !size || !real_user[0] || !same_text_a(name, (int)lstrlenA(name), real_user)) return ok;
+    return fill_user_a(id_user_name, name, size, capacity);
+}
+
+/* The system formats any valid SID into a LocalAlloc'd string the caller frees. The box's own SID
+   must read back as the derived text, so that string is replaced by one allocated the same way;
+   the derived SID already formats as its own text, so it is left alone. */
+static BOOL WINAPI my_ConvertSidToStringSidW(PSID sid, LPWSTR *text) {
+    void *caller = _ReturnAddress();
+    BOOL ok;
+    DWORD length, i;
+    LPWSTR copy;
+    if (from_userenv(caller)) return REAL(sys_ConvertSidToStringSidW)(sid, text);
+    ok = REAL(sys_ConvertSidToStringSidW)(sid, text);
+    if (!ok || !text || !*text || !id_user_sid[0] || !is_own_sid((const BYTE *)sid) ||
+        is_derived_sid((const BYTE *)sid))
+        return ok;
+    length = (DWORD)lstrlenW(id_user_sid);
+    copy = (LPWSTR)LocalAlloc(LMEM_FIXED, (length + 1) * sizeof(WCHAR));
+    if (!copy) return ok;
+    for (i = 0; i <= length; i++) copy[i] = id_user_sid[i];
+    LocalFree(*text);
+    *text = copy;
+    return TRUE;
+}
+
+static BOOL WINAPI my_ConvertSidToStringSidA(PSID sid, LPSTR *text) {
+    void *caller = _ReturnAddress();
+    BOOL ok;
+    DWORD length, i;
+    LPSTR copy;
+    if (from_userenv(caller)) return REAL(sys_ConvertSidToStringSidA)(sid, text);
+    ok = REAL(sys_ConvertSidToStringSidA)(sid, text);
+    if (!ok || !text || !*text || !id_user_sid[0] || !is_own_sid((const BYTE *)sid) ||
+        is_derived_sid((const BYTE *)sid))
+        return ok;
+    length = (DWORD)lstrlenW(id_user_sid);
+    copy = (LPSTR)LocalAlloc(LMEM_FIXED, length + 1);
+    if (!copy) return ok;
+    for (i = 0; i <= length; i++) copy[i] = (CHAR)id_user_sid[i];
+    LocalFree(*text);
+    *text = copy;
+    return TRUE;
 }
 
 /* --- entry ----------------------------------------------------------------- */
@@ -730,8 +1461,12 @@ static BOOLEAN WINAPI my_GetUserNameExA(int format, LPSTR buffer, PULONG size) {
     hook_pair(sbie_hook, first, second, self, #name, (void *)my_##name, (void **)&sys_##name.a,                \
               (void **)&sys_##name.b)
 
-/* Called by Sandboxie after loading this DLL, with SbieDll's module handle. */
+/* Called by Sandboxie after loading this DLL, with SbieDll's module handle. Sandboxie can call it
+   again for the same process; the second pass would read the box's own answers through the hooks
+   the first pass installed and take them for the host's, and would stack a second set of hooks on
+   the first. The first pass is the only one that can see the host. */
 __declspec(dllexport) void __stdcall InjectDllMain(HINSTANCE sbie, ULONG_PTR unused) {
+    static LONG injected;
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
     /* advapi32 and kernel32 mostly forward to kernelbase / sechost, and a program whose import
@@ -746,8 +1481,12 @@ __declspec(dllexport) void __stdcall InjectDllMain(HINSTANCE sbie, ULONG_PTR unu
     DWORD host_size = (DWORD)(sizeof(host_name) / sizeof(host_name[0]));
     P_SbieDll_Hook sbie_hook = (P_SbieDll_Hook)(void *)GetProcAddress((HMODULE)sbie, "SbieDll_Hook");
     (void)unused;
+    if (InterlockedCompareExchange(&injected, 1, 0) != 0) return;
     if (!sbie_hook || !ntdll || !kernel32) return;
     if (!load_identity((HMODULE)sbie)) return;
+    /* The account this box really runs as, read before any account hook exists: what the derived
+       name has to be turned into for a lookup, and which SID is the box's own. */
+    load_account(advapi32);
     /* The host's name, read before GetComputerNameW is hooked. */
     if (!GetComputerNameW(host_name, &host_size)) host_name[0] = 0;
     secur32 = LoadLibraryW(L"secur32.dll");
@@ -758,6 +1497,8 @@ __declspec(dllexport) void __stdcall InjectDllMain(HINSTANCE sbie, ULONG_PTR unu
 
     /* Not hooked, only called: the key name lookup behind the registry detours. */
     sys_NtQueryKey = (P_NtQueryKey)(void *)GetProcAddress(ntdll, "NtQueryKey");
+    /* Not hooked, only called: which module a detour's caller belongs to. */
+    sys_RtlPcToFileHeader = (P_RtlPcToFileHeader)(void *)GetProcAddress(ntdll, "RtlPcToFileHeader");
     HOOK(ntdll, NtQueryValueKey);
     HOOK(ntdll, NtEnumerateValueKey);
     if (have_volume_serial) {
@@ -774,17 +1515,34 @@ __declspec(dllexport) void __stdcall InjectDllMain(HINSTANCE sbie, ULONG_PTR unu
         HOOK(iphlpapi, GetIfEntry2);
         HOOK(iphlpapi, GetIfEntry2Ex);
     }
+    /* The in-process sources of the board, BIOS and disk serials and the product UUID. WMI is
+       closed off in the box, so these are what is left of them. */
+    HOOK_PAIR(kernel32, kernelbase, GetSystemFirmwareTable);
+    HOOK_PAIR(kernel32, kernelbase, DeviceIoControl);
     if (id_computer_name[0]) {
         HOOK_PAIR(kernel32, kernelbase, GetComputerNameExW);
         HOOK_PAIR(kernel32, kernelbase, GetComputerNameExA);
         HOOK_PAIR(kernel32, kernelbase, GetComputerNameW);
         HOOK_PAIR(kernel32, kernelbase, GetComputerNameA);
+    }
+    if (id_computer_name[0] || have_account()) {
+        /* The account: the name it goes by, the text of its SID, and the lookups between the two.
+           `whoami` reads all three, and so does anything comparing an account with a SID it read
+           from somewhere else. */
         HOOK_PAIR(advapi32, sechost, LookupAccountSidW);
         HOOK_PAIR(advapi32, sechost, LookupAccountSidA);
         HOOK_PAIR(advapi32, sechost, LookupAccountNameW);
         HOOK_PAIR(advapi32, sechost, LookupAccountNameA);
+        HOOK(sechost, LookupAccountSidLocalW);
+        HOOK(sechost, LookupAccountSidLocalA);
+        HOOK(sechost, LookupAccountNameLocalW);
+        HOOK(sechost, LookupAccountNameLocalA);
         HOOK_PAIR(secur32, sspicli, GetUserNameExW);
         HOOK_PAIR(secur32, sspicli, GetUserNameExA);
+        HOOK_PAIR(advapi32, sechost, GetUserNameW);
+        HOOK_PAIR(advapi32, sechost, GetUserNameA);
+        HOOK_PAIR(advapi32, sechost, ConvertSidToStringSidW);
+        HOOK_PAIR(advapi32, sechost, ConvertSidToStringSidA);
     }
 }
 
