@@ -382,6 +382,7 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, code_dir: Op
     {
         let root = box_file_root(&dir, &name)?;
         sync_box_proxy(&dir, &name, relay_port.filter(|_| crate::sys::claude_egress_policy().is_some()))?;
+        sync_box_proxy_values(&dir, &name, relay_port, true)?;
         sync_box_gitconfig(&root, relay_port)?;
         recover_claude_code_data(&root, &code);
         let legacy = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|s| !s.is_empty())
@@ -546,11 +547,17 @@ fn recover_claude_code_data(root: &Path, paths: &[PathBuf]) {
 /// restores Sandboxie's merged view of the current host policy.
 #[cfg(windows)]
 fn sync_box_proxy(dir: &Path, name: &str, port: Option<u16>) -> Result<(), String> {
+    sync_box_proxy_values(dir, name, port, false)
+}
+
+#[cfg(windows)]
+fn sync_box_proxy_values(dir: &Path, name: &str, port: Option<u16>, environment: bool) -> Result<(), String> {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
     use windows_sys::Win32::System::Registry::*;
     let folder = crate::paths::storage_root().join("sandbox");
-    let marker = folder.join(format!("{name}.proxy"));
+    let suffix = if environment { "proxy-env" } else { "proxy" };
+    let marker = folder.join(format!("{name}.{suffix}"));
     if port.is_none() && !marker.try_exists().map_err(|e| e.to_string())? { return Ok(()); }
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<_>>();
     let (status, _, path) = query_box_path(dir, name)?;
@@ -575,11 +582,21 @@ fn sync_box_proxy(dir: &Path, name: &str, port: Option<u16>) -> Result<(), Strin
         if port.is_some() {
             std::fs::create_dir_all(&folder).and_then(|_| std::fs::write(&marker, [])).map_err(|e| e.to_string())?;
         }
-        for branch in [r"machine", r"user\current"] {
-            let key = wide(&format!(r"{branch}\Software\Policies\Claude"));
-            let value = wide("egressProxyUrl");
-            let rc = if let Some(port) = port {
-                let url = wide(&format!("http://127.0.0.1:{port}"));
+        // Start.exe rebuilds the child's environment from the box's registry. An empty
+        // HKCU proxy value can supersede even an explicit /env:HTTPS_PROXY argument.
+        let values = if environment {
+            crate::node::child_env(port.unwrap_or_default()).into_iter()
+                .filter(|(name, _)| name == &name.to_ascii_uppercase())
+                .map(|(name, value)| (r"user\current\Environment", name, value)).collect::<Vec<_>>()
+        } else {
+            [r"machine\Software\Policies\Claude", r"user\current\Software\Policies\Claude"].into_iter()
+                .map(|key| (key, "egressProxyUrl".into(), format!("http://127.0.0.1:{}", port.unwrap_or_default()))).collect()
+        };
+        for (key, value, data) in values {
+            let key = wide(key);
+            let value = wide(&value);
+            let rc = if port.is_some() {
+                let url = wide(&data);
                 unsafe { RegSetKeyValueW(root, key.as_ptr(), value.as_ptr(), REG_SZ, url.as_ptr().cast(), (url.len() * 2) as u32) }
             } else {
                 unsafe { RegDeleteKeyValueW(root, key.as_ptr(), value.as_ptr()) }
@@ -652,8 +669,18 @@ mod tests {
         let name = super::configure(id, &data.to_string_lossy(), None, None).unwrap();
         let key = r"Software\Policies\Claude";
         let host = [true, false].map(|machine| crate::sys::reg_string(machine, key, "egressProxyUrl"));
+        let host_https = crate::sys::reg_string(false, "Environment", "HTTPS_PROXY");
         for port in [Some(34567), Some(34568), None] {
             super::sync_box_proxy(&dir, &name, port).unwrap();
+            super::sync_box_proxy_values(&dir, &name, port, true).unwrap();
+            if let Some(port) = port {
+                let script = data.join("check-env.cmd");
+                std::fs::write(&script, format!("@echo off\r\nif not \"%HTTPS_PROXY%\"==\"http://127.0.0.1:{port}\" exit /b 1\r\nexit /b 0\r\n")).unwrap();
+                assert!(std::process::Command::new(dir.join("Start.exe"))
+                    .args([&format!("/box:{name}"), "/silent", "/wait", "cmd.exe", "/d", "/c"])
+                    .arg(script).status().unwrap().success());
+            }
+            assert_eq!(crate::sys::reg_string(false, "Environment", "HTTPS_PROXY"), host_https);
             for (i, hive) in ["HKLM", "HKCU"].iter().enumerate() {
                 let output = data.join("policy.txt");
                 let script = data.join("query.cmd");
