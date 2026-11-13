@@ -95,6 +95,10 @@ export interface AppInfo {
   requireEnvironment: boolean;
   /** Quota is re-read in the background for the trend. */
   quotaSampling: boolean;
+  /** Chosen app icon id. */
+  appIcon: string;
+  /** Selectable icons: id, display name. */
+  appIcons: [string, string][];
 }
 
 /** A usage window as the service names it: "five_hour", "seven_day", "seven_day_opus", … */
@@ -232,6 +236,7 @@ export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   setRequireEnvironment: (enabled: boolean) => invoke<void>("set_require_environment", { enabled }),
+  setAppIcon: (id: string) => invoke<void>("set_app_icon", { id }),
   setClaudePath: (path: string | null) => invoke<void>("set_claude_path", { path }),
   quit: () => invoke<void>("quit_app"),
 };

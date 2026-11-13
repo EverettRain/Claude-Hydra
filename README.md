@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="app/src/assets/claude-hydra-icon-256.png" alt="Claude-Hydra" width="140">
+<img src="app/src/assets/app-icons/maid-sky.png" alt="Claude-Hydra" width="140">
 
 # Claude-Hydra
 

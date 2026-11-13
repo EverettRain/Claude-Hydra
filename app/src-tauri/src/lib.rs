@@ -1,5 +1,6 @@
 //! Claude-Hydra application entry, system tray management, and Tauri IPC commands.
 
+mod app_icon;
 pub mod browser;
 pub mod cli;
 pub mod code_usage;
@@ -557,6 +558,8 @@ struct AppInfo {
     /// Extra accounts refuse to start without a proxy environment.
     require_environment: bool,
     quota_sampling: bool,
+    app_icon: String,
+    app_icons: Vec<(String, String)>,
 }
 
 #[tauri::command]
@@ -577,9 +580,15 @@ fn app_info(app: AppHandle) -> AppInfo {
         autostart: sys::autostart_enabled(),
         require_environment: s.requires_environment(),
         quota_sampling: !s.quota_sampling_off,
+        app_icon: app_icon::current(),
+        app_icons: app_icon::choices(),
     }
 }
 
+#[tauri::command]
+fn set_app_icon(app: AppHandle, id: String) -> Result<(), String> {
+    app_icon::set(&app, &id)
+}
 
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<(), String> {
@@ -638,6 +647,7 @@ fn show_main(app: &AppHandle) {
         // Vertically centre the traffic lights on the 48px sidebar header row.
         .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0));
     if let Ok(w) = builder.build() {
+        app_icon::apply_window(&w);
         fit_to_screen(&w);
         let app = app.clone();
         std::thread::spawn(move || {
@@ -825,6 +835,7 @@ pub fn run(start_in_tray: bool) {
             save_transcript,
             reveal_transcript,
             app_info,
+            set_app_icon,
             set_autostart,
             set_require_environment,
             set_claude_path,
@@ -876,6 +887,8 @@ pub fn run(start_in_tray: bool) {
                 tray = tray.icon(icon);
             }
             tray.build(app)?;
+            let icon = app_icon::current();
+            if icon != app_icon::DEFAULT { app_icon::apply(&handle, &icon); }
             start_background(handle.clone());
             if !start_in_tray {
                 show_main(&handle);

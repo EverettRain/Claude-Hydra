@@ -1,5 +1,5 @@
 import { Cpu, Feather, Layers, ShieldCheck } from "lucide-react";
-import appIcon from "../assets/claude-hydra-icon-256.png";
+import { appIconSrc } from "@/lib/appIcon";
 import { Group, Page } from "@/components/PageHeader";
 import type { AppInfo } from "@/lib/api";
 
@@ -16,7 +16,7 @@ export function AboutPage({ info }: { info: AppInfo | null }) {
       <h1 className="sr-only">关于</h1>
       <div className="space-y-5 px-5 pt-3">
         <div className="flex flex-col items-center py-4 text-center">
-          <img src={appIcon} alt="" className="h-16 w-16 rounded-[18px] shadow-card" draggable={false} />
+          <img src={appIconSrc(info?.appIcon)} alt="" className="h-16 w-16 rounded-[18px] shadow-card" draggable={false} />
           <div className="mt-3 text-[17px] font-semibold tracking-[-0.01em]">Claude-Hydra</div>
           <div className="mt-0.5 text-[13px] text-muted">同时运行多个 Claude 桌面端账号</div>
           <div className="mt-2.5 inline-flex h-[22px] items-center rounded-full bg-card px-2.5 font-mono text-[11px] text-fg-2 shadow-card">

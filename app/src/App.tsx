@@ -48,7 +48,7 @@ export default function App() {
   }, [refresh, reloadInfo]);
 
   return (
-    <AppShell activePage={page} onPageChange={setPage} theme={theme} onThemeChange={setTheme}
+    <AppShell activePage={page} onPageChange={setPage} theme={theme} onThemeChange={setTheme} appIcon={info?.appIcon}
       status={profiles ? { running: profiles.filter((p) => p.pid).length, total: profiles.length } : null}>
       {page === "accounts" && <AccountsPage profiles={profiles} loadError={loadError} refresh={refresh} />}
       {page === "environments" && <EnvironmentsPage onChanged={refresh} />}

@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowRightLeft, Box, Globe2, LayoutDashboard, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
 import type React from "react";
 import { useLayoutEffect, useRef, useState } from "react";
-import appIcon from "../assets/claude-hydra-icon-256.png";
+import { appIconSrc } from "@/lib/appIcon";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -37,6 +37,8 @@ interface AppShellProps {
   onPageChange: (page: PageId) => void;
   theme: ThemeMode;
   onThemeChange: (mode: ThemeMode) => void;
+  /** Chosen app icon id. */
+  appIcon?: string | null;
   /** Running summary shown at the bottom of the sidebar. */
   status?: { running: number; total: number } | null;
   children: React.ReactNode;
@@ -72,7 +74,7 @@ function NavRow({ item, active, onSelect, setRef }: { item: NavItem; active: boo
   );
 }
 
-export function AppShell({ activePage, onPageChange, theme, onThemeChange, status, children }: AppShellProps) {
+export function AppShell({ activePage, onPageChange, theme, onThemeChange, appIcon, status, children }: AppShellProps) {
   const ThemeIcon = theme === "light" ? Sun : theme === "dark" ? Moon : SunMoon;
   const refs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const nav = useRef<HTMLDivElement>(null);
@@ -98,7 +100,7 @@ export function AppShell({ activePage, onPageChange, theme, onThemeChange, statu
     <div className="flex h-screen overflow-hidden bg-bg text-fg">
       <aside className="flex w-[204px] shrink-0 flex-col border-r-[0.5px] border-line bg-bg">
         <div data-tauri-drag-region className={cn("flex h-12 shrink-0 items-center gap-2", isMac ? "pl-[78px]" : "pl-4")}>
-          <img src={appIcon} alt="" className="pointer-events-none h-[18px] w-[18px] rounded-[5px]" draggable={false} />
+          <img src={appIconSrc(appIcon)} alt="" className="pointer-events-none h-[18px] w-[18px] rounded-[5px]" draggable={false} />
           <span className="pointer-events-none truncate text-[13.5px] font-semibold tracking-[0.01em]">Claude-Hydra</span>
         </div>
 

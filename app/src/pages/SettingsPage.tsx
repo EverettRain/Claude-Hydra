@@ -6,6 +6,7 @@ import { Input, Select } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
 import { api, errorText, type AppInfo, type ContainerRuntime } from "@/lib/api";
+import { appIconSrc } from "@/lib/appIcon";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -86,6 +87,32 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
                   )}
                 >
                   {t.label}
+                </button>
+              ))}
+            </div>
+          </Row>
+          <Row
+            label="应用图标"
+            hint={info?.platform === "macos"
+              ? "立即用于窗口、菜单栏与 Hydra 运行时的程序坞；访达、启动台和未运行时的程序坞仍显示安装包内置的图标。"
+              : "立即用于窗口、任务栏与托盘；资源管理器中的程序图标仍是安装包内置的图标。"}
+          >
+            <div role="radiogroup" aria-label="应用图标" className="flex gap-1.5">
+              {info?.appIcons.map(([id, name]) => (
+                <button
+                  key={id}
+                  role="radio"
+                  aria-checked={info.appIcon === id}
+                  aria-label={name}
+                  title={name}
+                  disabled={busy === "icon"}
+                  onClick={() => act("icon", () => api.setAppIcon(id))}
+                  className={cn(
+                    "flex h-11 w-11 items-center justify-center rounded-[11px] active:!scale-95",
+                    info.appIcon === id ? "bg-pill ring-2 ring-fg" : "hover:bg-pill",
+                  )}
+                >
+                  <img src={appIconSrc(id)} alt="" className="h-8 w-8" draggable={false} />
                 </button>
               ))}
             </div>
