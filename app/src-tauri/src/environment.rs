@@ -238,9 +238,9 @@ pub fn save(install: &crate::install::Install, id: Option<&str>, input: &Environ
         // The rules an exit is judged by changed: an earlier cut no longer describes this
         // environment. The relay stays paused until the new exit passes (see `relay::sync_all`).
         let rules_changed = old.as_ref().is_some_and(|old| node_changed || old.exit_rule != env.exit_rule || old.allow_cn != env.allow_cn);
-        for acc in s.accounts.values_mut().filter(|a| a.environment.as_deref() == Some(id.as_str())) {
+        for (acc_id, acc) in s.accounts.iter_mut().filter(|(_, a)| a.environment.as_deref() == Some(id.as_str())) {
             if node_changed { acc.last_exit = None; }
-            if rules_changed { acc.blocked = None; }
+            if rules_changed { acc.clear_cut(acc_id, if node_changed { "环境节点修改" } else { "环境出口规则修改" }); }
         }
         s.environments.insert(id.clone(), env);
         Ok(id)
@@ -251,11 +251,11 @@ pub fn save(install: &crate::install::Install, id: Option<&str>, input: &Environ
 pub fn delete(id: &str) -> Result<(), String> {
     settings::update(|s| {
         s.environments.remove(id);
-        for acc in s.accounts.values_mut().filter(|a| a.environment.as_deref() == Some(id)) {
+        for (acc_id, acc) in s.accounts.iter_mut().filter(|(_, a)| a.environment.as_deref() == Some(id)) {
             acc.environment = None;
             acc.relay_port = None;
             acc.last_exit = None;
-            acc.blocked = None;
+            acc.clear_cut(acc_id, "删除环境");
         }
     })
 }

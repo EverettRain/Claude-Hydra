@@ -231,7 +231,8 @@ pub fn plan(id: &str, url: Option<&str>) -> Result<Plan, String> {
     let p = crate::profiles::resolve(&install, id, false).ok_or("找不到这个账号。")?;
     let s = settings::load();
     let eff = s.effective(id);
-    if let Some(reason) = s.account(id).blocked {
+    // A soft cut is re-checked by `port_for_launch` below instead of being refused here.
+    if let Some(reason) = s.account(id).blocked.filter(|_| !s.account(id).blocked_soft) {
         return Err(format!("出口保护已切断这个账号的网络——{reason}\n请先“恢复网络”或重新绑定出口。"));
     }
     if eff.unusable_node { return Err("这个账号的代理节点无法读取（密码不能解密或配置损坏），为避免直连已拒绝打开。请重新保存它的环境配置。".into()); }

@@ -10,8 +10,14 @@
 //! A violation at launch refuses the launch. A violation while running pauses the account's
 //! relay (see `relay::block`), which cuts the account off the network because it has no direct
 //! route; it stays cut, across restarts, until the user resumes or rebinds.
+//!
+//! A check that cannot finish (check services down or rate limited, the node briefly
+//! unreachable) is not a violation: the relay has no direct route, so an unverified exit
+//! cannot reveal the real address. The host retries; only when checks keep failing is the
+//! account cut, softly (see `relay::soft_block`), and that cut is lifted by itself once a
+//! check passes again.
 use crate::environment::Environment;
-use crate::node::ExitInfo;
+use crate::node::{ExitInfo, Inspection};
 use crate::settings;
 use std::sync::OnceLock;
 
@@ -61,16 +67,78 @@ pub fn check(env: &Environment, exit: &ExitInfo) -> Result<(), String> {
     Err(format!("出口从 {} 变成了 {}，不符合“{}”规则。", describe(base), describe(exit), rule_name(&env.exit_rule)))
 }
 
+fn environment(env_id: Option<&str>) -> Environment {
+    let s = settings::load();
+    env_id.and_then(|id| s.environments.get(id)).cloned().unwrap_or_default()
+}
+
 /// Applies the rules of environment `env_id` (none = defaults: only the region block) to a
 /// verified exit, binding the baseline the first time a rule sees an exit.
 pub fn verify(env_id: Option<&str>, exit: &ExitInfo) -> Result<(), String> {
-    let s = settings::load();
-    let env = env_id.and_then(|id| s.environments.get(id)).cloned().unwrap_or_default();
+    let env = environment(env_id);
     check(&env, exit)?;
+    bind_first(env_id, &env, exit)
+}
+
+fn bind_first(env_id: Option<&str>, env: &Environment, exit: &ExitInfo) -> Result<(), String> {
     if let Some(id) = env_id.filter(|_| !env.exit_rule.is_empty() && env.exit_baseline.is_none()) {
         settings::update(|s| if let Some(e) = s.environments.get_mut(id) { e.exit_baseline.get_or_insert_with(|| exit.clone()); })?;
     }
     Ok(())
+}
+
+/// Outcome of one route check judged against the exit rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The exit complies. `None` when only the IP (and the edge's country) was known: enough
+    /// to pass the rules, not a full exit to remember.
+    Pass(Option<ExitInfo>),
+    /// The exit is confirmed to break the rules: cut now.
+    Violation(String),
+    /// The check could not decide (services failing, node unreachable): retry, do not cut yet.
+    Unverified(String),
+}
+
+/// Judges a route check against environment `env_id`.
+pub fn judge(env_id: Option<&str>, found: &Inspection) -> Verdict {
+    let env = environment(env_id);
+    if let Some(exit) = &found.exit {
+        if let Err(reason) = check(&env, exit) { return Verdict::Violation(reason); }
+        return match bind_first(env_id, &env, exit) {
+            Ok(()) => Verdict::Pass(Some(exit.clone())),
+            Err(reason) => Verdict::Unverified(reason),
+        };
+    }
+    judge_partial(&env, found)
+}
+
+/// Without a location, uses only what the exit IP (and the country claude.ai's edge saw)
+/// proves: a changed IP breaks a fixed-IP rule, an edge country in a refused region is
+/// refused, an unchanged IP or a matching country passes. Anything else stays undecided
+/// instead of becoming a cut.
+fn judge_partial(env: &Environment, found: &Inspection) -> Verdict {
+    let unverified = || Verdict::Unverified(format!("无法核验代理出口：{}", found.failure()));
+    let Some(ip) = found.ip else { return unverified() };
+    let partial = ExitInfo { ip: ip.to_string(), country: found.edge_country.clone(), ..Default::default() };
+    if !partial.country.is_empty() && !env.allow_cn {
+        if let Some((_, name)) = UNSUPPORTED.iter().find(|(code, _)| partial.country.eq_ignore_ascii_case(code)) {
+            return Verdict::Violation(format!("claude.ai 边缘节点判定出口 {} 位于{name}，Claude 不在该地区提供服务，已拦截。", describe(&partial)));
+        }
+    }
+    if env.exit_rule.is_empty() {
+        // Only the region block applies, and it needs a country.
+        return if partial.country.is_empty() { unverified() } else { Verdict::Pass(None) };
+    }
+    let Some(base) = &env.exit_baseline else { return unverified() };
+    // The baseline itself passed every rule, so the same IP passes them too.
+    if base.ip == partial.ip { return Verdict::Pass(None); }
+    match env.exit_rule.as_str() {
+        "static" => Verdict::Violation(format!("出口从 {} 变成了 {}，不符合“固定 IP”规则。", describe(base), partial.ip)),
+        // The edge's country database may disagree with the service the baseline came from,
+        // so only agreement counts; a mismatch proves nothing.
+        "country" if !partial.country.is_empty() && base.country.trim().eq_ignore_ascii_case(&partial.country) => Verdict::Pass(None),
+        _ => unverified(),
+    }
 }
 
 /// Binds environment `env_id` to its node's current exit and lifts the block of its accounts.
@@ -86,13 +154,13 @@ pub fn rebind(env_id: &str) -> Result<ExitInfo, String> {
     settings::update(|s| if let Some(e) = s.environments.get_mut(env_id) { e.exit_baseline = Some(exit.clone()); })?;
     for id in accounts {
         if crate::relay::running(&id) {
-            let result = crate::relay::probe(&id).and_then(|actual| verify(Some(env_id), &actual));
-            if let Err(reason) = result {
-                crate::relay::block(&id, &reason);
-                continue;
+            match crate::relay::inspect_route(&id, None).map(|(_, found)| judge(Some(env_id), &found)) {
+                Ok(Verdict::Pass(_)) => {}
+                Ok(Verdict::Violation(reason)) => { crate::relay::block(&id, &reason); continue; }
+                Ok(Verdict::Unverified(reason)) | Err(reason) => { crate::relay::soft_block(&id, &reason); continue; }
             }
         }
-        crate::relay::unblock(&id);
+        crate::relay::unblock(&id, "重新绑定出口");
     }
     Ok(exit)
 }
@@ -106,27 +174,36 @@ pub fn resume(id: &str) -> Result<String, String> {
     if eff.unusable_node { return Err("这个账号的代理节点无法读取（密码不能解密或配置损坏），请重新保存它的环境配置。".into()); }
     let Some(node) = eff.node else {
         // No proxy any more (environment removed or reassigned): there is no exit to judge.
-        crate::relay::unblock(id);
+        crate::relay::unblock(id, "恢复网络（账号已不使用代理）");
         return Ok("该账号已不使用代理，已解除断网标记。".into());
     };
     // The relay may not be running (node failed to start, Hydra just restarted): check the
     // node itself instead of leaving the account cut with no way back.
     let exit = if crate::relay::running(id) { crate::relay::probe(id) } else {
         crate::clash::resolve(&node).and_then(|(upstream, _core)| crate::node::inspect(&upstream.client(std::time::Duration::from_secs(15))?, &node))
-    }?;
+    }.map_err(|e| format!("无法核验代理出口：{e}"))?;
     verify(eff.environment.as_deref(), &exit)?;
-    crate::relay::unblock(id);
+    crate::relay::unblock(id, "恢复网络");
     Ok(describe(&exit))
 }
 
-type Notifier = Box<dyn Fn(&str, &str) + Send + Sync>;
+type Notifier = Box<dyn Fn(&str, &str, bool) + Send + Sync>;
 static NOTIFY: OnceLock<Notifier> = OnceLock::new();
+static RESTORED: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
 
-/// Registers how the host process tells the user an account was cut off (`id`, reason).
-pub fn on_block(f: impl Fn(&str, &str) + Send + Sync + 'static) { let _ = NOTIFY.set(Box::new(f)); }
+/// Registers how the host process tells the user an account was cut off (`id`, reason, and
+/// whether the cut is soft, i.e. lifted by itself once a check passes).
+pub fn on_block(f: impl Fn(&str, &str, bool) + Send + Sync + 'static) { let _ = NOTIFY.set(Box::new(f)); }
 
-pub(crate) fn notify(id: &str, reason: &str) {
-    if let Some(f) = NOTIFY.get() { f(id, reason); }
+/// Registers what the host process does when a soft cut is lifted by itself.
+pub fn on_restore(f: impl Fn(&str) + Send + Sync + 'static) { let _ = RESTORED.set(Box::new(f)); }
+
+pub(crate) fn notify(id: &str, reason: &str, soft: bool) {
+    if let Some(f) = NOTIFY.get() { f(id, reason, soft); }
+}
+
+pub(crate) fn notify_restored(id: &str) {
+    if let Some(f) = RESTORED.get() { f(id); }
 }
 
 #[cfg(test)]
@@ -163,5 +240,40 @@ mod tests {
         assert!(check(&env, &exit("1.1.1.2", "US", "", "")).is_err());
         env.exit_rule.clear();
         assert!(check(&env, &exit("1.1.1.2", "US", "", "")).is_ok());
+    }
+
+    fn partial(ip: Option<&str>, edge: &str) -> Inspection {
+        Inspection { ip: ip.map(|i| i.parse().unwrap()), edge_country: edge.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn failed_checks_are_never_violations_unless_proven() {
+        let tokyo = exit("1.1.1.1", "JP", "Tokyo", "Tokyo");
+        let mut env = Environment::default();
+        let undecided = |v: Verdict| matches!(v, Verdict::Unverified(_));
+        // Nothing answered: undecided, whatever the rules.
+        assert!(undecided(judge_partial(&env, &partial(None, ""))));
+        // No rule: the edge country alone decides the region block.
+        assert_eq!(judge_partial(&env, &partial(Some("2.2.2.2"), "US")), Verdict::Pass(None));
+        assert!(matches!(judge_partial(&env, &partial(Some("2.2.2.2"), "CN")), Verdict::Violation(_)));
+        assert!(undecided(judge_partial(&env, &partial(Some("2.2.2.2"), ""))));
+        env.allow_cn = true;
+        assert_eq!(judge_partial(&env, &partial(Some("2.2.2.2"), "CN")), Verdict::Pass(None));
+        env.allow_cn = false;
+        // Rules with a baseline: the same IP passes all of them.
+        env.exit_baseline = Some(tokyo);
+        for rule in ["static", "city", "region", "country"] {
+            env.exit_rule = rule.into();
+            assert_eq!(judge_partial(&env, &partial(Some("1.1.1.1"), "")), Verdict::Pass(None), "{rule}");
+        }
+        // A new IP proves a fixed-IP violation, nothing about city or region.
+        env.exit_rule = "static".into();
+        assert!(matches!(judge_partial(&env, &partial(Some("1.1.1.2"), "JP")), Verdict::Violation(_)));
+        env.exit_rule = "city".into();
+        assert!(undecided(judge_partial(&env, &partial(Some("1.1.1.2"), "JP"))));
+        // Country rule: agreement passes, disagreement between databases proves nothing.
+        env.exit_rule = "country".into();
+        assert_eq!(judge_partial(&env, &partial(Some("1.1.1.2"), "jp")), Verdict::Pass(None));
+        assert!(undecided(judge_partial(&env, &partial(Some("1.1.1.2"), "US"))));
     }
 }

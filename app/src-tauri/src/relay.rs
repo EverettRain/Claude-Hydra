@@ -11,6 +11,7 @@
 //!   persisted in `settings.json` so it survives restarts. While accounts use their relay, the
 //!   host re-checks each exit against the environment's rules (see `guard`) and blocks on a
 //!   confirmed violation.
+use crate::guard::Verdict;
 use crate::node::NodeConfig;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -21,10 +22,22 @@ use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// How often an active account's exit is re-checked, and how recently it must have used its
-/// relay to be checked at all.
+/// How often an active account's exit is re-checked (± jitter), and how recently it must have
+/// used its relay to be checked at all.
 const MONITOR_EVERY: Duration = Duration::from_secs(300);
+const MONITOR_JITTER: Duration = Duration::from_secs(60);
 const ACTIVE_WITHIN_MS: u64 = 15 * 60 * 1000;
+/// How often the monitor looks for due checks.
+const MONITOR_TICK: Duration = Duration::from_secs(10);
+/// Retries after a check that could not finish: 30 s, doubling, up to `RETRY_MAX` while the
+/// account runs and up to `RECOVER_RETRY_MAX` while it is softly cut.
+const RETRY_FIRST: Duration = Duration::from_secs(30);
+const RETRY_MAX: Duration = Duration::from_secs(120);
+const RECOVER_RETRY_MAX: Duration = Duration::from_secs(300);
+/// How long checks of a running account may keep failing before it is softly cut.
+const SOFT_CUT_AFTER: Duration = Duration::from_secs(600);
+/// Per-request timeout of a route check.
+const CHECK_TIMEOUT_SECS: u64 = 15;
 
 /// Open client connections of one relay, so a block can close them.
 #[derive(Default)]
@@ -91,6 +104,14 @@ struct Relay {
     core: Option<crate::clash::Core>,
     port: u16,
     gate: Gate,
+    /// Changes whenever the route is built or replaced, so a check that ran without the
+    /// route lock can tell whether it still describes the current route.
+    generation: u64,
+}
+
+fn next_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::SeqCst)
 }
 
 static HOST: AtomicBool = AtomicBool::new(false);
@@ -124,6 +145,7 @@ fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, St
                 *r.gate.node.write().map_err(|_| "中继状态错误。")? = NodeConfig::default();
                 r.original = NodeConfig::default();
                 r.core = None;
+                r.generation = next_generation();
                 Some(r.port)
             }
             None => None,
@@ -136,6 +158,7 @@ fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, St
         *r.gate.node.write().map_err(|_| "中继状态错误。")? = upstream;
         r.original = node.clone();
         r.core = core;
+        r.generation = next_generation();
         return Ok(port);
     }
     let listener = preferred
@@ -147,7 +170,7 @@ fn ensure(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, St
     let (upstream, core) = crate::clash::resolve(node)?;
     let mut gate = Gate::new(upstream, true);
     gate.tag = Arc::new(tag(id));
-    let relay = Relay { original: node.clone(), core, port, gate: gate.clone() };
+    let relay = Relay { original: node.clone(), core, port, gate: gate.clone(), generation: next_generation() };
     std::thread::Builder::new().name(format!("relay-{port}")).spawn(move || serve(listener, gate)).map_err(|e| e.to_string())?;
     relays().lock().map_err(|_| "中继状态错误。")?.insert(id.to_string(), relay);
     Ok(port)
@@ -172,22 +195,38 @@ fn pause(gate: &Gate) {
     gate.conns.close_all();
 }
 
-fn validate_exit(id: &str) -> Result<(), String> {
-    let exit = probe(id).map_err(|e| format!("无法核验代理出口：{e}"))?;
-    let env = crate::settings::load().effective(id).environment;
-    crate::guard::verify(env.as_deref(), &exit)
+fn environment_of(id: &str) -> Option<String> { crate::settings::load().effective(id).environment }
+
+/// Full check of an account's route, judged against its rules. Caller holds `route_change`.
+fn validate_exit(id: &str) -> Verdict {
+    match inspect_route(id, None) {
+        Ok((_, found)) => {
+            let verdict = crate::guard::judge(environment_of(id).as_deref(), &found);
+            if matches!(verdict, Verdict::Unverified(_)) { log_check(id, "check inconclusive", &found); }
+            verdict
+        }
+        Err(reason) => Verdict::Unverified(format!("无法核验代理出口：{reason}")),
+    }
 }
 
+/// Starts (or keeps) the account's relay and opens it once its exit verifies. A confirmed
+/// violation cuts the account; a check that cannot finish leaves it softly cut, so the
+/// monitor keeps re-checking and opens it by itself once a check passes.
 fn checked_port(id: &str, node: &NodeConfig, preferred: Option<u16>) -> Result<u16, String> {
     let port = ensure(id, node, preferred)?;
     let gate = gate_of(id).ok_or("中继已停止。")?;
-    if let Some(reason) = crate::settings::load().account(id).blocked {
+    let acc = crate::settings::load().account(id);
+    if let Some(reason) = &acc.blocked {
         pause(&gate);
-        return Err(reason);
+        if !acc.blocked_soft { return Err(reason.clone()); }
     }
     if gate.paused.load(Ordering::SeqCst) {
-        validate_exit(id).inspect_err(|reason| block(id, reason))?;
-        gate.paused.store(false, Ordering::SeqCst);
+        match validate_exit(id) {
+            Verdict::Pass(_) if acc.blocked.is_some() => unblock(id, "启动前重新核验通过"),
+            Verdict::Pass(_) => gate.paused.store(false, Ordering::SeqCst),
+            Verdict::Violation(reason) => { block(id, &reason); return Err(reason); }
+            Verdict::Unverified(reason) => { soft_block(id, &reason); return Err(reason); }
+        }
     }
     Ok(port)
 }
@@ -222,42 +261,177 @@ pub fn sync_soon() {
     let _ = std::thread::Builder::new().name("relay-sync".into()).spawn(sync_all);
 }
 
-/// Kill switch: cuts the account off the network until `unblock`. Host process only.
-pub fn block(id: &str, reason: &str) {
-    if let Some(gate) = gate_of(id) { pause(&gate); }
-    let _ = crate::settings::update(|s| if let Some(a) = s.accounts.get_mut(id) { a.blocked = Some(reason.to_string()); });
-    crate::paths::append_log("hydra-error.log", &format!("guard {id}: network cut: {reason}"));
-    crate::guard::notify(id, reason);
+/// Kill switch for a confirmed violation: cuts the account off the network until the user
+/// resumes or rebinds. Host process only.
+pub fn block(id: &str, reason: &str) { cut(id, reason, false) }
+
+/// Cut after checks kept failing: the monitor keeps re-checking and lifts it by itself once a
+/// check passes (see `start_monitor`). An existing hard cut is never softened.
+pub fn soft_block(id: &str, reason: &str) {
+    let acc = crate::settings::load().account(id);
+    if acc.blocked.is_some() && !acc.blocked_soft {
+        if let Some(gate) = gate_of(id) { pause(&gate); }
+        return;
+    }
+    if acc.blocked.is_some() {
+        // Already softly cut: keep it paused, refresh the reason, no second notice.
+        if let Some(gate) = gate_of(id) { pause(&gate); }
+        let _ = crate::settings::update(|s| if let Some(a) = s.accounts.get_mut(id) { a.blocked = Some(reason.to_string()); });
+        return;
+    }
+    cut(id, reason, true)
 }
 
-pub fn unblock(id: &str) {
-    let _ = crate::settings::update(|s| if let Some(a) = s.accounts.get_mut(id) { a.blocked = None; });
+fn cut(id: &str, reason: &str, soft: bool) {
+    if let Some(gate) = gate_of(id) { pause(&gate); }
+    let _ = crate::settings::update(|s| if let Some(a) = s.accounts.get_mut(id) { a.blocked = Some(reason.to_string()); a.blocked_soft = soft; });
+    let kind = if soft { "network paused (unverified, retrying)" } else { "network cut" };
+    crate::paths::append_log("hydra-error.log", &format!("guard {id}: {kind}: {reason}"));
+    crate::guard::notify(id, reason, soft);
+}
+
+/// Lifts a cut. `source` names who lifted it, for the log.
+pub fn unblock(id: &str, source: &str) {
+    let mut was = None;
+    let _ = crate::settings::update(|s| if let Some(a) = s.accounts.get_mut(id) { was = a.blocked.take(); a.blocked_soft = false; });
     if let Some(gate) = gate_of(id) { gate.paused.store(false, Ordering::SeqCst); }
+    if let Some(reason) = was { crate::paths::append_log("hydra-error.log", &format!("guard {id}: network restored by {source} (was: {reason})")); }
+}
+
+/// Checks an account's current route over its node, bypassing the (possibly paused) relay.
+/// Returns the route generation it checked with what the check found; `known` is a previously
+/// verified exit of that route whose location is reused if the IP did not change.
+pub fn inspect_route(id: &str, known: Option<&crate::node::ExitInfo>) -> Result<(u64, crate::node::Inspection), String> {
+    let (original, upstream, generation) = relays().lock().ok()
+        .and_then(|m| m.get(id).map(|r| (r.original.clone(), r.gate.node.read().map(|n| n.clone()).unwrap_or_default(), r.generation)))
+        .ok_or("这个账号的代理中继没有运行。")?;
+    if upstream.host.is_empty() { return Err("这个账号的代理节点正在切换，请稍后再试。".into()); }
+    Ok((generation, crate::node::inspect_known(&upstream.client(Duration::from_secs(CHECK_TIMEOUT_SECS))?, &original, known)))
 }
 
 /// Checks an account's current exit over its node, bypassing the (possibly paused) relay.
 pub fn probe(id: &str) -> Result<crate::node::ExitInfo, String> {
-    let (original, upstream) = relays().lock().ok()
-        .and_then(|m| m.get(id).map(|r| (r.original.clone(), r.gate.node.read().map(|n| n.clone()).unwrap_or_default())))
-        .ok_or("这个账号的代理中继没有运行。")?;
-    if upstream.host.is_empty() { return Err("这个账号的代理节点正在切换，请稍后再试。".into()); }
-    crate::node::inspect(&upstream.client(Duration::from_secs(15))?, &original)
+    inspect_route(id, None)?.1.into_result()
 }
 
 pub fn running(id: &str) -> bool { gate_of(id).is_some() }
 
-/// Host process: periodically re-checks the exit of every account that recently used its relay.
+fn generation_of(id: &str) -> Option<u64> {
+    relays().lock().ok().and_then(|m| m.get(id).map(|r| r.generation))
+}
+
+fn log_check(id: &str, what: &str, found: &crate::node::Inspection) {
+    crate::paths::append_log("hydra-error.log", &format!("guard {id}: {what}: {}", found.trail()));
+}
+
+/// A delay in `[base - spread, base + spread]`, so accounts do not all ask the check services
+/// in the same second.
+fn jittered(base: Duration, spread: Duration) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default());
+    let span = spread.as_millis() as u64 * 2 + 1;
+    (base - spread) + Duration::from_millis(h.finish() % span)
+}
+
+/// Monitor state of one account.
+struct Watch {
+    next: Instant,
+    /// Route generation `known` belongs to.
+    generation: u64,
+    /// Last verified exit of this route, so an unchanged IP needs no location lookup.
+    known: Option<crate::node::ExitInfo>,
+    /// When checks of a running account started failing, and how many in a row did.
+    failing_since: Option<Instant>,
+    failures: u32,
+}
+
+/// Delay before the next try after `failures` checks in a row could not finish.
+fn retry_after(failures: u32, cap: Duration) -> Duration {
+    (RETRY_FIRST * 2u32.saturating_pow(failures.saturating_sub(1).min(8))).min(cap)
+}
+
+/// Host process: re-checks the exit of every account that recently used its relay, and keeps
+/// re-checking softly cut accounts until their exit verifies again.
+///
+/// - Every `MONITOR_EVERY` (± jitter). Only the IP is asked while it stays the same; the
+///   location is looked up again only when the IP changes.
+/// - A confirmed violation cuts at once. A check that cannot finish is retried with backoff
+///   and open connections are left alone; only after `SOFT_CUT_AFTER` of failures is the
+///   account softly cut.
+/// - Checks run without the route lock (they can take a while); the verdict is applied under
+///   the lock, and only if the route is still the one that was checked.
 pub fn start_monitor() {
-    let _ = std::thread::Builder::new().name("exit-guard".into()).spawn(|| loop {
-        std::thread::sleep(MONITOR_EVERY);
-        let now = crate::paths::now_millis();
-        let due: Vec<String> = relays().lock().map(|m| m.iter()
-            .filter(|(_, r)| !r.gate.paused.load(Ordering::SeqCst) && now.saturating_sub(r.gate.active.load(Ordering::SeqCst)) < ACTIVE_WITHIN_MS)
-            .map(|(id, _)| id.clone()).collect()).unwrap_or_default();
-        for id in due {
-            let _change = route_change();
-            if gate_of(&id).is_some_and(|gate| !gate.paused.load(Ordering::SeqCst)) {
-                if let Err(reason) = validate_exit(&id) { block(&id, &reason); }
+    let _ = std::thread::Builder::new().name("exit-guard".into()).spawn(|| {
+        let mut watches: HashMap<String, Watch> = HashMap::new();
+        loop {
+            std::thread::sleep(MONITOR_TICK);
+            let now_ms = crate::paths::now_millis();
+            let settings = crate::settings::load();
+            // (id, generation, paused, recently active)
+            let relays_now: Vec<(String, u64, bool, bool)> = relays().lock().map(|m| m.iter()
+                .map(|(id, r)| (id.clone(), r.generation, r.gate.paused.load(Ordering::SeqCst), now_ms.saturating_sub(r.gate.active.load(Ordering::SeqCst)) < ACTIVE_WITHIN_MS))
+                .collect()).unwrap_or_default();
+            watches.retain(|id, _| relays_now.iter().any(|(r, ..)| r == id));
+            for (id, generation, paused, active) in relays_now {
+                let acc = settings.account(&id);
+                let recovering = paused && acc.blocked.is_some() && acc.blocked_soft;
+                if !recovering && (paused || !active) { continue; }
+                let watch = watches.entry(id.clone()).or_insert_with(|| Watch {
+                    next: Instant::now() + if recovering { RETRY_FIRST } else { jittered(MONITOR_EVERY, MONITOR_JITTER) },
+                    generation, known: acc.last_exit.clone(), failing_since: None, failures: 0,
+                });
+                if watch.generation != generation {
+                    // Rebuilt route: what was known about the old one does not apply.
+                    *watch = Watch { next: watch.next, generation, known: None, failing_since: None, failures: 0 };
+                }
+                if Instant::now() < watch.next { continue; }
+                let found = inspect_route(&id, watch.known.as_ref());
+                let _change = route_change();
+                let acc = crate::settings::load().account(&id);
+                let still = generation_of(&id) == Some(generation) && gate_of(&id).is_some_and(|g| g.paused.load(Ordering::SeqCst) == paused);
+                let still = still && (acc.blocked.is_some() && acc.blocked_soft) == recovering;
+                let found = match found {
+                    Ok((checked, found)) if still && checked == generation => found,
+                    // Route or state changed meanwhile, or the relay is switching: look again soon.
+                    _ => { watch.next = Instant::now() + RETRY_FIRST; continue; }
+                };
+                let mut forget = false;
+                match crate::guard::judge(acc.environment.as_deref(), &found) {
+                    Verdict::Pass(exit) => {
+                        if let Some(exit) = exit { watch.known = Some(exit); }
+                        if watch.failures > 0 { log_check(&id, &format!("check passed after {} failed", watch.failures), &found); }
+                        watch.failures = 0;
+                        watch.failing_since = None;
+                        watch.next = Instant::now() + jittered(MONITOR_EVERY, MONITOR_JITTER);
+                        if recovering {
+                            unblock(&id, "出口保护自动重新核验");
+                            crate::guard::notify_restored(&id);
+                        }
+                    }
+                    Verdict::Violation(reason) => {
+                        log_check(&id, "violation", &found);
+                        block(&id, &reason);
+                        forget = true;
+                    }
+                    Verdict::Unverified(reason) => {
+                        watch.failures += 1;
+                        let since = *watch.failing_since.get_or_insert_with(Instant::now);
+                        log_check(&id, &format!("check inconclusive #{}", watch.failures), &found);
+                        if recovering {
+                            soft_block(&id, &reason);
+                            watch.next = Instant::now() + retry_after(watch.failures, RECOVER_RETRY_MAX);
+                        } else if since.elapsed() >= SOFT_CUT_AFTER {
+                            soft_block(&id, &reason);
+                            watch.failures = 0;
+                            watch.failing_since = None;
+                            watch.next = Instant::now() + RETRY_FIRST;
+                        } else {
+                            watch.next = Instant::now() + retry_after(watch.failures, RETRY_MAX);
+                        }
+                    }
+                }
+                if forget { watches.remove(&id); }
             }
         }
     });
@@ -710,7 +884,8 @@ mod tests {
         refused();
         gate_of(id).unwrap().paused.store(false, Ordering::SeqCst);
         assert_eq!(ensure(id, &node("http", 2, "", ""), None).unwrap(), port);
-        assert!(validate_exit(id).is_err());
+        // Nothing answers on the node: undecided, never a pass.
+        assert!(matches!(validate_exit(id), Verdict::Unverified(_)));
         refused();
         stop(id);
     }

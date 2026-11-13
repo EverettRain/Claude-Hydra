@@ -371,7 +371,7 @@ mod tests {
     fn fixture(path: &Path, id: &str) -> Profile {
         Profile {
             id: id.into(), name: id.into(), badge: id.into(), path: path.join(id).to_string_lossy().into(),
-            is_default: false, pid: None, last_used: None, color: 0, keep_running: false, signed_in: None, environment: None, blocked: None,
+            is_default: false, pid: None, last_used: None, color: 0, keep_running: false, signed_in: None, environment: None, blocked: None, blocked_soft: false,
         }
     }
 

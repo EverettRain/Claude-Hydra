@@ -28,6 +28,8 @@ pub struct Profile {
     pub environment: Option<String>,
     /// Why the exit guard cut this account's network, while it is cut.
     pub blocked: Option<String>,
+    /// The cut is temporary: checks kept failing and Hydra keeps re-checking by itself.
+    pub blocked_soft: bool,
 }
 
 pub fn profile_path(install: &Install, id: &str) -> PathBuf {
@@ -209,6 +211,7 @@ pub fn list(install: &Install, with_status: bool) -> Vec<Profile> {
                 keep_running: acc.keep_running,
                 environment: s.environment_name(&id),
                 blocked: acc.blocked.clone(),
+                blocked_soft: acc.blocked.is_some() && acc.blocked_soft,
                 name,
                 path: pstr,
                 id,
@@ -403,7 +406,7 @@ pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(
         acc.keep_running = o.keep_running;
         // Another environment: the old exit check and the old network cut no longer apply.
         // The relay stays paused until the new exit passes (see `relay::sync_all`).
-        if acc.environment != environment { acc.last_exit = None; acc.blocked = None; acc.relay_port = acc.relay_port.filter(|_| environment.is_some()); }
+        if acc.environment != environment { acc.last_exit = None; acc.clear_cut(id, "更换账号环境"); acc.relay_port = acc.relay_port.filter(|_| environment.is_some()); }
         acc.environment = environment.clone();
         // Launch settings now live in environments; drop any leftover per-account copy.
         acc.set_node(None);

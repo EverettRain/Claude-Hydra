@@ -52,6 +52,10 @@ pub struct AccountConfig {
     /// Set when the exit guard cut this account's network; cleared by resume / rebind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<String>,
+    /// The cut came from checks that kept failing, not from a confirmed violation: the host
+    /// keeps re-checking and lifts it by itself once the exit verifies again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked_soft: bool,
 }
 
 /// The launch configuration that actually applies to an account.
@@ -73,6 +77,15 @@ pub struct Effective {
 }
 
 impl AccountConfig {
+    /// Lifts the exit guard's cut because the settings it judged changed; `source` names the
+    /// change for the log, so a cut never disappears without a trace.
+    pub fn clear_cut(&mut self, id: &str, source: &str) {
+        if let Some(reason) = self.blocked.take() {
+            crate::paths::append_log("hydra-error.log", &format!("guard {id}: network cut cleared by {source} (was: {reason})"));
+        }
+        self.blocked_soft = false;
+    }
+
     /// The account's node with its password unsealed, including a migrated legacy entrance.
     pub fn node(&self) -> Option<crate::node::NodeConfig> {
         if let Some(n) = &self.node {

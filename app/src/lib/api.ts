@@ -15,6 +15,8 @@ export interface Profile {
   environment: string | null;
   /** Why the exit guard cut this account's network, while it is cut. */
   blocked: string | null;
+  /** The cut is temporary: checks kept failing and Hydra keeps re-checking by itself. */
+  blockedSoft: boolean;
 }
 
 export interface ProfileOptions {

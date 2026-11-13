@@ -193,9 +193,11 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
           {p.environment && <Tag tone="env">{p.environment}</Tag>}
           {p.keepRunning && <Tag>保持运行</Tag>}
           {p.signedIn === false && <Tag tone="warn">未登录</Tag>}
-          {p.blocked && <Tag tone="danger" title={p.blocked}>已断网</Tag>}
+          {p.blocked && (p.blockedSoft
+            ? <Tag tone="warn" title={p.blocked}>核验中断网</Tag>
+            : <Tag tone="danger" title={p.blocked}>已断网</Tag>)}
         </div>
-        {p.blocked && <div className="mt-0.5 truncate text-[11.5px] text-danger" title={p.blocked}>出口保护：{p.blocked}</div>}
+        {p.blocked && <div className={cn("mt-0.5 truncate text-[11.5px]", p.blockedSoft ? "text-warn" : "text-danger")} title={p.blocked}>{p.blockedSoft ? "出口保护（自动重试中）：" : "出口保护："}{p.blocked}</div>}
         <div className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-muted">
           <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", isRunning ? "bg-ok shadow-[0_0_0_3px_rgb(var(--ok-soft))]" : "bg-faint")} />
           <span className="shrink-0">{isRunning ? `运行中 · PID ${p.pid}` : `上次使用 ${relativeTime(p.lastUsed)}`}</span>

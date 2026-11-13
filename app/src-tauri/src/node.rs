@@ -151,13 +151,114 @@ pub fn relay_client(port: u16, timeout: Duration) -> Result<reqwest::blocking::C
         .timeout(timeout).build().map_err(|_| "无法初始化本地中继连接。".into())
 }
 
-fn get_text(client: &reqwest::blocking::Client, url: &str, limit: u64) -> Result<String, String> {
+/// Why one request to a check service failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Failure {
+    Timeout,
+    /// The node, a front proxy or the service could not be reached (includes a refused
+    /// proxy login: reqwest reports a failed tunnel as a connect error).
+    Connect,
+    Status(u16, Option<Duration>),
+    Read,
+    Other,
+}
+
+impl Failure {
+    fn describe(&self) -> String {
+        match self {
+            Failure::Timeout => "超时".into(),
+            Failure::Connect => "连接失败".into(),
+            Failure::Status(429, _) => "HTTP 429 限流".into(),
+            Failure::Status(code, _) => format!("HTTP {code}"),
+            Failure::Read => "读取响应失败".into(),
+            Failure::Other => "请求失败".into(),
+        }
+    }
+}
+
+fn fetch(client: &reqwest::blocking::Client, url: &str, limit: u64) -> Result<String, Failure> {
+    let resp = client.get(url).header("accept", "application/json, text/plain").send().map_err(|e| {
+        if e.is_timeout() { Failure::Timeout } else if e.is_connect() { Failure::Connect } else { Failure::Other }
+    })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let wait = resp.headers().get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok()).map(Duration::from_secs);
+        return Err(Failure::Status(status.as_u16(), wait));
+    }
     let mut text = String::new();
-    client.get(url).header("accept", "application/json, text/plain").send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| if e.is_timeout() { "通过代理节点访问检测服务超时。".to_string() } else { "通过代理节点访问检测服务失败，请检查节点地址、账号和密码。".to_string() })?
-        .take(limit).read_to_string(&mut text).map_err(|_| "无法读取检测结果。")?;
+    resp.take(limit).read_to_string(&mut text).map_err(|e| if e.kind() == std::io::ErrorKind::TimedOut { Failure::Timeout } else { Failure::Read })?;
     Ok(text)
+}
+
+fn get_text(client: &reqwest::blocking::Client, url: &str, limit: u64) -> Result<String, String> {
+    fetch(client, url, limit).map_err(|f| format!("访问 {} {}。", host_of(url), f.describe()))
+}
+
+fn host_of(url: &str) -> String {
+    url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| url.to_string())
+}
+
+/// One request made while checking a route, kept for the diagnostics log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attempt {
+    /// "ip" or "geo".
+    pub stage: &'static str,
+    pub host: String,
+    /// "ok", or what went wrong.
+    pub outcome: String,
+    pub ms: u128,
+}
+
+/// Rate limited services, per route: a 429 is about the exit IP that asked, so another
+/// account's exit may still use the service.
+fn cooldowns() -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+const DEFAULT_COOLDOWN: Duration = Duration::from_secs(600);
+const MAX_COOLDOWN: Duration = Duration::from_secs(3600);
+
+fn cooling(route: &str, host: &str) -> bool {
+    let Ok(mut map) = cooldowns().lock() else { return false };
+    let key = (route.to_string(), host.to_string());
+    match map.get(&key) {
+        Some(until) if *until > std::time::Instant::now() => true,
+        Some(_) => { map.remove(&key); false }
+        None => false,
+    }
+}
+
+fn cool_down(route: &str, host: &str, wait: Option<Duration>) {
+    let wait = wait.unwrap_or(DEFAULT_COOLDOWN).clamp(Duration::from_secs(30), MAX_COOLDOWN);
+    if let Ok(mut map) = cooldowns().lock() { map.insert((route.to_string(), host.to_string()), std::time::Instant::now() + wait); }
+}
+
+/// One check request: skipped while the service is rate limited for this route, recorded in
+/// `attempts` either way.
+fn attempt(client: &reqwest::blocking::Client, route: &str, stage: &'static str, url: &str, limit: u64, attempts: &mut Vec<Attempt>) -> Option<String> {
+    let host = host_of(url);
+    if cooling(route, &host) {
+        attempts.push(Attempt { stage, host, outcome: "限流冷却中，已跳过".into(), ms: 0 });
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let result = fetch(client, url, limit);
+    let ms = started.elapsed().as_millis();
+    match result {
+        Ok(text) => { attempts.push(Attempt { stage, host, outcome: "ok".into(), ms }); Some(text) }
+        Err(f) => {
+            if let Failure::Status(429, wait) = f { cool_down(route, &host, wait); }
+            attempts.push(Attempt { stage, host, outcome: f.describe(), ms });
+            None
+        }
+    }
+}
+
+/// Marks the last attempt as unusable although the request itself succeeded.
+fn reject(attempts: &mut [Attempt], why: &str) {
+    if let Some(last) = attempts.last_mut() { last.outcome = why.to_string(); }
 }
 
 pub fn valid_timezone(tz: &str) -> bool {
@@ -192,40 +293,117 @@ fn geo_url(channel: &str, ip: IpAddr) -> String {
     }
 }
 
+/// Cloudflare's trace page in front of claude.ai: the exit IP and country exactly as the edge
+/// Claude talks to sees them.
+const EDGE_TRACE: &str = "https://claude.ai/cdn-cgi/trace";
+
+/// `(ip, country)` from a Cloudflare trace body.
+fn parse_trace(body: &str) -> Option<(IpAddr, String)> {
+    let field = |k: &str| body.lines().find_map(|l| l.strip_prefix(k).map(str::trim));
+    let ip = field("ip=")?.parse().ok()?;
+    let loc = field("loc=").unwrap_or_default();
+    // "XX" / "T1" are Cloudflare's unknown / Tor markers, not countries.
+    let country = if loc.len() == 2 && loc.chars().all(|c| c.is_ascii_alphabetic()) && loc != "XX" { loc.to_ascii_uppercase() } else { String::new() };
+    Some((ip, country))
+}
+
+/// Everything one route check found, also when it could not finish.
+#[derive(Clone, Debug, Default)]
+pub struct Inspection {
+    /// Exit IP of the required version, when any IP source answered.
+    pub ip: Option<IpAddr>,
+    /// Country Cloudflare's edge in front of claude.ai placed the exit in ("" = unknown).
+    pub edge_country: String,
+    /// The full result (IP, country, region, city, timezone), when the check finished.
+    pub exit: Option<ExitInfo>,
+    /// The location came from the previous verified exit because the IP did not change.
+    pub reused: bool,
+    pub attempts: Vec<Attempt>,
+    pub(crate) v6: bool,
+}
+
+impl Inspection {
+    /// One line per check for the diagnostics log: every request with its result and time.
+    pub fn trail(&self) -> String {
+        self.attempts.iter().map(|a| format!("{}:{} {} {}ms", a.stage, a.host, a.outcome, a.ms)).collect::<Vec<_>>().join("; ")
+    }
+
+    /// User-facing reason the check did not finish.
+    pub fn failure(&self) -> String {
+        let failed = |stage: &str| self.attempts.iter().filter(|a| a.stage == stage)
+            .map(|a| format!("{} {}", a.host, a.outcome)).collect::<Vec<_>>().join("，");
+        if self.ip.is_none() {
+            let all_connect = !self.attempts.is_empty() && self.attempts.iter().all(|a| a.outcome == "连接失败");
+            let hint = if all_connect { "所有检测请求都连不上，请检查节点是否在线、地址、账号和密码。" }
+                else if self.v6 { "节点可能不支持 IPv6 出口。" } else { "" };
+            return format!("查询出口 IP 失败（{}）。{hint}", failed("ip"));
+        }
+        format!("出口 IP {} 已确认，但位置服务都没有返回结果（{}）。", self.ip.map(|i| i.to_string()).unwrap_or_default(), failed("geo"))
+    }
+
+    pub fn into_result(self) -> Result<ExitInfo, String> {
+        match self.exit { Some(exit) => Ok(exit), None => Err(self.failure()) }
+    }
+}
+
 /// Checks a route end to end: exit IP of the required version, then its region and timezone.
 /// Each step falls back to another public service, so one service being down or rate
 /// limited does not cut every account's network.
 pub fn inspect(client: &reqwest::blocking::Client, node: &NodeConfig) -> Result<ExitInfo, String> {
+    inspect_known(client, node, None).into_result()
+}
+
+/// Like `inspect`, but when the exit IP equals `known`'s (a previously verified exit of the
+/// same route) its location is reused instead of asking a location service again.
+pub fn inspect_known(client: &reqwest::blocking::Client, node: &NodeConfig, known: Option<&ExitInfo>) -> Inspection {
     let v6 = node.ip_version == "ipv6";
-    let sources: [&str; 2] = if v6 { ["https://api6.ipify.org", "https://ipv6.icanhazip.com"] } else { ["https://api4.ipify.org", "https://ipv4.icanhazip.com"] };
-    let mut failure = String::new();
-    let mut ip: Option<IpAddr> = None;
-    for url in sources {
-        match get_text(client, url, 64) {
-            Ok(text) => match text.trim().parse::<IpAddr>() { Ok(found) => { ip = Some(found); break; } Err(_) => failure = "检测服务未返回有效的出口 IP。".into() },
-            Err(e) => failure = e,
+    let route = format!("{}:{}", node.host, node.port);
+    let mut out = Inspection { v6, ..Default::default() };
+    let wanted = |ip: &IpAddr| ip.is_ipv6() == v6;
+    if let Some(body) = attempt(client, &route, "ip", EDGE_TRACE, 4096, &mut out.attempts) {
+        match parse_trace(&body) {
+            Some((ip, country)) if wanted(&ip) => { out.ip = Some(ip); out.edge_country = country; }
+            Some(_) => reject(&mut out.attempts, if v6 { "返回的是 IPv4 地址" } else { "返回的是 IPv6 地址" }),
+            None => reject(&mut out.attempts, "返回了无法识别的数据"),
         }
     }
-    let ip = ip.ok_or_else(|| if v6 { format!("{failure}（节点可能不支持 IPv6 出口）") } else { failure.clone() })?;
+    let sources: [&str; 2] = if v6 { ["https://api6.ipify.org", "https://ipv6.icanhazip.com"] } else { ["https://api4.ipify.org", "https://ipv4.icanhazip.com"] };
+    for url in sources {
+        if out.ip.is_some() { break; }
+        if let Some(text) = attempt(client, &route, "ip", url, 64, &mut out.attempts) {
+            match text.trim().parse::<IpAddr>() {
+                Ok(found) if wanted(&found) => out.ip = Some(found),
+                Ok(_) => reject(&mut out.attempts, "返回了另一种 IP 版本"),
+                Err(_) => reject(&mut out.attempts, "未返回有效 IP"),
+            }
+        }
+    }
+    let Some(ip) = out.ip else { return out };
+    if let Some(known) = known.filter(|k| k.ip.parse::<IpAddr>().ok() == Some(ip) && !k.country.trim().is_empty()) {
+        out.exit = Some(ExitInfo { checked_at: crate::paths::now_millis(), ..known.clone() });
+        out.reused = true;
+        return out;
+    }
     let chosen = match node.geo_channel.as_str() { c @ ("ipapi" | "ip-api") => c, _ => "ipinfo" };
-    let mut error = String::new();
     for channel in std::iter::once(chosen).chain(["ipinfo", "ipapi", "ip-api"].into_iter().filter(|c| *c != chosen)) {
-        let found = get_text(client, &geo_url(channel, ip), 16 * 1024).and_then(|body| parse_geo(channel, &body)).and_then(|info| {
-            if info.ip.parse::<IpAddr>().ok() != Some(ip) { return Err("位置服务返回了其他 IP 的结果。".to_string()); }
+        let Some(body) = attempt(client, &route, "geo", &geo_url(channel, ip), 16 * 1024, &mut out.attempts) else { continue };
+        let found = parse_geo(channel, &body).and_then(|info| {
+            if info.ip.parse::<IpAddr>().ok() != Some(ip) { return Err("返回了其他 IP 的结果".to_string()); }
             // A result without a country cannot be judged by the exit rules.
-            if info.country.trim().is_empty() { return Err("位置服务未返回出口所在国家。".to_string()); }
+            if info.country.trim().is_empty() { return Err("未返回国家".to_string()); }
             Ok(info)
         });
         match found {
             Ok(mut info) => {
                 if !valid_timezone(&info.timezone) { info.timezone.clear(); }
                 info.checked_at = crate::paths::now_millis();
-                return Ok(info);
+                out.exit = Some(info);
+                return out;
             }
-            Err(e) => if error.is_empty() { error = e },
+            Err(e) => reject(&mut out.attempts, e.trim_end_matches('。')),
         }
     }
-    Err(error)
+    out
 }
 
 /// Classification is optional and never participates in the launch check.
@@ -422,6 +600,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_edge_trace() {
+        let body = "fl=1\nh=claude.ai\nip=203.0.113.7\nts=1\nloc=jp\ntls=TLSv1.3\n";
+        assert_eq!(parse_trace(body), Some(("203.0.113.7".parse().unwrap(), "JP".into())));
+        assert_eq!(parse_trace("ip=2001:db8::1\nloc=XX\n"), Some(("2001:db8::1".parse().unwrap(), String::new())));
+        assert_eq!(parse_trace("ip=nope\nloc=US\n"), None);
+        assert_eq!(parse_trace("<html>"), None);
+    }
+
+    #[test]
+    fn unreachable_node_reports_every_service_and_rate_limits_are_skipped() {
+        // Nothing listens on the node's port: every request fails to connect.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let n = NodeConfig { host: "127.0.0.1".into(), port: closed, ip_version: "ipv4".into(), ..node("http") };
+        let client = n.client(Duration::from_secs(5)).unwrap();
+        let found = inspect_known(&client, &n, None);
+        assert!(found.ip.is_none() && found.exit.is_none());
+        let hosts: Vec<&str> = found.attempts.iter().map(|a| a.host.as_str()).collect();
+        assert_eq!(hosts, ["claude.ai", "api4.ipify.org", "ipv4.icanhazip.com"]);
+        assert!(found.attempts.iter().all(|a| a.stage == "ip" && a.outcome == "连接失败"), "{}", found.trail());
+        let why = found.failure();
+        assert!(why.contains("claude.ai 连接失败") && why.contains("请检查节点"), "{why}");
+        // A rate limited service is skipped for this route only.
+        let route = format!("127.0.0.1:{closed}");
+        cool_down(&route, "api4.ipify.org", Some(Duration::from_secs(60)));
+        let again = inspect_known(&client, &n, None);
+        assert_eq!(again.attempts[1].outcome, "限流冷却中，已跳过");
+        assert!(!cooling("127.0.0.1:1", "api4.ipify.org"));
+    }
+
+    #[test]
     fn legacy_endpoint_becomes_node() {
         let n = NodeConfig::from_legacy("socks5://127.0.0.1:7890").unwrap();
         assert_eq!((n.kind.as_str(), n.host.as_str(), n.port), ("socks5", "127.0.0.1", 7890));
@@ -461,9 +669,16 @@ mod tests {
         let endpoint = std::env::var("HYDRA_TEST_PROXY").unwrap();
         let node = NodeConfig::from_legacy(&endpoint).unwrap().validated().unwrap();
         let client = node.client(Duration::from_secs(15)).unwrap();
-        let exit = inspect(&client, &node).unwrap();
+        let found = inspect_known(&client, &node, None);
+        println!("check trail: {}", found.trail());
+        let exit = found.into_result().unwrap();
         assert!(exit.ip.parse::<IpAddr>().is_ok());
         assert!(!exit.country.is_empty());
+        // Same IP again: the location is reused, no location service is asked.
+        let again = inspect_known(&client, &node, Some(&exit));
+        println!("recheck trail: {}", again.trail());
+        assert!(again.reused && again.attempts.iter().all(|a| a.stage == "ip"));
+        assert_eq!(again.exit.map(|x| x.country), Some(exit.country.clone()));
         println!("Network classification: {:?}", network_quality(&client, &exit.ip));
         println!("{}", reputation(&client, &exit.ip));
     }

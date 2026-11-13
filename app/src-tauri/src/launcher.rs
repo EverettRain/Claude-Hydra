@@ -35,7 +35,9 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     if (node.is_some() || timezone.is_some() || sandboxed) && p.is_default && install.is_msix() {
         return Err("商店版默认账号无法应用环境配置中的代理节点、时区或沙箱隔离。".into());
     }
-    if let Some(reason) = s.account(&p.id).blocked {
+    // A soft cut (checks kept failing) is not refused here: the relay host re-checks the exit
+    // before it opens the route, and the launch check below verifies it once more.
+    if let Some(reason) = s.account(&p.id).blocked.filter(|_| !s.account(&p.id).blocked_soft) {
         return Err(format!("账号未启动：出口保护已切断这个账号的网络——{reason}\n请在账号菜单中选择“恢复网络”重新检测，或在环境配置中重新绑定出口。"));
     }
     if effective.unusable_node {

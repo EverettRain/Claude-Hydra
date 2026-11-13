@@ -692,13 +692,19 @@ pub fn run(start_in_tray: bool) {
             // This process hosts the per-account proxy relays for as long as it runs.
             relay::set_host();
             let notify = handle.clone();
-            guard::on_block(move |id, reason| {
+            guard::on_block(move |id, reason, soft| {
                 let _ = notify.emit_to("main", "guard-blocked", (id, reason));
                 after_change(&notify);
                 let name = settings::load().account(id).label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| id.to_string());
-                let text = format!("出口保护已切断账号“{name}”的网络。\n\n{reason}\n\n在账号菜单中选择“恢复网络”可重新检测。");
+                let text = if soft {
+                    format!("出口保护暂时无法核验账号“{name}”的出口，已暂停它的网络。\n\n{reason}\n\nHydra 会自动重试，核验通过后自动恢复网络；也可以在账号菜单中选择“恢复网络”立即重新检测。")
+                } else {
+                    format!("出口保护已切断账号“{name}”的网络。\n\n{reason}\n\n在账号菜单中选择“恢复网络”可重新检测。")
+                };
                 std::thread::spawn(move || sys::error_box(&text));
             });
+            let restored = handle.clone();
+            guard::on_restore(move |_id| after_change(&restored));
             relay::start_monitor();
             browser::start_watcher(handle.clone());
             browser::remember_fallback();
