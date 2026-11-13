@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
 
-const REPO: &str = "jin-yu-liu/Claude-Hydra";
+const REPO: &str = "EverettRain/Claude-Hydra";
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
