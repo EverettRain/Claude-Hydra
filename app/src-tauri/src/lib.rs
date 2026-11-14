@@ -898,6 +898,13 @@ pub fn run(start_in_tray: bool) {
         .build(tauri::generate_context!())
         .expect("error while building Claude-Hydra")
         .run(|_app, event| {
+            // Clicking the Dock icon or opening the app again from Finder or Spotlight reaches the
+            // running instance as a reopen request, not a second launch, so the single-instance
+            // plugin never sees it; the window closed with Cmd+W must be recreated here.
+            #[cfg(target_os = "macos")]
+            if let RunEvent::Reopen { .. } = &event {
+                show_main(_app);
+            }
             if matches!(event, RunEvent::Exit) {
                 relay::shutdown();
                 #[cfg(target_os = "macos")]
