@@ -10,6 +10,7 @@ pub mod cli;
 pub mod code_usage;
 pub mod container;
 mod dashboard;
+mod quota_history;
 pub mod environment;
 pub mod guard;
 pub mod identity;
@@ -384,7 +385,11 @@ async fn rebuild_container(id: String, keep_changes: bool) -> Result<(), String>
 
 #[tauri::command]
 async fn delete_container(id: String) -> Result<Option<String>, String> {
-    let r = tauri::async_runtime::spawn_blocking(move || container::delete(&id)).await.map_err(|e| e.to_string())?;
+    let r = tauri::async_runtime::spawn_blocking(move || {
+        let note = container::delete(&id)?;
+        quota_history::delete(&id);
+        Ok::<_, String>(note)
+    }).await.map_err(|e| e.to_string())?;
     relay::sync_soon();
     r
 }
@@ -393,6 +398,12 @@ async fn delete_container(id: String) -> Result<Option<String>, String> {
 #[tauri::command]
 async fn usage_dashboard() -> Result<dashboard::Dashboard, String> {
     tauri::async_runtime::spawn_blocking(dashboard::build).await.map_err(|e| e.to_string())
+}
+
+/// A container account's remaining-quota history, with what its status line logged since.
+#[tauri::command]
+async fn quota_history(id: String) -> Result<quota_history::History, String> {
+    blocking(move || quota_history::sync(&id, &container::claude_data_dir(&settings::load(), &id)?)).await
 }
 
 /// The last dashboard built, shown while `usage_dashboard` runs.
@@ -974,6 +985,7 @@ pub fn run(start_in_tray: bool) {
             create_container_shortcut,
             usage_dashboard,
             usage_dashboard_cached,
+            quota_history,
             diagnostics,
             session_preview,
             read_import,

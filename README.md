@@ -44,7 +44,7 @@
 | 代理节点 | 支持 Clash 订阅节点（内置 Mihomo 内核，无需另装）与自定义 SOCKS5 / HTTP / HTTPS 节点，附出口检测与换 IP 链接 |
 | 防泄漏 | 内置本机中继，DNS、WebRTC、UDP/QUIC、IPv6 全部经节点或被阻止；节点失效时断网而非直连 |
 | 时区同步 | 时区可跟随代理出口、跟随系统或手动指定；确认出口后直接显示具体时区 |
-| 仪表板 | 启动首页：容器账号的 token 消耗、API 等价成本、活动热力图与趋势 |
+| 仪表板 | 启动首页：容器账号的 token 消耗、API 等价成本、活动热力图与趋势，以及各容器账号的 5 小时与本周额度 |
 | 配置管理 | 浏览、阅读、迁移和导出本机、桌面版账号与容器的 Claude Code 会话；管理 CLAUDE.md、settings.json、技能、命令、MCP 与插件 |
 | Claude Code 容器 | macOS 上借助用户自装的 OrbStack，在容器中运行 Claude Code；网络只经环境的代理节点，UDP / IPv6 / 直连全部阻断 |
 
@@ -140,7 +140,13 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 - 成本按 Anthropic 官方 API 单价估算（含缓存读写与快速模式），是“若按 API 计费”的等价金额，不是订阅实际扣费；没有已知单价的模型单独标为未定价。
 - 账号的订阅与邮箱读自 Claude Code 记录的账号信息（`.claude.json`），不读取登录凭据。
 
-**不显示订阅的剩余额度**：读取额度需要拿账号的登录凭据去请求 Anthropic 的服务，而 Anthropic 的条款不允许第三方应用收集或使用 Claude 账号的登录凭据（见 Claude Code 文档的 [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)）。剩余额度请在 Claude Code 中用 `/usage` 查看。
+**额度**：每个容器账号下显示 5 小时与本周额度的已用比例和重置时间。数值来自容器里 Claude Code 的状态栏：Claude Code 每次刷新状态栏都会把额度交给状态栏脚本，Hydra 自带的 `hydra-statusline` 在状态栏显示「模型 · 上下文 · 5 小时 · 本周」，同时把额度追加到该账号 Claude 数据文件夹的 `.hydra-rate-limits.jsonl`（数值变化时立即记录，不变时最多每 5 分钟一条；超过 1 MB 时丢掉较早的一半）。
+
+**剩余额度趋势**：展开账号下方的「剩余额度趋势」，可按 5 小时或本周查看当前周期的剩余走势（虚线为匀速用完的参考线）与最近 14 天的每日额度用量。Hydra 在读取仪表板或展开趋势时把状态栏的记录并入额度历史，Hydra 没运行时记下的读数也不会丢：同一周期内连续不变的读数合并为一段，两次读数间已用百分比的增长只有在同一天内才计入当天，跨日期的部分单列为“未分配”，重置不算消耗；记录保留 35 天，存放在 `quota-history/`。
+
+- 进入容器时，若该账号的 Claude Code 还没有设置状态栏（`settings.json` 的 `statusLine`），Hydra 自动设为 `hydra-statusline`；已有自己的状态栏的不改动，可在自己的脚本前加 `tee >(hydra-statusline --record) |` 继续记录额度。
+- 只在容器里使用 Claude Code 时更新，显示的是最近一次使用时的数值；重置时间已过的窗口标为「已重置」。Claude Code 交给状态栏的只有 5 小时与本周两项，按模型的额度请在 Claude Code 中用 `/usage` 查看。
+- 桌面版账号不显示额度。Hydra 不读取、不使用任何账号的登录凭据：Anthropic 的条款不允许第三方应用收集或使用 Claude 账号的登录凭据（见 Claude Code 文档的 [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)），状态栏是 Claude Code 自己交出额度的唯一途径。
 
 ## 配置管理
 

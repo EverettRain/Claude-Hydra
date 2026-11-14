@@ -201,7 +201,7 @@ pub fn copy_extension(f: &Folder, path: &str, targets: &[Folder], overwrite: boo
 
 // ---- MCP servers ----
 
-fn read_json(path: &Path) -> Result<Map<String, Value>, String> {
+pub(crate) fn read_json(path: &Path) -> Result<Map<String, Value>, String> {
     match fs::read(path) {
         Ok(bytes) => match serde_json::from_slice(&bytes) {
             Ok(Value::Object(m)) => Ok(m),
@@ -212,7 +212,7 @@ fn read_json(path: &Path) -> Result<Map<String, Value>, String> {
     }
 }
 
-fn write_json(path: &Path, m: &Map<String, Value>) -> Result<(), String> {
+pub(crate) fn write_json(path: &Path, m: &Map<String, Value>) -> Result<(), String> {
     replace(path, &serde_json::to_vec_pretty(m).map_err(|e| e.to_string())?)
 }
 

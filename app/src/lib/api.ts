@@ -216,7 +216,14 @@ export interface CodeUsage {
   unpriced: number;
   activeMs: number;
 }
-export interface ContainerUsage { id: string; name: string; account: CodeAccount; usage: CodeUsage; blocked: string | null; blockedSoft: boolean }
+/** Consecutive unchanged readings of one cycle (times in ms). */
+export interface QuotaRun { utilization: number; resetsAt: number | null; from: number; to: number; samples: number }
+export interface QuotaHistory { windows: Record<string, QuotaRun[]> }
+/** A plan limit as the container's status line recorded it; times in ms. */
+export interface PlanLimit { used: number; resetsAt: number | null }
+/** What Claude Code last passed to the container's status line about the plan's limits. */
+export interface PlanLimits { recordedAt: number; fiveHour: PlanLimit | null; sevenDay: PlanLimit | null }
+export interface ContainerUsage { id: string; name: string; account: CodeAccount; usage: CodeUsage; blocked: string | null; blockedSoft: boolean; limits: PlanLimits | null }
 export interface UsageDashboard { containers: ContainerUsage[]; total: CodeUsage; /** When it was built (ms). */ updatedAt: number }
 
 export const api = {
@@ -254,6 +261,7 @@ export const api = {
   deleteContainer: (id: string) => invoke<string | null>("delete_container", { id }),
   createContainerShortcut: (id: string) => invoke<string>("create_container_shortcut", { id }),
   usageDashboard: () => invoke<UsageDashboard>("usage_dashboard"),
+  quotaHistory: (id: string) => invoke<QuotaHistory>("quota_history", { id }),
   usageDashboardCached: () => invoke<UsageDashboard | null>("usage_dashboard_cached"),
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),

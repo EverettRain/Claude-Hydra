@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""hydra-statusline: Claude Code status line for a Claude-Hydra container.
+
+Claude Code runs the command in `statusLine` (settings.json) and hands it the session's data on
+stdin, including `rate_limits`: how much of the plan's 5-hour and weekly limits is used. This
+script shows model, context and those limits, and logs the limits to the Claude data folder
+(`.hydra-rate-limits.jsonl`), where Claude-Hydra reads them for its dashboard and quota trend.
+No credentials are involved: the numbers are what Claude Code itself passes to status lines.
+
+  hydra-statusline            status line: print the summary and log the limits
+  hydra-statusline --record   log only, print nothing; for a status line script of your own:
+                              tee >(hydra-statusline --record) | your-script
+"""
+import json, os, sys, time
+
+LOG = ".hydra-rate-limits.jsonl"
+# Status lines refresh many times a minute; an unchanged reading is logged at most this often,
+# well inside the gap after which Claude-Hydra no longer treats readings as one unchanged run.
+HEARTBEAT_MS = 5 * 60 * 1000
+# Past this size the older half is dropped; Claude-Hydra keeps what it has already read.
+MAX_BYTES = 1 << 20
+
+
+def last_line(path):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 4096))
+            lines = f.read().splitlines()
+        return json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        return None
+
+
+def record(limits):
+    folder = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    path = os.path.join(folder, LOG)
+    now = int(time.time() * 1000)
+    last = last_line(path)
+    if isinstance(last, dict) and last.get("rateLimits") == limits and now - (last.get("at") or 0) < HEARTBEAT_MS:
+        return
+    with open(path, "a") as f:
+        f.write(json.dumps({"at": now, "rateLimits": limits}, separators=(",", ":")) + "\n")
+    if os.path.getsize(path) > MAX_BYTES:
+        with open(path, "rb") as f:
+            f.seek(-(MAX_BYTES // 2), os.SEEK_END)
+            tail = f.read()
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(tail[tail.find(b"\n") + 1:])
+        os.replace(tmp, path)
+
+
+def summary(data, limits):
+    parts = []
+    model = (data.get("model") or {}).get("display_name")
+    if model:
+        parts.append(model)
+    context = (data.get("context_window") or {}).get("used_percentage")
+    if isinstance(context, (int, float)):
+        parts.append(f"上下文 {round(context)}%")
+    for key, label in (("five_hour", "5 小时"), ("seven_day", "本周")):
+        used = (limits.get(key) or {}).get("used_percentage")
+        if isinstance(used, (int, float)):
+            parts.append(f"{label} {round(used)}%")
+    return " · ".join(parts)
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    # Absent until the session's first response, and for accounts without plan limits.
+    limits = data.get("rate_limits")
+    limits = limits if isinstance(limits, dict) else {}
+    if limits:
+        try:
+            record(limits)
+        except OSError:
+            pass  # A status line must never fail because the log could not be written.
+    if "--record" not in sys.argv[1:]:
+        print(summary(data, limits))
+
+
+if __name__ == "__main__":
+    main()

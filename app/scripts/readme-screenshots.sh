@@ -213,13 +213,32 @@ def recent(folder, cwd, title, ago, turns):
         s.answer(t + i * 600e3 + 60e3, [{"type": "text", "text": "好的。"}], 0.6)
     s.save(t + turns * 600e3)
 
-def account(folder, email):
+def account(folder, email, five_hour, seven_day):
     write(f"{folder}/.claude.json", {"oauthAccount": {"accountUuid": "00000000-0000-4000-8000-000000000000", "emailAddress": email, "planDisplayName": "Max"}})
     write(f"{folder}/CLAUDE.md", "# 全局记忆\n\n- 回复使用中文。\n- 修改代码时跟随项目已有风格。\n")
+    # What the container's status line (hydra-statusline) logs: ten days of work hours, ending at
+    # the given shares 20 minutes ago. Resets in seconds, as Claude Code sends them.
+    now_s = int(time.time()) - 1200
+    week_reset = now_s + 3 * 86400
+    lines = []
+    for day in range(9, -1, -1):
+        # Today's last reading is the latest one, inside a 5-hour window that has not reset yet.
+        start = now_s - day * 86400 - 12 * 1500
+        five_reset = start + 5 * 3600 if day else now_s + 2 * 3600
+        for step in range(13):
+            at = start + step * 1500
+            if at > now_s:
+                break
+            done = (step + 1) / 13
+            week = seven_day * (1 - day / 10) * (0.9 + 0.1 * done) if day < 4 else seven_day * 0.08 * (4 - day % 4) * done
+            lines.append(json.dumps({"at": at * 1000, "rateLimits": {
+                "five_hour": {"used_percentage": round(five_hour * done if day else min(five_hour, five_hour * done * 1.2), 1), "resets_at": five_reset},
+                "seven_day": {"used_percentage": round(min(week, seven_day), 1), "resets_at": week_reset}}}))
+    write(f"{folder}/.hydra-rate-limits.jsonl", "\n".join(lines) + "\n")
 
 us, jp = f"{root}/containers/ctr-1/claude", f"{root}/containers/ctr-2/claude"
-account(us, "us@example.com")
-account(jp, "jp@example.com")
+account(us, "us@example.com", 23.5, 41.2)
+account(jp, "jp@example.com", 8, 62.5)
 history(us, ["/workspace/shop-api", "/workspace/web"], 10, 1.0)
 history(jp, ["/workspace/game/little-lander"], 6, 0.55)
 recent(us, "/workspace/web", "首页首屏改为服务端渲染", 3 * HOUR, 9)

@@ -1,11 +1,12 @@
-import { Box, ChartLine, Loader2, RefreshCw } from "lucide-react";
+import { Box, ChartLine, ChevronDown, Loader2, RefreshCw } from "lucide-react";
+import { QuotaTrend } from "@/components/QuotaTrend";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Heatmap, type Metric } from "@/components/Heatmap";
 import { Group, Page, PageHeader } from "@/components/PageHeader";
 import { Tag } from "@/components/Tag";
 import { TrendChart } from "@/components/TrendChart";
 import { Button } from "@/components/ui/button";
-import { api, errorText, type Tokens, type UsageDashboard } from "@/lib/api";
+import { api, errorText, type PlanLimit, type PlanLimits, type QuotaHistory, type Tokens, type UsageDashboard } from "@/lib/api";
 import { byDay, compact, daily, duration, highlights, money, sumDays, totalOf } from "@/lib/usage";
 import { cn, relativeTime } from "@/lib/utils";
 
@@ -14,6 +15,68 @@ const MAX_MODELS = 6;
 const isMac = navigator.userAgent.includes("Mac");
 // The last dashboard of this session: shown at once when the page is opened again.
 let lastDashboard: UsageDashboard | null = null;
+
+function LimitMeter({ label, value }: { label: string; value: PlanLimit }) {
+  // Past its reset the window has started over; the recorded share no longer applies.
+  const reset = value.resetsAt !== null && value.resetsAt <= Date.now();
+  const used = reset ? 0 : value.used;
+  const tone = used >= 90 ? "bg-danger" : used >= 75 ? "bg-warn" : "bg-fg";
+  const when = value.resetsAt === null ? "" : reset ? "已重置" : `重置 ${new Date(value.resetsAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[11.5px] text-muted">{label}已用</span>
+        <span className="font-mono text-[12px] tabular-nums">{reset ? "—" : `${used.toFixed(0)}%`}</span>
+      </div>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-pill">
+        <div className={cn("h-full rounded-full", tone)} style={{ width: `${Math.max(used, 1.5)}%` }} />
+      </div>
+      <div className="mt-1 h-4 text-[10.5px] text-faint">{when}</div>
+    </div>
+  );
+}
+
+const TREND_WINDOWS = ["five_hour", "seven_day"];
+
+/**
+ * The plan's 5-hour and weekly limits as the container's own Claude Code last saw them: its status
+ * line logs what Claude Code hands it, so they are as fresh as the account's latest session.
+ */
+function Limits({ id, value }: { id: string; value: PlanLimits | null }) {
+  const [open, setOpen] = useState(false);
+  const [history, setHistory] = useState<QuotaHistory | null>(null);
+  const [historyError, setHistoryError] = useState("");
+  // Reload whenever the dashboard brings a newer reading, so the trend ends at it.
+  useEffect(() => {
+    if (!open) return;
+    api.quotaHistory(id).then((h) => { setHistory(h); setHistoryError(""); }, (e) => setHistoryError(errorText(e)));
+  }, [open, id, value?.recordedAt]);
+  if (!value || (!value.fiveHour && !value.sevenDay)) {
+    return <p className="mt-2 pl-10 text-[11.5px] text-faint">在容器中使用 Claude Code 后，这里显示 5 小时与本周额度。</p>;
+  }
+  return (
+    <div className="mt-3 pl-10">
+      <div className="grid grid-cols-2 gap-x-6">
+        {value.fiveHour ? <LimitMeter label="5 小时" value={value.fiveHour} /> : <span />}
+        {value.sevenDay ? <LimitMeter label="本周" value={value.sevenDay} /> : <span />}
+      </div>
+      <div className="flex items-center gap-3 text-[11.5px] text-muted">
+        <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1 hover:text-fg active:!scale-100" aria-expanded={open}>
+          <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-180")} />
+          剩余额度趋势
+        </button>
+        <span className="text-faint">记录于 {relativeTime(value.recordedAt)}</span>
+      </div>
+      {open && (
+        <div className="mt-2 rounded-xl border border-line-2 p-3">
+          {historyError ? <p className="text-[12px] text-danger">{historyError}</p>
+            : history ? <QuotaTrend history={history} order={TREND_WINDOWS} />
+            : <p className="text-[12px] text-muted">正在读取…</p>}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function Segmented<T extends string | number>({ value, options, onChange, label }: { value: T; options: [T, string][]; onChange: (v: T) => void; label: string }) {
   return (
@@ -209,12 +272,13 @@ function ContainerDashboard() {
                   <ChartLine />
                 </Button>
               </div>
+              <Limits id={c.id} value={c.limits} />
             </div>
           );
         })}
       </Group>
       <p className="px-1 text-[11.5px] leading-relaxed text-muted">
-        Token 与成本读取自各容器 Claude 数据文件夹中的会话记录，不联网；每次读取后按小时汇总存入 Hydra 的用量历史，Claude Code 清理旧会话记录（默认 30 天）后，已记录的消耗仍然保留，但从未被 Hydra 读取过的旧记录无法补回。成本是按官方 API 单价估算的等价金额，不是订阅的实际扣费。订阅的剩余额度请在 Claude Code 中用 /usage 查看：读取额度需要使用账号的登录凭据，Anthropic 不允许第三方应用这样做。
+        Token 与成本读取自各容器 Claude 数据文件夹中的会话记录，不联网；每次读取后按小时汇总存入 Hydra 的用量历史，Claude Code 清理旧会话记录（默认 30 天）后，已记录的消耗仍然保留，但从未被 Hydra 读取过的旧记录无法补回。成本是按官方 API 单价估算的等价金额，不是订阅的实际扣费。额度来自容器中 Claude Code 的状态栏：Claude Code 把 5 小时与本周额度交给状态栏，Hydra 读取状态栏留下的记录，不使用账号的登录凭据；所以只在使用 Claude Code 时更新，按模型的额度请在 Claude Code 中用 /usage 查看。
       </p>
     </>
   );

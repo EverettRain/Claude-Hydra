@@ -52,7 +52,24 @@ const TOOLS_DIR: &str = "/opt/claude-hydra/bin";
 const LAYOUT: &str = "2";
 
 /// Tools installed into every workspace (read-only).
-const TOOLS: [(&str, &str); 1] = [("hydra-audit", include_str!("../container-images/tools/hydra-audit"))];
+const TOOLS: [(&str, &str); 2] = [
+    ("hydra-audit", include_str!("../container-images/tools/hydra-audit")),
+    ("hydra-statusline", include_str!("../container-images/tools/hydra-statusline")),
+];
+
+/// Claude Code's status line in the container: shows the plan's limits and records them for the
+/// dashboard (`dashboard::LIMITS_RECORD`). Claude Code hands them to status lines itself, so the
+/// account's credentials are never touched.
+const STATUSLINE: &str = "/opt/claude-hydra/bin/hydra-statusline";
+
+/// Points the account's Claude Code status line at `hydra-statusline`, unless it has one of its own.
+fn ensure_statusline(claude: &Path) -> Result<(), String> {
+    let path = claude.join("settings.json");
+    let mut settings = crate::claude_config::read_json(&path)?;
+    if settings.contains_key("statusLine") { return Ok(()); }
+    settings.insert("statusLine".into(), serde_json::json!({ "type": "command", "command": STATUSLINE, "padding": 0 }));
+    crate::claude_config::write_json(&path, &settings)
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -683,6 +700,8 @@ pub fn enter(id: &str, token: Option<&str>) -> Result<i32, String> {
     prepare_tools(id)?;
     let gateway_id = ensure_gateway(&docker, id, &n, port, &gateway_image)?;
     ensure_workspace(&docker, id, &n, &spec, &base, &gateway_id)?;
+    // Only the dashboard's limits depend on it; entering goes ahead either way.
+    if let Err(e) = ensure_statusline(&claude_dir(id, &spec)) { crate::paths::append_log("hydra-error.log", &format!("status line: {e}")); }
 
     let folders: Vec<String> = spec.mounts.iter().map(|m| format!("/workspace/{}", m.name)).collect();
     say("====================================");
@@ -1184,6 +1203,29 @@ mod tests {
         assert!(a.iter().any(|x| x == "--read-only"));
         assert!(a.windows(2).any(|w| w == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]));
         assert_eq!(a.last().unwrap(), "gw:1");
+    }
+
+    #[test]
+    fn the_status_line_is_set_once_and_never_over_the_accounts_own() {
+        // Arrange
+        let dir = std::env::temp_dir().join(format!("hydra-statusline-{}", uuid::Uuid::new_v4().simple()));
+        let (fresh, own) = (dir.join("fresh"), dir.join("own"));
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(fresh.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        std::fs::write(own.join("settings.json"), r#"{"statusLine":{"type":"command","command":"~/my-line.sh"}}"#).unwrap();
+
+        // Act
+        ensure_statusline(&fresh).unwrap();
+        ensure_statusline(&own).unwrap();
+        ensure_statusline(&dir.join("missing")).unwrap_or_default();
+
+        // Assert
+        let read = |p: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p.join("settings.json")).unwrap()).unwrap();
+        assert_eq!((read(&fresh)["statusLine"]["command"].as_str(), read(&fresh)["model"].as_str()), (Some(STATUSLINE), Some("opus")));
+        assert_eq!(read(&own)["statusLine"]["command"], "~/my-line.sh");
+        assert!(STATUSLINE.starts_with(TOOLS_DIR) && TOOLS.iter().any(|(name, _)| STATUSLINE.ends_with(name)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
