@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Folder, Search, Trash2, Upload } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, Search, Trash2, Upload } from "lucide-react";
 import { AccountPicker } from "@/components/AccountPicker";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -123,21 +123,26 @@ export function DesktopSessions({ account, profiles, select }: { account: Profil
           </button>
           {!trash && <Button size="sm" variant="ghost" disabled={busy} onClick={() => open({ type: "move", ids: all.map(s => s.id) })}>迁移整组</Button>}
         </div>
-        {!folded && list.map(s => <div key={s.id} className="flex items-center gap-2 px-4 py-2">
-          {picking && <input aria-label={`选择 ${s.title}`} type="checkbox" checked={picked.has(s.id)} onChange={() => toggle([s.id])} />}
-          <div className="min-w-0 flex-1"><div className="truncate text-[13px]" title={s.title}>{imported(s.id) && !trash
-            ? <button onClick={() => read(s)} className="hover:underline">{s.title}</button> : s.title}</div>
+        {!folded && list.map(s => {
+          const readable = imported(s.id) && !trash;
+          const meta = <>
+            <span className="block truncate text-[13px]" title={s.title}>{s.title}</span>
             <small className="block truncate text-muted" title={s.model ?? undefined}>
               {s.lastActivityAt != null ? new Date(s.lastActivityAt).toLocaleString("zh-CN", {month:"2-digit", day:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit"}) : "时间未知"}
               {" · "}{s.model || "模型未知"}{" · "}{s.turns == null ? "轮数未知" : `${s.turns} 轮`}
-            </small></div>
-          {!trash && <Button size="sm" variant="outline" disabled={busy} onClick={() => open({ type: "move", ids: [s.id] })}>迁移</Button>}
-          <Button size={trash ? "sm" : "iconSm"} variant="ghost" aria-label={trash ? "还原" : "删除"} title={trash ? "还原" : "移入回收站"} disabled={busy} onClick={() => run(async () => {
+            </small></>;
+          return <div key={s.id} className={`group relative flex items-center gap-2.5 px-3 py-2 transition-colors ${readable ? "hover:bg-pill" : ""} has-[button.row-open:focus-visible]:bg-pill has-[button.row-open:focus-visible]:ring-2 has-[button.row-open:focus-visible]:ring-inset has-[button.row-open:focus-visible]:ring-line ${picked.has(s.id) ? "bg-brand-soft hover:bg-brand-soft" : ""}`}>
+          {/* Above the row-wide click area of the title button. */}
+          {picking && <input className="relative z-10" aria-label={`选择 ${s.title}`} type="checkbox" checked={picked.has(s.id)} onChange={() => toggle([s.id])} />}
+          {readable ? <button className="row-open min-w-0 flex-1 text-left outline-none after:absolute after:inset-0 after:content-['']" onClick={() => read(s)}>{meta}</button> : <div className="min-w-0 flex-1">{meta}</div>}
+          {readable && <ChevronRight aria-hidden className="-ml-1 h-4 w-4 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100 group-has-[button.row-open:focus-visible]:opacity-100" />}
+          {!trash && <Button className="relative z-10" size="sm" variant="outline" disabled={busy} onClick={() => open({ type: "move", ids: [s.id] })}>迁移</Button>}
+          <Button className="relative z-10" size={trash ? "sm" : "iconSm"} variant="ghost" aria-label={trash ? "还原" : "删除"} title={trash ? "还原" : "移入回收站"} disabled={busy} onClick={() => run(async () => {
             await api.recycleSession(account.id, trash ? "restore" : "delete", s.id);
             setPicked(old => { const next = new Set(old); next.delete(s.id); return next; });
             toast(trash ? "已还原会话" : "已移入回收站");
           })}>{trash ? "还原" : <Trash2 />}</Button>
-        </div>)}
+        </div>; })}
       </section>;
     })}
     <Dialog open={!!action} onClose={() => { if (!busy) setAction(null); }}

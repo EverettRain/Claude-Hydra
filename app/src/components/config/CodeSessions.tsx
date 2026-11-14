@@ -1,5 +1,5 @@
 import { open as pickFile, save as pickSave } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, Copy, Download, Folder, MoveRight, Search, Trash2, Upload } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Download, Folder, MoveRight, Search, Trash2, Upload } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
@@ -164,12 +164,14 @@ export function CodeSessions({ folder, folders, chatHost, onReading }: {
               </button>
             </div>
             {!folded && list.map((s) => (
-              <div key={s.id} className="flex items-center gap-2.5 px-3 py-2">
-                <input type="checkbox" aria-label={`选择 ${s.title}`} checked={picked.has(s.id)} disabled={busy} onChange={() => toggle([s.id])} />
-                <button className="min-w-0 flex-1 text-left" onClick={() => openSession(s)}>
-                  <span className="block truncate text-[13px] hover:underline" title={s.title}>{s.title}</span>
+              <div key={s.id} className={`group relative flex items-center gap-2.5 px-3 py-2 transition-colors hover:bg-pill has-[button.row-open:focus-visible]:bg-pill has-[button.row-open:focus-visible]:ring-2 has-[button.row-open:focus-visible]:ring-inset has-[button.row-open:focus-visible]:ring-line ${picked.has(s.id) ? "bg-brand-soft hover:bg-brand-soft" : ""}`}>
+                {/* Above the row-wide click area of the title button. */}
+                <input className="relative z-10" type="checkbox" aria-label={`选择 ${s.title}`} checked={picked.has(s.id)} disabled={busy} onChange={() => toggle([s.id])} />
+                <button className="row-open min-w-0 flex-1 text-left outline-none after:absolute after:inset-0 after:content-['']" onClick={() => openSession(s)}>
+                  <span className="block truncate text-[13px]" title={s.title}>{s.title}</span>
                   <small className="block truncate text-muted">{formatTime(s.lastActivityAt)} · {s.model ?? "模型未知"} · {s.turns} 轮 · {formatSize(s.size)}</small>
                 </button>
+                <ChevronRight aria-hidden className="h-4 w-4 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100 group-has-[button.row-open:focus-visible]:opacity-100" />
               </div>
             ))}
           </section>
