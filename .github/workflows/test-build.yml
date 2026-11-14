@@ -1,0 +1,52 @@
+name: Test build
+
+# An installer for trying a commit before it is released: no Release, no update channel. Start
+# it from the Actions page (branch and platform); the installer is attached to the run.
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform
+        type: choice
+        default: windows
+        options: [windows, macos-arm, macos-intel]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Apple Silicon is cross-compiled on the Intel image, as in release.yml.
+    runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'macos-15-intel' }}
+    env:
+      TARGET: ${{ inputs.platform == 'windows' && 'x86_64-pc-windows-msvc' || inputs.platform == 'macos-arm' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+      BUNDLE: ${{ inputs.platform == 'windows' && 'nsis' || 'dmg' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95'
+          targets: ${{ env.TARGET }}
+      - run: pnpm install --frozen-lockfile
+        working-directory: app
+      # Updater artifacts are part of every build, so they are signed as in a release.
+      - run: pnpm tauri build --target "$TARGET" --bundles "$BUNDLE"
+        working-directory: app
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-hydra-${{ inputs.platform }}-${{ github.ref_name }}-run${{ github.run_number }}
+          path: app/src-tauri/target/${{ env.TARGET }}/release/bundle/${{ env.BUNDLE }}/*.${{ env.BUNDLE == 'nsis' && 'exe' || 'dmg' }}
+          if-no-files-found: error
+          retention-days: 14
