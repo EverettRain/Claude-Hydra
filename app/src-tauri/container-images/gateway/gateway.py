@@ -1,13 +1,14 @@
 """Transparent gateway of one Claude-Hydra container account.
 
 The workspace container shares this container's network namespace. Every TCP connection is
-redirected (redsocks) into an HTTP CONNECT to the account's Claude-Hydra relay on the Mac;
+redirected (redsocks) into an HTTP CONNECT to the account's Claude-Hydra relay on the host;
 DNS is answered by DNS-over-HTTPS through the same relay. Nothing else may leave: no UDP, no
 IPv6, no direct route. If the relay is down or paused by the exit guard, the workspace has no
 network at all.
 
-The relay address is read from /etc/hydra-gateway/upstream ("ip:port", mounted read-only) at
-start, so Hydra can move the relay to another port with a gateway restart.
+The relay address is read from /etc/hydra-gateway/upstream ("host:port", mounted read-only) at
+start, so Hydra can move the relay to another port with a gateway restart. The host is an IP,
+or a name from /etc/hosts (`--add-host`), resolved here before any rule is in place.
 """
 import ipaddress
 import os
@@ -22,7 +23,7 @@ import urllib.request
 
 with open('/etc/hydra-gateway/upstream') as f:
     host, _, port = f.read().strip().rpartition(':')
-proxy_ip = str(ipaddress.IPv4Address(host))
+proxy_ip = str(ipaddress.IPv4Address(socket.gethostbyname(host)))
 proxy_port = int(port)
 if not 0 < proxy_port < 65536:
     raise SystemExit('invalid upstream port')

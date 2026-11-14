@@ -23,7 +23,7 @@ pub mod paths;
 pub mod pricing;
 pub mod profiles;
 pub mod node;
-pub mod orbstack;
+pub mod runtime;
 mod releases;
 pub mod sandbox;
 pub mod clash;
@@ -311,9 +311,12 @@ async fn rebind_exit(app: AppHandle, id: String) -> Result<String, String> {
 #[serde(rename_all = "camelCase")]
 struct ContainerRuntime {
     supported: bool,
+    /// "OrbStack" or "Docker Desktop".
+    name: Option<&'static str>,
+    ssh_agent: bool,
     /// Docker CLI set in Settings; `None` = automatic.
     docker_path: Option<String>,
-    /// OrbStack's version when connected.
+    /// The runtime's version when connected.
     version: Option<String>,
     error: Option<String>,
     terminal: String,
@@ -325,10 +328,12 @@ async fn container_runtime() -> ContainerRuntime {
     let s = settings::load();
     let connected = tauri::async_runtime::spawn_blocking({
         let path = s.docker_path.clone();
-        move || orbstack::connect_with(path.as_deref()).map(|(_, v)| v)
+        move || runtime::connect_with(path.as_deref()).map(|(_, _, v)| v)
     }).await.unwrap_or_else(|e| Err(e.to_string()));
     ContainerRuntime {
-        supported: orbstack::supported(),
+        supported: runtime::supported(),
+        name: runtime::current().map(|r| r.name),
+        ssh_agent: runtime::current().is_some_and(|r| r.ssh_agent),
         docker_path: s.docker_path,
         version: connected.as_ref().ok().cloned(),
         error: connected.err(),
@@ -341,7 +346,7 @@ async fn container_runtime() -> ContainerRuntime {
 fn set_container_runtime(docker_path: Option<String>, terminal: String) -> Result<(), String> {
     terminal::validate(&terminal)?;
     let docker_path = docker_path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
-    if let Some(p) = &docker_path { orbstack::locate(Some(p))?; }
+    if let Some(p) = &docker_path { runtime::current().ok_or("这台电脑不支持容器。")?.locate(Some(p))?; }
     settings::update(|s| { s.docker_path = docker_path; s.terminal = terminal; })
 }
 

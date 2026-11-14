@@ -10,7 +10,7 @@
 |---|---|---|---|
 | 本机 | `~/.claude`（Windows 为 `%USERPROFILE%\.claude`） | `~/.claude.json` | 本机路径 |
 | 桌面版账号 | 有独立 Claude Code 目录时为 Hydra 数据目录下的 `claude-code/<key>`，否则与本机共用 | 目录内 | 本机路径 |
-| 容器账号（仅 macOS） | 容器设置里的 Claude 数据文件夹 | 目录内 | 容器路径：共享文件夹在 `/workspace/<名称>` |
+| 容器账号（macOS 的 OrbStack、Windows 的 Docker Desktop） | 容器设置里的 Claude 数据文件夹 | 目录内 | 容器路径：共享文件夹在 `/workspace/<名称>` |
 
 页面打开时先显示所有位置的卡片（按类别分组，显示会话数和最近活动时间，位置较多时可搜索）；选中后卡片收起成顶栏，与标签页同在一个卡片里，可在 Finder（Windows 为资源管理器）中打开该目录，或展开回位置列表切换。会话数只按文件名统计，不解析内容，位置再多也能很快列出。
 
@@ -58,4 +58,4 @@ Claude Code 把每个会话存成 `projects/<编码后的工作目录>/<会话 I
 
 ## Windows
 
-除容器账号外的功能在 Windows 上同样可用：本机目录是 `%USERPROFILE%\.claude`，桌面版账号按启动器的规则判断是否有独立目录（启用了独立 Claude Code 目录，且不是默认账号或使用 Sandboxie 隔离），Sandboxie 隔离的账号的目录直通到真实磁盘。编辑文本文件时保留原文件的换行符（CRLF 或 LF）。会话从 Windows 路径迁到容器时，路径分隔符换成 `/`。
+所有功能在 Windows 上同样可用（容器账号需要 Docker Desktop）：本机目录是 `%USERPROFILE%\.claude`，桌面版账号按启动器的规则判断是否有独立目录（启用了独立 Claude Code 目录，且不是默认账号或使用 Sandboxie 隔离），Sandboxie 隔离的账号的目录直通到真实磁盘。编辑文本文件时保留原文件的换行符（CRLF 或 LF）。会话从 Windows 路径迁到容器时，路径分隔符换成 `/`。

@@ -34,6 +34,7 @@ const themes: { id: ThemeMode; label: string }[] = [
 ];
 
 export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstallChanged }: Props) {
+  const containerRuntime = info?.platform === "macos" ? "OrbStack" : info?.platform === "windows" ? "Docker Desktop" : null;
   const toast = useToast();
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -51,7 +52,7 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
       toast(errorText(e), "error");
     }
   };
-  useEffect(() => { if (info?.platform === "macos") void loadRuntime(); }, [info?.platform]);
+  useEffect(() => { if (containerRuntime) void loadRuntime(); }, [containerRuntime]);
   const saveRuntime = (key: string, docker: string | null, terminal: string, done: string) =>
     act(key, async () => { await api.setContainerRuntime(docker, terminal); await loadRuntime(); }, done);
 
@@ -190,18 +191,18 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
           </div>
         </Group>
 
-        {info?.platform === "macos" && (
-          <Group label="OrbStack 容器">
+        {containerRuntime && (
+          <Group label={`${containerRuntime} 容器`}>
             <Row
               label="连接状态"
-              hint={runtime?.version ? `已连接 OrbStack（docker ${runtime.version}，上下文 orbstack）。` : runtime?.error ?? "正在检测…"}
+              hint={runtime?.version ? `已连接 ${containerRuntime}（docker ${runtime.version}）。` : runtime?.error ?? "正在检测…"}
             >
               <Button variant="outline" size="sm" disabled={busy === "probe"} onClick={() => act("probe", loadRuntime)}>
                 {busy === "probe" && <Loader2 className="animate-spin" />}
                 重新检测
               </Button>
             </Row>
-            <Row label="打开容器使用的终端" hint={runtime?.terminal === "" ? "容器账号在此终端的新窗口中打开。终端（Terminal.app）不支持 Claude Code 在容器里的复制：选中文字时按住 Fn，再用 ⌘C 复制；iTerm2 和 Ghostty 没有这个限制。" : "容器账号在此终端的新窗口中打开。"}>
+            {(runtime?.terminals.length ?? 0) > 1 && <Row label="打开容器使用的终端" hint={runtime?.terminal === "" ? "容器账号在此终端的新窗口中打开。终端（Terminal.app）不支持 Claude Code 在容器里的复制：选中文字时按住 Fn，再用 ⌘C 复制；iTerm2 和 Ghostty 没有这个限制。" : "容器账号在此终端的新窗口中打开。"}>
               <Select
                 aria-label="终端"
                 className="w-48"
@@ -211,10 +212,10 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
               >
                 {runtime?.terminals.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
               </Select>
-            </Row>
+            </Row>}
             <div className="flex gap-2 px-4 py-3">
               <Input
-                placeholder="docker 命令路径（留空为自动查找 ~/.orbstack/bin/docker 等）"
+                placeholder={info?.platform === "windows" ? "docker.exe 路径（留空为自动查找 Docker Desktop 的 docker）" : "docker 命令路径（留空为自动查找 ~/.orbstack/bin/docker 等）"}
                 value={dockerPath}
                 onChange={(e) => setDockerPath(e.target.value)}
                 className="font-mono text-xs"

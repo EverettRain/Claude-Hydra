@@ -1,9 +1,13 @@
-//! Opens a script in the terminal app chosen in Settings (macOS).
+//! Opens a script in the terminal app chosen in Settings (macOS). On Windows a container's
+//! console opens in the system's default terminal (see `container::start_terminal`).
 use std::path::Path;
 use std::process::Command;
 
 /// Supported terminal apps: settings value and display name. "" is the default.
-pub const APPS: [(&str, &str); 3] = [("", "终端（Terminal.app）"), ("iterm", "iTerm2"), ("ghostty", "Ghostty")];
+#[cfg(not(windows))]
+pub const APPS: &[(&str, &str)] = &[("", "终端（Terminal.app）"), ("iterm", "iTerm2"), ("ghostty", "Ghostty")];
+#[cfg(windows)]
+pub const APPS: &[(&str, &str)] = &[("", "系统默认终端")];
 
 pub fn validate(app: &str) -> Result<(), String> {
     if APPS.iter().any(|(v, _)| *v == app) { Ok(()) } else { Err("不支持此终端。".into()) }

@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 
 type Editing = { id: string | null; initial?: ContainerInput } | null;
 
-const STATE: Record<Container["state"], string> = { running: "运行中", stopped: "已停止", absent: "首次打开时创建", unknown: "OrbStack 未连接" };
+const STATE: Record<Container["state"], string> = { running: "运行中", stopped: "已停止", absent: "首次打开时创建", unknown: "容器运行时未连接" };
 
 const toInput = (c: Container): ContainerInput => ({ name: c.name, environment: c.environment, image: c.image, mounts: c.mounts, sshAgent: c.sshAgent, claudeDir: c.claudeDir });
 
@@ -65,6 +65,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
       id={editing?.id ?? null}
       initial={editing?.initial}
       onClose={() => setEditing(null)}
+      runtime={runtime}
       onSaved={async () => {
         const created = !editing?.id;
         setEditing(null);
@@ -90,7 +91,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
     <Page>
       <PageHeader
         title="容器"
-        subtitle="在 OrbStack 容器中运行 Claude Code：每个容器账号有独立的登录数据、网关与代理节点，网络只经节点，无直连回退。"
+        subtitle={`在 ${runtime?.name ?? "本机"} 容器中运行 Claude Code：每个容器账号有独立的登录数据、网关与代理节点，网络只经节点，无直连回退。`}
         actions={
           <>
             <Button variant="ghost" size="iconSm" aria-label="刷新" title="刷新" onClick={() => load()}>
@@ -109,7 +110,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
         {runtime && !runtime.version && (
           <div className="flex items-start gap-3 rounded-xl bg-warn-soft px-4 py-3 text-[12.5px] text-warn">
             <span className="selectable min-w-0 flex-1 whitespace-pre-wrap">{runtime.error}</span>
-            {runtime.supported && <Button variant="outline" size="sm" onClick={onOpenSettings}>OrbStack 设置</Button>}
+            {runtime.supported && <Button variant="outline" size="sm" onClick={onOpenSettings}>{runtime.name} 设置</Button>}
           </div>
         )}
 
@@ -189,7 +190,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
         {runtime?.supported && (
           <p className="px-1 text-[11.5px] leading-relaxed text-muted">
             打开时选择项目文件夹，Hydra 会先经本机中继检测出口，再启动网关和容器并核对两者处于同一网络空间，全部通过后在该文件夹中启动 Claude Code。
-            Claude Code 登录时显示的链接会在 Mac 的浏览器中打开，请让浏览器使用与该账号相同的出口。账号运行期间请保持 Claude-Hydra 在托盘中运行，退出后容器会断网。
+            Claude Code 登录时显示的链接请在与该账号相同出口的浏览器中打开。账号运行期间请保持 Claude-Hydra 在托盘中运行，退出后容器会断网。
           </p>
         )}
       </div>

@@ -19,7 +19,10 @@ mod win {
     use windows_sys::Win32::Foundation::{
         CloseHandle, BOOL, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, WAIT_OBJECT_0,
     };
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, AttachConsole, GetConsoleWindow, SetConsoleTitleW, SetStdHandle, ATTACH_PARENT_PROCESS,
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
@@ -255,6 +258,24 @@ mod win {
 
     pub fn attach_console() -> bool {
         unsafe { AttachConsole(ATTACH_PARENT_PROCESS) != 0 }
+    }
+
+    /// Gives this process a console window of its own (the system's default terminal opens it)
+    /// and points the standard streams at it: a GUI program starts without either, and the
+    /// interactive `docker exec` it runs needs a real console on all three.
+    pub fn own_console(title: &str) {
+        use std::os::windows::io::IntoRawHandle;
+        unsafe {
+            if GetConsoleWindow().is_null() { AllocConsole(); }
+            let open = |name: &str| std::fs::OpenOptions::new().read(true).write(true).open(name).ok().map(|f| f.into_raw_handle());
+            if let Some(out) = open("CONOUT$") {
+                SetStdHandle(STD_OUTPUT_HANDLE, out);
+                SetStdHandle(STD_ERROR_HANDLE, out);
+            }
+            if let Some(input) = open("CONIN$") { SetStdHandle(STD_INPUT_HANDLE, input); }
+            let t = wide(title);
+            SetConsoleTitleW(t.as_ptr());
+        }
     }
 
     pub fn error_box(text: &str) {
@@ -519,6 +540,9 @@ mod unix {
     pub fn attach_console() -> bool {
         true
     }
+
+    /// The terminal that ran this program already is the console.
+    pub fn own_console(_title: &str) {}
 
     pub fn error_box(text: &str) {
         eprintln!("{text}");

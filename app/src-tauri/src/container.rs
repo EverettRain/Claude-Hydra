@@ -1,4 +1,5 @@
-//! Claude Code container accounts on the user's own OrbStack (macOS).
+//! Claude Code container accounts on the user's own container runtime: OrbStack on macOS,
+//! Docker Desktop on Windows (see `runtime`).
 //!
 //! A container account is an account entry with `AccountConfig::container` set. Instead of a
 //! desktop profile it runs Claude Code in a Linux container, with the same network model as a
@@ -6,25 +7,25 @@
 //!
 //! Each container account has two containers and a volume:
 //! - gateway `claude-hydra-<key>-gw` owns the network namespace. Every TCP connection becomes an
-//!   HTTP CONNECT to the account's relay on the Mac (`orbstack::HOST_IP`), DNS goes over HTTPS
+//!   HTTP CONNECT to the account's relay on this computer (`Runtime::host`), DNS goes over HTTPS
 //!   through it, and everything else (UDP, IPv6, direct routes) is dropped
 //!   (`container-images/gateway`). When the relay is paused by the guard, or Hydra is not
 //!   running, the workspace has no network at all.
 //! - workspace `claude-hydra-<key>` joins that namespace with no network capabilities and
 //!   `no-new-privileges`; the user's folders appear under `/workspace/<name>`.
-//! - Claude Code's data (login, settings, `.claude.json`) lives in a Mac folder mounted at
-//!   `/root/.claude` with `CLAUDE_CONFIG_DIR` pointing there: by default the account's folder in
-//!   Hydra's data directory, or a folder the user picks. Visible and backed up on the Mac, kept
-//!   across rebuilds and OrbStack resets.
+//! - Claude Code's data (login, settings, `.claude.json`) lives in a folder of this computer
+//!   mounted at `/root/.claude` with `CLAUDE_CONFIG_DIR` pointing there: by default the account's
+//!   folder in Hydra's data directory, or a folder the user picks. Visible and backed up here,
+//!   kept across rebuilds and runtime resets.
 //! - volume `claude-hydra-<key>-home` is the rest of `/root` (shell history and the like).
 //! - Hydra's in-container tools (`hydra-audit`) are mounted read-only at `/opt/claude-hydra/bin`,
 //!   so the container cannot alter the audit that judges it.
 //!
 //! Hydra opens a terminal running `claude-hydra --container <id>` (`enter`). It checks the route
 //! through the relay, builds missing images with visible progress, starts both containers,
-//! checks that the workspace really is in the gateway's namespace, and then replaces itself
-//! with a shell in the container that has the environment's timezone, language and variables.
-use crate::orbstack::{self, Docker};
+//! checks that the workspace really is in the gateway's namespace, and then hands the terminal
+//! to a shell in the container that has the environment's timezone, language and variables.
+use crate::runtime::{self, Docker, Runtime};
 use crate::settings::{self, Settings};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,7 +44,7 @@ const LABEL_IMAGE: &str = "claude-hydra.image";
 /// Linux capabilities the workspace keeps (file ownership for installs and builds); nothing
 /// network-related, so the gateway's firewall cannot be changed from inside.
 const WORKSPACE_CAPS: [&str; 7] = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "SYS_CHROOT"];
-/// OrbStack forwards the Mac's SSH agent at this path.
+/// OrbStack forwards the Mac's SSH agent at this path (other runtimes have no `Runtime::ssh_agent`).
 const SSH_SOCK: &str = "/run/host-services/ssh-auth.sock";
 /// Where Claude Code keeps its data in the container (`CLAUDE_CONFIG_DIR`).
 const CLAUDE_DIR: &str = "/root/.claude";
@@ -74,7 +75,7 @@ fn ensure_statusline(claude: &Path) -> Result<(), String> {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Mount {
-    /// Absolute folder on the Mac.
+    /// Absolute folder on this computer.
     pub source: String,
     /// Folder name under `/workspace` in the container.
     pub name: String,
@@ -83,14 +84,14 @@ pub struct Mount {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
-    /// "" = Hydra's built-in workspace image, else an image the user has in OrbStack.
+    /// "" = Hydra's built-in workspace image, else an image the user has in the runtime.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub image: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<Mount>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ssh_agent: bool,
-    /// Mac folder for Claude Code's data; "" = the account's folder in Hydra's data directory.
+    /// Folder for Claude Code's data; "" = the account's folder in Hydra's data directory.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub claude_dir: String,
 }
@@ -113,9 +114,9 @@ pub struct ContainerView {
     #[serde(flatten)]
     pub input: ContainerInput,
     pub environment_name: Option<String>,
-    /// The Mac folder that actually holds Claude Code's data.
+    /// The folder that actually holds Claude Code's data.
     pub claude_dir_path: String,
-    /// "running" | "stopped" | "absent" (created on first open) | "unknown" (OrbStack unavailable)
+    /// "running" | "stopped" | "absent" (created on first open) | "unknown" (runtime unavailable)
     pub state: &'static str,
     /// Why the container must be rebuilt before it can be opened again.
     pub rebuild: Option<String>,
@@ -216,19 +217,70 @@ fn valid_image_ref(image: &str) -> bool {
         && image.chars().all(|c| c.is_ascii_alphanumeric() || "._-/:@".contains(c))
 }
 
-/// A Mac folder that may be shared into a container. Refuses `/`, the home folder and any folder
-/// containing Hydra's own data (it holds node credentials).
-fn check_source(source: &str, home: &Path, storage: &Path) -> Result<String, String> {
-    let trimmed = source.trim();
-    let source = if trimmed.len() > 1 { trimmed.trim_end_matches('/') } else { trimmed };
-    if !source.starts_with('/') { return Err(format!("请填写完整的文件夹路径：{source}")); }
-    if source.contains([':', '\n', '\r', '\0']) { return Err(format!("文件夹路径不能包含冒号或换行：{source}")); }
-    let path = Path::new(source);
-    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) { return Err(format!("文件夹路径不能包含“..”：{source}")); }
-    if home.starts_with(path) || storage.starts_with(path) {
-        return Err(format!("不能共享 {source}：它包含用户主目录或 Claude-Hydra 的数据目录（含节点凭据）。请选择具体的项目文件夹。"));
+/// How this computer writes folder paths, and the folders that may never be shared.
+struct HostRules {
+    /// Windows paths (`C:\…`, any case) instead of Unix ones.
+    windows: bool,
+    home: String,
+    /// Hydra's data directory (it holds node credentials).
+    storage: String,
+    /// The runtime can forward this computer's SSH agent.
+    ssh_agent: bool,
+}
+
+impl HostRules {
+    fn here(ssh_agent: bool) -> HostRules {
+        let windows = cfg!(windows);
+        let home = std::env::var(if windows { "USERPROFILE" } else { "HOME" }).unwrap_or_else(|_| "/".into());
+        let mut rules = HostRules { windows, home, storage: crate::paths::storage_root().to_string_lossy().into_owned(), ssh_agent };
+        // Written the way `folder` writes paths, so `inside` compares like with like.
+        if let Ok(h) = rules.folder(&rules.home) { rules.home = h; }
+        if let Ok(st) = rules.folder(&rules.storage) { rules.storage = st; }
+        rules
     }
-    Ok(source.to_string())
+
+    /// A complete folder path, written without a trailing separator.
+    fn folder(&self, raw: &str) -> Result<String, String> {
+        let raw = raw.trim();
+        if raw.contains(['\n', '\r', '\0']) { return Err(format!("文件夹路径不能包含换行：{raw}")); }
+        if self.windows {
+            let path = raw.replace('/', "\\");
+            if path.starts_with("\\\\") { return Err(format!("暂不支持网络路径，请先把它映射为盘符：{raw}")); }
+            let drive = path.as_bytes();
+            if drive.len() < 2 || !drive[0].is_ascii_alphabetic() || drive[1] != b':' || (drive.len() > 2 && drive[2] != b'\\') {
+                return Err(format!("请填写完整的文件夹路径（如 D:\\Projects\\app）：{raw}"));
+            }
+            if path.split('\\').any(|c| c == ".." || c == ".") { return Err(format!("文件夹路径不能包含“..”：{raw}")); }
+            let trimmed = path.trim_end_matches('\\');
+            return Ok(if trimmed.len() == 2 { format!("{trimmed}\\") } else { trimmed.to_string() });
+        }
+        let path = if raw.len() > 1 { raw.trim_end_matches('/') } else { raw };
+        if !path.starts_with('/') { return Err(format!("请填写完整的文件夹路径：{raw}")); }
+        if Path::new(path).components().any(|c| matches!(c, std::path::Component::ParentDir)) { return Err(format!("文件夹路径不能包含“..”：{raw}")); }
+        Ok(path.to_string())
+    }
+
+    /// Whether `path` is `folder` or inside it (both as `folder` writes them).
+    fn inside(&self, path: &str, folder: &str) -> bool {
+        if !self.windows { return Path::new(path).starts_with(folder); }
+        let (path, folder) = (path.to_lowercase(), folder.to_lowercase());
+        path == folder || path.starts_with(&if folder.ends_with('\\') { folder } else { format!("{folder}\\") })
+    }
+
+    fn join(&self, folder: &str, name: &str) -> String {
+        let sep = if self.windows { '\\' } else { '/' };
+        format!("{}{sep}{name}", folder.trim_end_matches(sep))
+    }
+
+    /// A folder that may be shared into a container. Refuses the root, the home folder and any
+    /// folder containing them or Hydra's own data.
+    fn source(&self, raw: &str) -> Result<String, String> {
+        let source = self.folder(raw)?;
+        if self.inside(&self.home, &source) || self.inside(&self.storage, &source) {
+            return Err(format!("不能共享 {source}：它包含用户主目录或 Claude-Hydra 的数据目录（含节点凭据）。请选择具体的项目文件夹。"));
+        }
+        Ok(source)
+    }
 }
 
 fn check_mount_name(name: &str) -> Result<String, String> {
@@ -249,7 +301,7 @@ fn container_names(s: &Settings, except: Option<&str>) -> Vec<String> {
 }
 
 /// Validates input into (name, environment id, spec). `is_dir` checks that a source exists.
-fn build(input: &ContainerInput, s: &Settings, id: Option<&str>, home: &Path, storage: &Path, is_dir: impl Fn(&str) -> bool) -> Result<(String, String, ContainerSpec), String> {
+fn build(input: &ContainerInput, s: &Settings, id: Option<&str>, host: &HostRules, is_dir: impl Fn(&str) -> bool) -> Result<(String, String, ContainerSpec), String> {
     let name = input.name.trim();
     if name.is_empty() { return Err("请填写名称。".into()); }
     if name.chars().count() > 40 { return Err("名称最多 40 个字符。".into()); }
@@ -259,9 +311,10 @@ fn build(input: &ContainerInput, s: &Settings, id: Option<&str>, home: &Path, st
     let image = input.spec.image.trim().to_string();
     if !image.is_empty() && !valid_image_ref(&image) { return Err(format!("镜像名称无效：{image}")); }
     if input.spec.mounts.len() > MAX_MOUNTS { return Err(format!("最多共享 {MAX_MOUNTS} 个文件夹。")); }
+    if input.spec.ssh_agent && !host.ssh_agent { return Err("这台电脑上的容器不支持转发 SSH agent，请关闭此选项。".into()); }
     let mut mounts: Vec<Mount> = Vec::new();
     for m in &input.spec.mounts {
-        let source = check_source(&m.source, home, storage)?;
+        let source = host.source(&m.source)?;
         if !is_dir(&source) { return Err(format!("找不到文件夹：{source}")); }
         let name = check_mount_name(&m.name)?;
         if mounts.iter().any(|o| o.name == name) { return Err(format!("容器内有两个文件夹都叫“{name}”，请改名。")); }
@@ -270,16 +323,16 @@ fn build(input: &ContainerInput, s: &Settings, id: Option<&str>, home: &Path, st
     let claude_dir = match input.spec.claude_dir.trim() {
         "" => String::new(),
         dir => {
-            let dir = check_source(dir, home, storage)?;
-            let path = Path::new(&dir);
-            if path.starts_with(home.join(".claude")) {
-                return Err("不能使用 Mac 自己的 ~/.claude：那里是本机 Claude Code 的登录与设置。请另选一个文件夹。".into());
+            let dir = host.source(dir)?;
+            if host.inside(&dir, &host.join(&host.home, ".claude")) {
+                return Err("不能使用本机自己的 .claude 文件夹：那里是本机 Claude Code 的登录与设置。请另选一个文件夹。".into());
             }
-            if path.starts_with(storage) {
+            if host.inside(&dir, &host.storage) {
                 return Err("请选择 Claude-Hydra 数据目录以外的文件夹；不选则使用数据目录中的默认位置。".into());
             }
             if !is_dir(&dir) { return Err(format!("找不到文件夹：{dir}")); }
-            let taken = s.accounts.iter().any(|(k, a)| Some(k.as_str()) != id && a.container.as_ref().is_some_and(|c| c.claude_dir == dir));
+            let same = |other: &str| host.inside(other, &dir) && host.inside(&dir, other);
+            let taken = s.accounts.iter().any(|(k, a)| Some(k.as_str()) != id && a.container.as_ref().is_some_and(|c| same(&c.claude_dir)));
             if taken { return Err("另一个容器账号已在使用这个 Claude 数据文件夹，每个账号需要各自的文件夹。".into()); }
             dir
         }
@@ -307,7 +360,7 @@ fn state_dir(id: &str) -> PathBuf { crate::paths::storage_root().join("container
 /// The account's usage history (see `code_usage`); deleted with the account.
 pub(crate) fn usage_archive(id: &str) -> PathBuf { state_dir(id).join("usage-history.json") }
 
-/// The Mac folder holding a container account's Claude Code data.
+/// The folder holding a container account's Claude Code data.
 pub(crate) fn claude_data_dir(s: &Settings, id: &str) -> Result<PathBuf, String> {
     Ok(claude_dir(id, &account(s, id)?.1))
 }
@@ -321,8 +374,8 @@ fn claude_dir(id: &str, spec: &ContainerSpec) -> PathBuf {
 pub fn save(id: Option<&str>, input: &ContainerInput) -> Result<String, String> {
     let s = settings::load();
     if let Some(id) = id { account(&s, id)?; }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    let (name, environment, spec) = build(input, &s, id, &home, &crate::paths::storage_root(), |p| Path::new(p).is_dir())?;
+    let ssh_agent = runtime::current().is_some_and(|r| r.ssh_agent);
+    let (name, environment, spec) = build(input, &s, id, &HostRules::here(ssh_agent), |p| Path::new(p).is_dir())?;
     let id = id.map(str::to_string).unwrap_or_else(|| new_id(&s));
     settings::update(|s| {
         let acc = s.account_mut(&id);
@@ -364,7 +417,7 @@ fn pending(spec: &ContainerSpec, live: Option<&Live>) -> (Option<String>, bool) 
 
 pub fn list() -> Vec<ContainerView> {
     let s = settings::load();
-    let live = orbstack::connect().and_then(|d| live_workspaces(&d)).ok();
+    let live = runtime::connect().and_then(|(d, _)| live_workspaces(&d)).ok();
     let mut out: Vec<ContainerView> = s.accounts.iter().filter_map(|(id, acc)| {
         let spec = acc.container.clone()?;
         let current = live.as_ref().and_then(|m| m.get(id));
@@ -393,7 +446,16 @@ pub fn list() -> Vec<ContainerView> {
 
 // ---- docker arguments ------------------------------------------------------------------
 
-fn gateway_args(id: &str, n: &Names, upstream_file: &Path, image: &str) -> Vec<String> {
+/// `--mount` binding `source` of this computer at `target`. Unlike `-v`, it takes any path:
+/// drive letters, colons, and commas or quotes (CSV-quoted).
+fn bind(source: &Path, target: &str, readonly: bool) -> [String; 2] {
+    let field = |f: String| if f.contains([',', '"']) { format!("\"{}\"", f.replace('"', "\"\"")) } else { f };
+    let mut spec = format!("type=bind,{},{}", field(format!("source={}", source.display())), field(format!("target={target}")));
+    if readonly { spec.push_str(",readonly"); }
+    ["--mount".into(), spec]
+}
+
+fn gateway_args(id: &str, n: &Names, upstream_file: &Path, image: &str, add_host: Option<&str>) -> Vec<String> {
     let mut a: Vec<String> = ["run", "-d", "--init", "--name", &n.gateway, "--hostname", "workstation"].map(String::from).to_vec();
     a.extend(["--label".into(), format!("{LABEL_ID}={id}"), "--label".into(), format!("{LABEL_ROLE}=gateway")]);
     a.extend([
@@ -402,11 +464,13 @@ fn gateway_args(id: &str, n: &Names, upstream_file: &Path, image: &str) -> Vec<S
         "--tmpfs", "/run:rw,nosuid,nodev", "--tmpfs", "/tmp:rw,nosuid,nodev",
         "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
     ].map(String::from));
-    a.extend(["-v".into(), format!("{}:/etc/hydra-gateway/upstream:ro", upstream_file.display()), image.to_string()]);
+    if let Some(h) = add_host { a.extend(["--add-host".into(), h.into()]); }
+    a.extend(bind(upstream_file, "/etc/hydra-gateway/upstream", true));
+    a.push(image.to_string());
     a
 }
 
-/// Mac folders mounted into the workspace besides the shared ones.
+/// Folders of this computer mounted into the workspace besides the shared ones.
 struct HostDirs<'a> {
     claude: &'a Path,
     tools: &'a Path,
@@ -421,9 +485,10 @@ fn workspace_args(id: &str, n: &Names, spec: &ContainerSpec, dirs: &HostDirs, im
         a.extend(["--label".into(), format!("{k}={v}")]);
     }
     a.extend(["-v".into(), format!("{}:/root", n.home)]);
-    a.extend(["-v".into(), format!("{}:{CLAUDE_DIR}", dirs.claude.display()), "-e".into(), format!("CLAUDE_CONFIG_DIR={CLAUDE_DIR}")]);
-    a.extend(["-v".into(), format!("{}:{TOOLS_DIR}:ro", dirs.tools.display())]);
-    for m in &spec.mounts { a.extend(["-v".into(), format!("{}:/workspace/{}", m.source, m.name)]); }
+    a.extend(bind(dirs.claude, CLAUDE_DIR, false));
+    a.extend(["-e".into(), format!("CLAUDE_CONFIG_DIR={CLAUDE_DIR}")]);
+    a.extend(bind(dirs.tools, TOOLS_DIR, true));
+    for m in &spec.mounts { a.extend(bind(Path::new(&m.source), &format!("/workspace/{}", m.name), false)); }
     if spec.ssh_agent {
         a.extend(["-v".into(), format!("{SSH_SOCK}:{SSH_SOCK}"), "-e".into(), format!("SSH_AUTH_SOCK={SSH_SOCK}")]);
     }
@@ -441,6 +506,8 @@ struct AuditContext {
     /// Exits the account may use: the one verified just now, and the exit rule's baseline.
     exits: Vec<String>,
     country: String,
+    /// This computer as the gateway reaches it.
+    host_ip: String,
     relay_port: u16,
 }
 
@@ -458,8 +525,8 @@ fn shell_env(env: &BTreeMap<String, String>, timezone: Option<&str>, locale: Opt
     out.push(("HYDRA_EXPECTED_EXIT".into(), audit.exits.join(",")));
     out.push(("HYDRA_EXPECTED_COUNTRY".into(), audit.country.clone()));
     if let Some(tz) = timezone { out.push(("HYDRA_EXPECTED_TZ".into(), tz.into())); }
-    out.push(("HYDRA_HOST_IP".into(), orbstack::HOST_IP.into()));
-    out.push(("HYDRA_RELAY".into(), format!("http://{}:{}", orbstack::HOST_IP, audit.relay_port)));
+    out.push(("HYDRA_HOST_IP".into(), audit.host_ip.clone()));
+    out.push(("HYDRA_RELAY".into(), format!("http://{}:{}", audit.host_ip, audit.relay_port)));
     out
 }
 
@@ -467,6 +534,13 @@ fn shell_env(env: &BTreeMap<String, String>, timezone: Option<&str>, locale: Opt
 /// plain `xterm`: Claude Code reads them to pick colours and keys, and to tell the user how to
 /// copy text when the terminal cannot take the clipboard from it (Terminal.app ignores OSC 52).
 const TERMINAL_ENV: [&str; 6] = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LC_TERMINAL", "LC_TERMINAL_VERSION"];
+
+/// What a Windows console supports when it does not say: Windows Terminal and the console host
+/// both take 256 and 24-bit colours.
+fn console_default(name: &str) -> Option<String> {
+    if !cfg!(windows) { return None; }
+    match name { "TERM" => Some("xterm-256color".into()), "COLORTERM" => Some("truecolor".into()), _ => None }
+}
 
 /// The terminal's own variables, unless the environment config sets them.
 fn terminal_env(set: &[(String, String)], read: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
@@ -491,11 +565,9 @@ fn exec_args(workspace: &str, env: &[(String, String)], launch: Option<&Launch>)
     a
 }
 
-/// The Mac's own timezone, for environments set to follow the system.
+/// This computer's own timezone, for environments set to follow the system.
 fn host_timezone() -> Option<String> {
-    let target = std::fs::read_link("/etc/localtime").ok()?;
-    let tz = target.to_string_lossy().split_once("zoneinfo/")?.1.to_string();
-    crate::node::valid_timezone(&tz).then_some(tz)
+    iana_time_zone::get_timezone().ok().filter(|tz| crate::node::valid_timezone(tz))
 }
 
 // ---- lifecycle -------------------------------------------------------------------------
@@ -560,40 +632,50 @@ fn wait_gateway(docker: &Docker, gateway: &str) -> Result<String, String> {
     Err("网关未就绪，工作容器不会启动。".into())
 }
 
-/// Creates or starts the account's gateway, pointed at relay `port`; returns its container id.
-fn ensure_gateway(docker: &Docker, id: &str, n: &Names, port: u16, image: &str) -> Result<String, String> {
-    let upstream = format!("{}:{port}", orbstack::HOST_IP);
+/// The address the gateway reports using (`upstream=<ip>:<port>`), when it is relay `port` on
+/// `host`, an IP or a name the gateway resolved.
+fn gateway_upstream(ready: &str, host: &str, port: u16) -> Option<String> {
+    let (ip, p) = ready.trim().strip_prefix("upstream=")?.rsplit_once(':')?;
+    let ip: std::net::Ipv4Addr = ip.parse().ok()?;
+    let same_host = host.parse::<std::net::Ipv4Addr>().map_or(true, |h| h == ip);
+    (p == port.to_string() && same_host).then(|| ip.to_string())
+}
+
+/// Creates or starts the account's gateway, pointed at relay `port`; returns its container id
+/// and this computer's address as the gateway reaches it.
+fn ensure_gateway(docker: &Docker, rt: &Runtime, id: &str, n: &Names, port: u16, image: &str) -> Result<(String, String), String> {
+    let upstream = format!("{}:{port}", rt.host);
     let dir = state_dir(id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建容器状态目录：{e}"))?;
     let file = dir.join("upstream");
-    if file.to_string_lossy().contains(':') { return Err(format!("Claude-Hydra 数据目录的路径不能包含冒号：{}", dir.display())); }
     if std::fs::read_to_string(&file).ok().as_deref() != Some(upstream.as_str()) {
         std::fs::write(&file, &upstream).map_err(|e| format!("无法写入网关配置：{e}"))?;
     }
     if !exists(docker, &n.gateway)? {
         say("[网关] 创建网络网关…");
-        docker.run(gateway_args(id, n, &file, image))?;
+        docker.run(gateway_args(id, n, &file, image, rt.add_host))?;
     } else if !running(docker, &n.gateway)? {
         docker.run(["start", &n.gateway])?;
     }
-    let expected = format!("upstream={upstream}");
-    if wait_gateway(docker, &n.gateway)? != expected {
-        // The relay moved to another port; a restart makes the gateway read the new one, but
-        // a running workspace would stay in the old network namespace.
-        if exists(docker, &n.workspace)? && running(docker, &n.workspace)? {
-            return Err("本机中继的端口已变化。请先在 Claude-Hydra 的容器页停止此容器，再重新打开（数据不会丢失）。".into());
+    let host_ip = match gateway_upstream(&wait_gateway(docker, &n.gateway)?, rt.host, port) {
+        Some(ip) => ip,
+        None => {
+            // The relay moved to another port; a restart makes the gateway read the new one, but
+            // a running workspace would stay in the old network namespace.
+            if exists(docker, &n.workspace)? && running(docker, &n.workspace)? {
+                return Err("本机中继的端口已变化。请先在 Claude-Hydra 的容器页停止此容器，再重新打开（数据不会丢失）。".into());
+            }
+            docker.run(["restart", &n.gateway])?;
+            gateway_upstream(&wait_gateway(docker, &n.gateway)?, rt.host, port).ok_or("网关没有使用当前的本机中继，工作容器不会启动。")?
         }
-        docker.run(["restart", &n.gateway])?;
-        if wait_gateway(docker, &n.gateway)? != expected { return Err("网关没有使用当前的本机中继，工作容器不会启动。".into()); }
-    }
-    docker.run(["container", "inspect", "--format", "{{.Id}}", &n.gateway])
+    };
+    Ok((docker.run(["container", "inspect", "--format", "{{.Id}}", &n.gateway])?, host_ip))
 }
 
 /// Writes Hydra's in-container tools to the account's state folder (mounted read-only), so a
 /// Hydra update brings the new versions without a rebuild.
 fn prepare_tools(id: &str) -> Result<PathBuf, String> {
     let dir = state_dir(id).join("bin");
-    if dir.to_string_lossy().contains(':') { return Err(format!("Claude-Hydra 数据目录的路径不能包含冒号：{}", dir.display())); }
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法写入容器工具：{e}"))?;
     for (name, body) in TOOLS {
         let path = dir.join(name);
@@ -609,11 +691,10 @@ fn prepare_tools(id: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// The Mac folder for Claude Code's data: the default one is created owner-only (it holds the
-/// login in plain text); a chosen one must exist.
+/// The folder for Claude Code's data: the default one is created owner-only (it holds the login
+/// in plain text; on Windows the user's own AppData already is); a chosen one must exist.
 fn prepare_claude_dir(id: &str, spec: &ContainerSpec) -> Result<PathBuf, String> {
     let dir = claude_dir(id, spec);
-    if dir.to_string_lossy().contains(':') { return Err(format!("Claude 数据文件夹的路径不能包含冒号：{}", dir.display())); }
     if spec.claude_dir.is_empty() {
         std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建 Claude 数据文件夹：{e}"))?;
         #[cfg(unix)]
@@ -660,22 +741,22 @@ fn ensure_workspace(docker: &Docker, id: &str, n: &Names, spec: &ContainerSpec, 
         return Err("工作容器仍在网关旧的网络空间中（网关重启过）。请在 Claude-Hydra 的容器页停止此容器，再重新打开，数据不会丢失。".into());
     }
     if spec.ssh_agent && !docker.ok(["exec", &n.workspace, "sh", "-c", "test -S \"$SSH_AUTH_SOCK\""]) {
-        return Err("Mac 的 SSH agent 不可用。请确认 ssh-agent 正在运行并已添加密钥，或在容器设置中关闭 SSH agent 转发。".into());
+        return Err("本机的 SSH agent 不可用。请确认 ssh-agent 正在运行并已添加密钥，或在容器设置中关闭 SSH agent 转发。".into());
     }
     Ok(())
 }
 
 /// Terminal entry (`claude-hydra --container <id> [--launch <token>]`): prepares everything, then
-/// replaces this process with a shell in the container, or Claude Code in a project when the app
-/// asked for one. Every check runs first: a failed exit check starts nothing. Returns only on
-/// failure (or, off Unix, on exit).
+/// hands the terminal to a shell in the container, or Claude Code in a project when the app asked
+/// for one. Every check runs first: a failed exit check starts nothing. On Unix this process is
+/// replaced and returns only on failure; on Windows it returns the session's exit code.
 pub fn enter(id: &str, token: Option<&str>) -> Result<i32, String> {
     let s = settings::load();
     let (name, spec) = account(&s, id)?;
     let launch = token.map(|t| take_launch(id, t)).transpose()?;
     if let Some(l) = &launch { check_launch(&spec, l)?; }
     let n = names(id)?;
-    let docker = orbstack::connect()?;
+    let (docker, rt) = runtime::connect()?;
     let effective = s.effective(id);
     let node = check_node(&effective)?;
     if let Some(reason) = s.account(id).blocked { return Err(blocked(&reason, s.account(id).blocked_soft)); }
@@ -695,10 +776,10 @@ pub fn enter(id: &str, token: Option<&str>) -> Result<i32, String> {
     if spec.image.is_empty() {
         ensure_image(&docker, &WORKSPACE)?;
     } else if !docker.ok(["image", "inspect", &base]) {
-        return Err(format!("OrbStack 中没有镜像 {base}。请先执行 docker pull {base}（或自行构建），也可以在容器设置中改用内置镜像。"));
+        return Err(format!("{} 中没有镜像 {base}。请先执行 docker pull {base}（或自行构建），也可以在容器设置中改用内置镜像。", rt.name));
     }
     prepare_tools(id)?;
-    let gateway_id = ensure_gateway(&docker, id, &n, port, &gateway_image)?;
+    let (gateway_id, host_ip) = ensure_gateway(&docker, rt, id, &n, port, &gateway_image)?;
     ensure_workspace(&docker, id, &n, &spec, &base, &gateway_id)?;
     // Only the dashboard's limits depend on it; entering goes ahead either way.
     if let Err(e) = ensure_statusline(&claude_dir(id, &spec)) { crate::paths::append_log("hydra-error.log", &format!("status line: {e}")); }
@@ -727,22 +808,45 @@ pub fn enter(id: &str, token: Option<&str>) -> Result<i32, String> {
     let audit = AuditContext {
         exits: std::iter::once(exit.ip.clone()).chain(baseline.filter(|b| *b != exit.ip)).collect(),
         country: exit.country.clone(),
+        host_ip,
         relay_port: port,
     };
     let mut env = shell_env(&effective.env, timezone.as_deref(), locale.as_deref(), &audit);
-    env.extend(terminal_env(&env, |k| std::env::var(k).ok()));
+    env.extend(terminal_env(&env, |k| std::env::var(k).ok().or_else(|| console_default(k))));
     let args = exec_args(&n.workspace, &env, launch.as_ref());
     #[cfg(unix)]
     { Err(docker.exec(args)) }
     #[cfg(not(unix))]
-    { docker.attached(args).map(|ok| if ok { 0 } else { 1 }) }
+    { docker.interactive(args) }
 }
 
-/// The script a terminal runs to enter the account (also used for desktop shortcuts).
+/// The script (macOS) or shortcut (Windows) that enters the account.
 fn write_entry(path: &Path, id: &str, token: Option<&str>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("无法获取当前程序路径：{e}"))?;
     let launch = token.map(|t| format!(" --launch {t}")).unwrap_or_default();
-    crate::sys::write_shortcut(path, &exe, &format!("--container {id}{launch}"), "")
+    crate::sys::write_shortcut(path, &exe, &format!("--container {id}{launch}"), "Claude Code 容器")
+}
+
+/// A terminal window that runs `enter`. On Windows this program opens its own console window
+/// (in the system's default terminal), so nothing passes through a shell command line.
+fn start_terminal(s: &Settings, dir: &Path, id: &str, token: Option<&str>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = (s, dir);
+        let exe = std::env::current_exe().map_err(|e| format!("无法获取当前程序路径：{e}"))?;
+        let mut c = std::process::Command::new(exe);
+        c.args(["--container", id]);
+        if let Some(t) = token { c.args(["--launch", t]); }
+        // CREATE_NEW_CONSOLE: a development build (console program) gets its own window too.
+        c.creation_flags(0x0000_0010).spawn().map(|_| ()).map_err(|e| format!("无法打开容器终端：{e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let script = dir.join(match token { Some(t) => format!("enter-{t}.command"), None => "enter.command".into() });
+        write_entry(&script, id, token)?;
+        crate::terminal::open(&s.terminal, &script)
+    }
 }
 
 /// Quick checks, then a terminal window that runs `enter`, in a project when `launch` says so.
@@ -750,26 +854,20 @@ pub fn open(id: &str, launch: Option<Launch>) -> Result<(), String> {
     let s = settings::load();
     let (_, spec) = account(&s, id)?;
     if let Some(l) = &launch { check_launch(&spec, l)?; }
-    let (docker, _) = orbstack::connect_with(s.docker_path.as_deref())?;
+    let (docker, _, _) = runtime::connect_with(s.docker_path.as_deref())?;
     check_node(&s.effective(id))?;
     if let Some(reason) = s.account(id).blocked { return Err(blocked(&reason, s.account(id).blocked_soft)); }
     if let Some(reason) = pending(&spec, live_workspaces(&docker)?.get(id)).0 { return Err(reason); }
     let dir = state_dir(id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建容器状态目录：{e}"))?;
-    let Some(launch) = launch else {
-        let script = dir.join("enter.command");
-        write_entry(&script, id, None)?;
-        return crate::terminal::open(&s.terminal, &script);
-    };
+    let Some(launch) = launch else { return start_terminal(&s, &dir, id, None) };
     clear_stale_launches(&dir);
     // The request travels in a file and the terminal gets only its token, so folder names with
     // spaces or quotes never pass through a shell command line.
     let token = uuid::Uuid::new_v4().simple().to_string();
     let request = serde_json::to_vec(&launch).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("launch-{token}.json")), request).map_err(|e| format!("无法保存打开请求：{e}"))?;
-    let script = dir.join(format!("enter-{token}.command"));
-    write_entry(&script, id, Some(&token))?;
-    crate::terminal::open(&s.terminal, &script)
+    start_terminal(&s, &dir, id, Some(&token))
 }
 
 // ---- projects --------------------------------------------------------------------------
@@ -812,7 +910,7 @@ fn folder_paths(spec: &ContainerSpec) -> crate::claude_folders::Paths {
     crate::claude_folders::Paths::Container(spec.mounts.iter().map(|m| (m.name.clone(), PathBuf::from(&m.source))).collect())
 }
 
-/// A working folder must be inside a shared folder and exist on the Mac, or be `/workspace` itself
+/// A working folder must be inside a shared folder and exist here, or be `/workspace` itself
 /// (where sessions started outside any shared folder resume); a session id is passed to a shell,
 /// so it may only hold the characters of one.
 fn check_launch(spec: &ContainerSpec, l: &Launch) -> Result<(), String> {
@@ -833,7 +931,7 @@ fn check_launch(spec: &ContainerSpec, l: &Launch) -> Result<(), String> {
 pub struct Project {
     /// The folder in the container.
     cwd: String,
-    /// The same folder on the Mac.
+    /// The same folder on this computer.
     host: String,
     sessions: usize,
     last_active_at: Option<u64>,
@@ -894,7 +992,7 @@ pub fn subfolders(id: &str, cwd: &str) -> Result<Vec<Subfolder>, String> {
 pub fn stop(id: &str) -> Result<(), String> {
     account(&settings::load(), id)?;
     let n = names(id)?;
-    let docker = orbstack::connect()?;
+    let (docker, _) = runtime::connect()?;
     for name in [&n.workspace, &n.gateway] {
         if exists(&docker, name)? { docker.run(["stop", "-t", "5", name.as_str()])?; }
     }
@@ -907,7 +1005,7 @@ pub fn stop(id: &str) -> Result<(), String> {
 pub fn rebuild(id: &str, keep_changes: bool) -> Result<(), String> {
     account(&settings::load(), id)?;
     let n = names(id)?;
-    let docker = orbstack::connect()?;
+    let (docker, _) = runtime::connect()?;
     if exists(&docker, &n.workspace)? {
         docker.run(["stop", "-t", "5", &n.workspace])?;
         if keep_changes {
@@ -925,12 +1023,13 @@ pub fn rebuild(id: &str, keep_changes: bool) -> Result<(), String> {
 }
 
 /// Deletes the account with its containers, home volume, snapshot and default Claude data
-/// folder. Shared folders and a Claude data folder the user chose are untouched. Returns a note when OrbStack could not be cleaned up.
+/// folder. Shared folders and a Claude data folder the user chose are untouched. Returns a note
+/// when the runtime could not be cleaned up.
 pub fn delete(id: &str) -> Result<Option<String>, String> {
     account(&settings::load(), id)?;
     let n = names(id)?;
-    let note = match orbstack::connect() {
-        Ok(docker) => {
+    let note = match runtime::connect() {
+        Ok((docker, _)) => {
             for name in [&n.workspace, &n.gateway] {
                 if exists(&docker, name)? { docker.run(["rm", "-f", name.as_str()])?; }
             }
@@ -938,7 +1037,10 @@ pub fn delete(id: &str) -> Result<Option<String>, String> {
             if docker.ok(["image", "inspect", &n.snapshot]) { docker.run(["image", "rm", &n.snapshot])?; }
             None
         }
-        Err(e) => Some(format!("{e}\n已删除账号记录，但没能清理 OrbStack 中的 {}、{}、数据卷 {}，请稍后在 OrbStack 中手动删除。", n.workspace, n.gateway, n.home)),
+        Err(e) => {
+            let rt = runtime::current().map(|r| r.name).unwrap_or("容器运行时");
+            Some(format!("{e}\n已删除账号记录，但没能清理 {rt} 中的 {}、{}、数据卷 {}，请稍后在 {rt} 中手动删除。", n.workspace, n.gateway, n.home))
+        }
     };
     settings::update(|s| s.remove_account(id))?;
     let _ = std::fs::remove_dir_all(state_dir(id));
@@ -949,7 +1051,7 @@ pub fn create_shortcut(id: &str) -> Result<PathBuf, String> {
     let (name, _) = account(&settings::load(), id)?;
     let desktop = crate::paths::desktop_dir().ok_or("无法定位桌面目录。")?;
     let safe: String = name.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect();
-    let path = desktop.join(format!("Claude Code - {safe}.command"));
+    let path = desktop.join(format!("Claude Code - {safe}.{}", if cfg!(windows) { "lnk" } else { "command" }));
     write_entry(&path, id, None)?;
     Ok(path)
 }
@@ -980,8 +1082,14 @@ mod tests {
         }
     }
 
+    fn mac() -> HostRules { HostRules { windows: false, home: HOME.into(), storage: STORAGE.into(), ssh_agent: true } }
+
+    fn windows() -> HostRules {
+        HostRules { windows: true, home: r"C:\Users\u".into(), storage: r"C:\Users\u\AppData\Roaming\ClaudeHydra".into(), ssh_agent: false }
+    }
+
     fn validate(s: &Settings, input: &ContainerInput) -> Result<(String, String, ContainerSpec), String> {
-        build(input, s, None, Path::new(HOME), Path::new(STORAGE), |_| true)
+        build(input, s, None, &mac(), |_| true)
     }
 
     #[test]
@@ -1017,13 +1125,62 @@ mod tests {
     fn broad_or_sensitive_folders_are_refused() {
         // Arrange
         let s = settings_with_envs();
-        let sources = ["/", "/Users", HOME, "/Users/u/Library", STORAGE, "relative/path", "/Users/u/a:b", "/Users/u/code/../.."];
+        let sources = ["/", "/Users", HOME, "/Users/u/Library", STORAGE, "relative/path", "/Users/u/code/../.."];
 
         // Act
         let results: Vec<_> = sources.iter().map(|src| validate(&s, &input(&[(src, "x")]))).collect();
 
         // Assert
         for (src, r) in sources.iter().zip(results) { assert!(r.is_err(), "{src} should be refused"); }
+    }
+
+    #[test]
+    fn windows_folders_are_drive_paths_outside_the_user_and_hydra_folders() {
+        // Arrange
+        let s = settings_with_envs();
+        let host = windows();
+        let accepted = [r"D:\Projects\app\", "d:/projects/a,b (1)", r"C:\Users\u\code\app"];
+        let refused = [r"C:\", "C:", r"c:\users", r"C:\USERS\U", r"C:\Users\u\AppData", r"\\server\share\x", r"Projects\app", r"D:\a\..\..", "/Users/u/code"];
+
+        // Act
+        let ok: Vec<_> = accepted.iter().map(|src| build(&input(&[(src, "x")]), &s, None, &host, |_| true)).collect();
+        let bad: Vec<_> = refused.iter().map(|src| build(&input(&[(src, "x")]), &s, None, &host, |_| true)).collect();
+
+        // Assert
+        let sources: Vec<String> = ok.into_iter().map(|r| r.unwrap().2.mounts[0].source.clone()).collect();
+        assert_eq!(sources, [r"D:\Projects\app", r"d:\projects\a,b (1)", r"C:\Users\u\code\app"]);
+        for (src, r) in refused.iter().zip(bad) { assert!(r.is_err(), "{src} should be refused"); }
+    }
+
+    #[test]
+    fn windows_claude_folder_rules_ignore_case() {
+        // Arrange
+        let mut s = settings_with_envs();
+        s.accounts.insert("ctr-1".into(), AccountConfig { label: Some("其他".into()), container: Some(ContainerSpec { claude_dir: r"D:\Claude\a".into(), ..Default::default() }), ..Default::default() });
+        let with_dir = |dir: &str| ContainerInput { spec: ContainerSpec { claude_dir: dir.into(), ..Default::default() }, ..input(&[]) };
+
+        // Act
+        let results: Vec<_> = [r"c:\users\U\.CLAUDE", r"d:\claude\A", r"D:\Claude\b"].iter().map(|d| build(&with_dir(d), &s, None, &windows(), |_| true)).collect();
+
+        // Assert
+        assert!(results[0].is_err(), "the computer's own .claude");
+        assert!(results[1].is_err(), "another account's folder in other case");
+        assert_eq!(results[2].as_ref().unwrap().2.claude_dir, r"D:\Claude\b");
+    }
+
+    #[test]
+    fn ssh_agent_needs_a_runtime_that_forwards_it() {
+        // Arrange
+        let s = settings_with_envs();
+        let wanted = ContainerInput { spec: ContainerSpec { ssh_agent: true, ..Default::default() }, ..input(&[]) };
+
+        // Act
+        let on_mac = build(&wanted, &s, None, &mac(), |_| true);
+        let on_windows = build(&wanted, &s, None, &windows(), |_| true);
+
+        // Assert
+        assert!(on_mac.is_ok());
+        assert!(on_windows.unwrap_err().contains("SSH agent"));
     }
 
     #[test]
@@ -1075,7 +1232,7 @@ mod tests {
         let s = settings_with_envs();
 
         // Act
-        let r = build(&input(&[("/Users/u/gone", "gone")]), &s, None, Path::new(HOME), Path::new(STORAGE), |_| false);
+        let r = build(&input(&[("/Users/u/gone", "gone")]), &s, None, &mac(), |_| false);
 
         // Assert
         assert!(r.unwrap_err().contains("找不到文件夹"));
@@ -1090,7 +1247,7 @@ mod tests {
 
         // Act
         let clash = validate(&s, &input(&[]));
-        let same = build(&input(&[]), &s, Some("ctr-1"), Path::new(HOME), Path::new(STORAGE), |_| true);
+        let same = build(&input(&[]), &s, Some("ctr-1"), &mac(), |_| true);
         let desktop_name = validate(&s, &ContainerInput { name: "桌面".into(), ..input(&[]) });
 
         // Assert
@@ -1167,7 +1324,10 @@ mod tests {
     fn workspace_joins_the_gateway_without_network_powers() {
         // Arrange
         let n = names("ctr-1a").unwrap();
-        let spec = ContainerSpec { mounts: vec![Mount { source: "/Users/u/Workspace Of Claude".into(), name: "Workspace Of Claude".into() }], ssh_agent: true, ..Default::default() };
+        let spec = ContainerSpec { mounts: vec![
+            Mount { source: "/Users/u/Workspace Of Claude".into(), name: "Workspace Of Claude".into() },
+            Mount { source: r"D:\a,b\x".into(), name: "a,b".into() },
+        ], ssh_agent: true, ..Default::default() };
 
         let dirs = HostDirs { claude: Path::new("/Users/u/claude data"), tools: Path::new("/state/bin") };
 
@@ -1180,10 +1340,11 @@ mod tests {
         assert!(has(["--cap-drop", "ALL"]));
         assert!(has(["--security-opt", "no-new-privileges:true"]));
         assert!(has(["-v", "claude-hydra-1a-home:/root"]));
-        assert!(has(["-v", "/Users/u/claude data:/root/.claude"]));
+        assert!(has(["--mount", "type=bind,source=/Users/u/claude data,target=/root/.claude"]));
         assert!(has(["-e", "CLAUDE_CONFIG_DIR=/root/.claude"]));
-        assert!(has(["-v", "/state/bin:/opt/claude-hydra/bin:ro"]), "tools are read-only inside the container");
-        assert!(has(["-v", "/Users/u/Workspace Of Claude:/workspace/Workspace Of Claude"]));
+        assert!(has(["--mount", "type=bind,source=/state/bin,target=/opt/claude-hydra/bin,readonly"]), "tools are read-only inside the container");
+        assert!(has(["--mount", "type=bind,source=/Users/u/Workspace Of Claude,target=/workspace/Workspace Of Claude"]));
+        assert!(has(["--mount", r#"type=bind,"source=D:\a,b\x","target=/workspace/a,b""#]), "commas are quoted as CSV fields");
         assert!(has(["-e", "SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock"]));
         for cap in ["NET_ADMIN", "NET_RAW", "SYS_ADMIN"] { assert!(!a.iter().any(|x| x == cap), "{cap}"); }
         assert!(!a.iter().any(|x| x == "--privileged" || x.contains("docker.sock")));
@@ -1196,13 +1357,38 @@ mod tests {
         let n = names("ctr-1a").unwrap();
 
         // Act
-        let a = gateway_args("ctr-1a", &n, Path::new("/state/ctr-1a/upstream"), "gw:1");
+        let a = gateway_args("ctr-1a", &n, Path::new("/state/ctr-1a/upstream"), "gw:1", None);
+        let named = gateway_args("ctr-1a", &n, Path::new(r"C:\state\upstream"), "gw:1", runtime::DOCKER_DESKTOP.add_host);
 
         // Assert
-        assert!(a.windows(2).any(|w| w == ["-v", "/state/ctr-1a/upstream:/etc/hydra-gateway/upstream:ro"]));
+        assert!(a.windows(2).any(|w| w == ["--mount", "type=bind,source=/state/ctr-1a/upstream,target=/etc/hydra-gateway/upstream,readonly"]));
+        assert!(!a.iter().any(|x| x == "--add-host"));
+        assert!(named.windows(2).any(|w| w == ["--add-host", "hydra-host:host-gateway"]));
+        assert!(named.windows(2).any(|w| w == ["--mount", r"type=bind,source=C:\state\upstream,target=/etc/hydra-gateway/upstream,readonly"]));
         assert!(a.iter().any(|x| x == "--read-only"));
         assert!(a.windows(2).any(|w| w == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]));
         assert_eq!(a.last().unwrap(), "gw:1");
+    }
+
+    #[test]
+    fn the_gateway_must_report_the_relay_it_was_given() {
+        // Arrange
+        let cases = [
+            ("upstream=0.250.250.254:4321\n", "0.250.250.254", 4321, Some("0.250.250.254")),
+            ("upstream=192.168.65.254:4321", "hydra-host", 4321, Some("192.168.65.254")),
+            ("upstream=192.168.65.254:4000", "hydra-host", 4321, None),
+            ("upstream=10.0.0.1:4321", "0.250.250.254", 4321, None),
+            ("upstream=hydra-host:4321", "hydra-host", 4321, None),
+            ("", "hydra-host", 4321, None),
+        ];
+
+        for (ready, host, port, expected) in cases {
+            // Act
+            let ip = gateway_upstream(ready, host, port);
+
+            // Assert
+            assert_eq!(ip.as_deref(), expected, "{ready:?}");
+        }
     }
 
     #[test]
@@ -1290,7 +1476,7 @@ mod tests {
             ("FOO".to_string(), "1".to_string()),
         ]);
 
-        let audit = AuditContext { exits: vec!["203.0.113.9".into(), "203.0.113.10".into()], country: "US".into(), relay_port: 4321 };
+        let audit = AuditContext { exits: vec!["203.0.113.9".into(), "203.0.113.10".into()], country: "US".into(), host_ip: "192.168.65.254".into(), relay_port: 4321 };
 
         // Act
         let managed = shell_env(&env, Some("America/Los_Angeles"), posix_locale("en-US").as_deref(), &audit);
@@ -1303,7 +1489,8 @@ mod tests {
         assert!(get(&managed, "HTTPS_PROXY").is_empty());
         assert!(get(&unmanaged, "CLAUDE_CONFIG_DIR").is_empty());
         assert_eq!(get(&managed, "HYDRA_EXPECTED_EXIT"), ["203.0.113.9,203.0.113.10"]);
-        assert_eq!(get(&managed, "HYDRA_RELAY"), [format!("http://{}:4321", orbstack::HOST_IP)], "the environment cannot point the audit elsewhere");
+        assert_eq!(get(&managed, "HYDRA_RELAY"), ["http://192.168.65.254:4321"], "the environment cannot point the audit elsewhere");
+        assert_eq!(get(&managed, "HYDRA_HOST_IP"), ["192.168.65.254"]);
         assert_eq!(get(&managed, "HYDRA_EXPECTED_TZ"), ["America/Los_Angeles"]);
         assert!(get(&unmanaged, "HYDRA_EXPECTED_TZ").is_empty());
         assert_eq!(get(&managed, "FOO"), ["1"]);

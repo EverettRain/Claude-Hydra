@@ -168,13 +168,13 @@ export interface ContainerInput {
   image: string;
   mounts: ContainerMount[];
   sshAgent: boolean;
-  /** Mac folder for Claude Code's data; "" = the account's folder in Hydra's data directory. */
+  /** Folder for Claude Code's data; "" = the account's folder in Hydra's data directory. */
   claudeDir: string;
 }
 export interface Container extends ContainerInput {
   id: string;
   environmentName: string | null;
-  /** The Mac folder that actually holds Claude Code's data. */
+  /** The folder that actually holds Claude Code's data. */
   claudeDirPath: string;
   state: "running" | "stopped" | "absent" | "unknown";
   /** Why the container must be rebuilt before it can be opened. */
@@ -187,8 +187,12 @@ export interface Container extends ContainerInput {
 }
 export interface ContainerRuntime {
   supported: boolean;
+  /** "OrbStack" (macOS) or "Docker Desktop" (Windows). */
+  name: string | null;
+  /** The runtime forwards this computer's SSH agent. */
+  sshAgent: boolean;
   dockerPath: string | null;
-  /** OrbStack version when connected. */
+  /** The runtime's version when connected. */
   version: string | null;
   error: string | null;
   terminal: string;

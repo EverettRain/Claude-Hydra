@@ -13,12 +13,13 @@ type Icon = React.ComponentType<{ className?: string }>;
 interface NavItem { id: PageId; label: string; icon: Icon }
 
 const isMac = navigator.userAgent.includes("Mac");
+/** Containers run on OrbStack (macOS) or Docker Desktop (Windows). */
+export const hasContainers = isMac || navigator.userAgent.includes("Windows");
 const main: NavItem[] = [
   { id: "dashboard", label: "仪表板", icon: LayoutDashboard },
   { id: "accounts", label: "账号", icon: Users },
   { id: "environments", label: "环境配置", icon: Globe2 },
-  // Containers run on OrbStack, which only exists on macOS.
-  ...(isMac ? [{ id: "containers" as const, label: "容器", icon: Box }] : []),
+  ...(hasContainers ? [{ id: "containers" as const, label: "容器", icon: Box }] : []),
   { id: "config", label: "配置管理", icon: FolderCog },
 ];
 const footer: NavItem[] = [

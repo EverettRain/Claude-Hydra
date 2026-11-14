@@ -1,4 +1,5 @@
 import { Box, ChartLine, ChevronDown, Loader2, RefreshCw } from "lucide-react";
+import { hasContainers } from "@/components/AppShell";
 import { QuotaTrend } from "@/components/QuotaTrend";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Heatmap, type Metric } from "@/components/Heatmap";
@@ -12,7 +13,6 @@ import { cn, relativeTime } from "@/lib/utils";
 
 const RANGES = [7, 30, 90] as const;
 const MAX_MODELS = 6;
-const isMac = navigator.userAgent.includes("Mac");
 // The last dashboard of this session: shown at once when the page is opened again.
 let lastDashboard: UsageDashboard | null = null;
 
@@ -178,9 +178,9 @@ function ContainerDashboard() {
   }, [data, usages, series, range]);
 
   if (error && !data) return <div className="selectable rounded-xl bg-danger-soft px-4 py-3 text-[13px] text-danger">{error}</div>;
-  if (!data) return isMac ? <p className="px-1 text-[13px] text-muted">正在读取会话记录…</p> : null;
+  if (!data) return hasContainers ? <p className="px-1 text-[13px] text-muted">正在读取会话记录…</p> : null;
   if (!data.containers.length) {
-    return isMac ? (
+    return hasContainers ? (
       <div className="rounded-xl border border-dashed border-line px-4 py-8 text-center text-[12.5px] text-muted">
         新建容器账号并在其中使用 Claude Code 后，这里会显示 token 消耗、成本与活动热力图。
       </div>

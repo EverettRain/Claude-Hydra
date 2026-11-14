@@ -19,6 +19,7 @@ tauri-build = { version = "2.4.0", features = [] }
 tauri-plugin-updater = "2"
 # Folder picker for the folders shared into containers.
 tauri-plugin-dialog = "2"
+iana-time-zone = "0.1"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["parsing"] }

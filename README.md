@@ -30,7 +30,7 @@
 - [时区同步](#时区同步)
 - [仪表板与用量统计](#仪表板与用量统计)
 - [配置管理](#配置管理)
-- [Claude Code 容器（macOS + OrbStack）](#claude-code-容器macos--orbstack)
+- [Claude Code 容器（OrbStack / Docker Desktop）](#claude-code-容器orbstack--docker-desktop)
 - [平台差异](#平台差异)
 - [数据存储与安全](#数据存储与安全)
 - [已知限制](#已知限制)
@@ -46,7 +46,7 @@
 | 时区同步 | 时区可跟随代理出口、跟随系统或手动指定；确认出口后直接显示具体时区 |
 | 仪表板 | 启动首页：容器账号的 token 消耗、API 等价成本、活动热力图与趋势，以及各容器账号的 5 小时与本周额度 |
 | 配置管理 | 浏览、阅读、迁移和导出本机、桌面版账号与容器的 Claude Code 会话；管理 CLAUDE.md、settings.json、技能、命令、MCP 与插件 |
-| Claude Code 容器 | macOS 上借助用户自装的 OrbStack，在容器中运行 Claude Code；网络只经环境的代理节点，UDP / IPv6 / 直连全部阻断 |
+| Claude Code 容器 | 借助用户自装的 OrbStack（macOS）或 Docker Desktop（Windows），在容器中运行 Claude Code；网络只经环境的代理节点，UDP / IPv6 / 直连全部阻断 |
 
 ## 快速开始
 
@@ -134,7 +134,7 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 <img src="docs/images/dashboard.png" alt="仪表板" width="720">
 </div>
 
-**容器账号（macOS）**：仪表板顶部的「总览」汇总所有容器的总 token、API 等价成本、活跃天数、最长连续、活跃时间、峰值单日、常用模型与模型响应数，并给出一年的活动热力图和按模型、按容器的占比；「趋势」按容器查看每日 token 或成本折线（7 / 30 / 90 天）。
+**容器账号**：仪表板顶部的「总览」汇总所有容器的总 token、API 等价成本、活跃天数、最长连续、活跃时间、峰值单日、常用模型与模型响应数，并给出一年的活动热力图和按模型、按容器的占比；「趋势」按容器查看每日 token 或成本折线（7 / 30 / 90 天）。
 
 - 数据读取自各容器的 Claude 数据文件夹中的会话记录，不联网、不进入容器。每次读取后按小时、按模型汇总存入 `containers/<容器账号ID>/usage-history.json`：重新读取时同一小时同一模型取 token 更多的一份，Claude Code 清理旧会话记录（默认 30 天）后已记录的消耗仍然保留；从未被 Hydra 读取过的旧记录无法补回。
 - 成本按 Anthropic 官方 API 单价估算（含缓存读写与快速模式），是“若按 API 计费”的等价金额，不是订阅实际扣费；没有已知单价的模型单独标为未定价。
@@ -154,7 +154,7 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 <img src="docs/images/config.png" alt="配置管理" width="720">
 </div>
 
-左侧 **配置管理** 页以 Claude Code 的数据目录为单位管理会话和配置，不用再去 Finder 里翻文件夹。页面先列出所有位置，按**本机**（`~/.claude`，Windows 为 `%USERPROFILE%\.claude`）、**桌面版账号**（有独立 Claude Code 目录时用它自己的，否则与本机共用）、**容器账号**（容器设置里的 Claude 数据文件夹）分组，显示会话数和最近活动，位置多时可搜索。选中后列表收起到顶部，旁边有 **在 Finder 中显示**（Windows 为资源管理器）和 **切换位置** 按钮。容器账号只在 macOS 上有，其余功能 Windows 同样可用。登录凭据不会被显示、复制或导出。
+左侧 **配置管理** 页以 Claude Code 的数据目录为单位管理会话和配置，不用再去 Finder 里翻文件夹。页面先列出所有位置，按**本机**（`~/.claude`，Windows 为 `%USERPROFILE%\.claude`）、**桌面版账号**（有独立 Claude Code 目录时用它自己的，否则与本机共用）、**容器账号**（容器设置里的 Claude 数据文件夹）分组，显示会话数和最近活动，位置多时可搜索。选中后列表收起到顶部，旁边有 **在 Finder 中显示**（Windows 为资源管理器）和 **切换位置** 按钮。容器账号需要 macOS 上的 OrbStack 或 Windows 上的 Docker Desktop。登录凭据不会被显示、复制或导出。
 
 **会话**：按工作目录分组列出标题、最后活动时间、模型、轮数和大小，可搜索；点标题以对话的形式阅读：你的消息是气泡，Claude 的回复按 Markdown 显示（含表格和代码块），思考与工具调用折叠成一块，展开可看命令、文件改动和结果；提问和工具结果里的图片点一下才加载，点缩略图看大图；链接点击时复制而不打开。
 
@@ -183,13 +183,16 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 
 设计细节见 [docs/claude-config-management.md](docs/claude-config-management.md)。
 
-## Claude Code 容器（macOS + OrbStack）
+## Claude Code 容器（OrbStack / Docker Desktop）
 
 <div align="center">
 <img src="docs/images/containers.png" alt="容器页面" width="720">
 </div>
 
-在左侧 **容器** 页新建容器账号：选择一个**带代理节点**的环境，添加要共享的项目文件夹。点容器进入它的页面：项目列表里每个项目可以直接开始 **新会话**，展开后可以 **继续** 最近的会话；要在新目录里开始，点 **新项目**，在共享文件夹里逐级选择。出口检测通过后，终端会在该目录中直接启动 Claude Code，检测不通过则不启动。也可以选 **只打开终端** 自己操作。在 **配置管理** 里阅读容器的会话时，可以点 **在容器中继续** 接着这个会话。Hydra 不内置容器运行时，使用你自己安装的 [OrbStack](https://orbstack.dev)（`docker --context orbstack`）；docker 路径与打开容器用的终端（Terminal.app / iTerm2 / Ghostty）在 **设置 → OrbStack 容器** 中配置。
+在左侧 **容器** 页新建容器账号：选择一个**带代理节点**的环境，添加要共享的项目文件夹。点容器进入它的页面：项目列表里每个项目可以直接开始 **新会话**，展开后可以 **继续** 最近的会话；要在新目录里开始，点 **新项目**，在共享文件夹里逐级选择。出口检测通过后，终端会在该目录中直接启动 Claude Code，检测不通过则不启动。也可以选 **只打开终端** 自己操作。在 **配置管理** 里阅读容器的会话时，可以点 **在容器中继续** 接着这个会话。Hydra 不内置容器运行时，使用你自己安装的：
+
+- **macOS**：[OrbStack](https://orbstack.dev)（`docker --context orbstack`）。docker 路径与打开容器用的终端（Terminal.app / iTerm2 / Ghostty）在 **设置 → OrbStack 容器** 中配置。
+- **Windows**：[Docker Desktop](https://www.docker.com/products/docker-desktop/)（WSL 2 后端，Linux 容器，`docker --context desktop-linux`）。容器在新的控制台窗口中打开，Windows 11 默认用 Windows Terminal（跟随系统的「默认终端应用程序」）。docker 路径在 **设置 → Docker Desktop 容器** 中配置。Docker Desktop 对个人和小型企业免费，员工超过 250 人或年营收超过 1000 万美元的企业需要付费订阅。
 
 每个容器账号有自己的一套：
 
@@ -207,15 +210,16 @@ Mac 文件夹 → /root/.claude（Claude Code 的登录、设置与 .claude.json
 | 打开前检查 | 经中继检测出口并校验出口规则；首次使用时构建内置镜像（终端中可见进度）；核对工作容器与网关处于同一网络空间 |
 | 时区 / 语言 | 每次打开终端时按环境设置 `TZ`、`LANG`：跟随代理时取出口时区，跟随系统时取 Mac 的时区；环境中的其他环境变量一并传入（代理变量除外） |
 | 共享文件夹 | 挂载到 `/workspace/<名称>`；不能共享 `/`、用户主目录或包含 Hydra 数据的目录 |
-| 镜像 | 内置镜像：Debian 12、Node 22、Claude Code、Python、编译工具链；也可填写 OrbStack 中已有的镜像 |
-| Claude 数据 | 默认保存在 Hydra 数据目录的 `containers/<id>/claude`（仅本人可读，含明文登录凭据）；也可选择其他 Mac 文件夹，例如已有的 `.claude` 目录。不能使用 Mac 自己的 `~/.claude`，每个容器账号各用一个文件夹 |
-| SSH | 可选转发 Mac 的 SSH agent（私钥不进入容器） |
+| 镜像 | 内置镜像：Debian 12、Node 22、Claude Code、Python、编译工具链；也可填写 OrbStack / Docker Desktop 中已有的镜像 |
+| Claude 数据 | 默认保存在 Hydra 数据目录的 `containers/<id>/claude`（仅本人可读，含明文登录凭据）；也可选择其他本机文件夹，例如已有的 `.claude` 目录。不能使用本机自己的 `.claude`，每个容器账号各用一个文件夹 |
+| SSH | macOS 可选转发本机的 SSH agent（私钥不进入容器）；Docker Desktop 在 Windows 上没有可转发的 agent，不提供此选项 |
+| 共享文件夹 | macOS 填 `/Users/…`；Windows 填带盘符的路径（`D:\Projects\app`），暂不支持网络路径。Windows 上的文件经 Docker Desktop 挂进 Linux 虚拟机，读写比本机慢 |
 | 网络审计 | 容器内自带 `hydra-audit`（只读挂载，容器内无法改动）。默认不运行，进入容器时会提示：`hydra-audit` 检查出口、IPv6 / UDP / 原始套接字、宿主机服务与云元数据，并短时采样后打分；以经本账号中继看到的节点出口为准，任何不经节点的出口（不论国家）或已知真实 IP 都判为严重并给出警告。`hydra-audit watch` 持续监测，`--background` 后台运行，`status` / `stop` 查看或停止 |
 | 重建 | 修改共享文件夹、Claude 数据文件夹或 SSH 设置后需要重建；可选择先保存快照以保留容器内安装的软件，Claude 数据与 `/root` 数据卷始终保留 |
 
-也可以在任意终端执行 `claude-hydra --container <名称>` 进入，或在容器菜单中创建桌面快捷方式。
+也可以执行 `claude-hydra --container <名称>` 进入（macOS 在当前终端中进入，Windows 会打开新的终端窗口），或在容器菜单中创建桌面快捷方式。
 
-> Claude Code 登录时显示的链接在 Mac 的浏览器中打开，走的是系统网络；登录前请让系统代理切到与该账号相同的节点。
+> Claude Code 登录时显示的链接在本机的浏览器中打开，走的是系统网络；登录前请让系统代理切到与该账号相同的节点。
 
 ## 平台差异
 
@@ -224,9 +228,9 @@ Mac 文件夹 → /root/.claude（Claude Code 的登录、设置与 .claude.json
 | 多账号 | ✅ | ✅ |
 | 环境配置、代理节点与防泄漏中继 | ✅（商店版默认账号除外） | ✅ |
 | 时区同步 | ⚠️ 子进程生效，窗口待实测 | ✅ |
-| 仪表板（容器账号用量） | — | ✅ |
+| 仪表板（容器账号用量） | ✅（需 Docker Desktop） | ✅ |
 | 会话迁移 / 聊天续聊 | ✅ | ✅ |
-| Claude Code 容器 | — | ✅（需自行安装 OrbStack） |
+| Claude Code 容器 | ⚠️ 需自行安装 Docker Desktop，待实测 | ✅（需自行安装 OrbStack） |
 
 ## 数据存储与安全
 
@@ -238,7 +242,7 @@ Mac 文件夹 → /root/.claude（Claude Code 的登录、设置与 .claude.json
 - `settings.json`：账号与环境配置。节点密码在 Windows 上以 DPAPI 加密保存；macOS 上设置文件权限为仅本人可读。
 - `profiles/<账号ID>`：额外账号的 Claude 数据目录。
 - `mihomo-run/`：Clash 节点运行时的临时目录，内核退出后自动清理。
-- `containers/<容器账号ID>`：网关读取的中继地址、终端入口脚本、用量历史 `usage-history.json`，以及默认的 Claude Code 数据文件夹 `claude/`；容器、网关、数据卷与快照保存在 OrbStack 中。删除容器账号时一并删除（自选的 Claude 数据文件夹除外）。
+- `containers/<容器账号ID>`：网关读取的中继地址、终端入口脚本（macOS）、用量历史 `usage-history.json`，以及默认的 Claude Code 数据文件夹 `claude/`；容器、网关、数据卷与快照保存在 OrbStack / Docker Desktop 中。删除容器账号时一并删除（自选的 Claude 数据文件夹除外）。
 - 默认账号继续使用 Claude 原有的数据目录。
 
 ## 已知限制

@@ -1,7 +1,7 @@
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { FolderPlus, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, errorText, type ContainerInput } from "@/lib/api";
+import { api, errorText, type ContainerInput, type ContainerRuntime } from "@/lib/api";
 import { EnvironmentPicker } from "./EnvironmentPicker";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
@@ -15,11 +15,12 @@ interface Props {
   initial?: ContainerInput;
   onClose: () => void;
   onSaved: (id: string) => void;
+  runtime: ContainerRuntime | null;
 }
 
 const empty = (): ContainerInput => ({ name: "", environment: "", image: "", mounts: [], sshAgent: false, claudeDir: "" });
 
-const baseName = (path: string) => path.replace(/\/+$/, "").split("/").pop() || "folder";
+const baseName = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop()?.replace(/:$/, "") || "folder";
 
 function Line({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -31,7 +32,8 @@ function Line({ label, children }: { label: string; children: React.ReactNode })
 }
 
 /** Create or edit a Claude Code container account: environment, shared folders and image. */
-export function ContainerDialog({ open, id, initial, onClose, onSaved }: Props) {
+export function ContainerDialog({ open, id, initial, onClose, onSaved, runtime }: Props) {
+  const runtimeName = runtime?.name ?? "容器运行时";
   const [value, setValue] = useState<ContainerInput>(empty);
   const [customImage, setCustomImage] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -81,7 +83,7 @@ export function ContainerDialog({ open, id, initial, onClose, onSaved }: Props) 
       open={open}
       onClose={onClose}
       title={id ? "编辑容器账号" : "新建容器账号"}
-      description="在 OrbStack 容器中运行 Claude Code。容器只经所选环境的代理节点联网，时区与语言跟随环境。"
+      description={`在 ${runtimeName} 容器中运行 Claude Code。容器只经所选环境的代理节点联网，时区与语言跟随环境。`}
       className="max-w-[600px] bg-bg"
       footer={
         <>
@@ -130,6 +132,7 @@ export function ContainerDialog({ open, id, initial, onClose, onSaved }: Props) 
           </div>
           <p className="mt-1.5 px-1 text-[11.5px] leading-relaxed text-muted">
             只共享具体的项目文件夹；不能共享整个用户目录或包含 Claude-Hydra 数据的目录。{id && "修改共享文件夹后需要重建容器才能生效（登录数据保留）。"}
+            {!runtime?.sshAgent && "共享的文件夹经 Docker Desktop 挂进 Linux 虚拟机，读写比在本机慢，大型项目的安装和构建会更久。"}
           </p>
         </section>
 
@@ -144,19 +147,19 @@ export function ContainerDialog({ open, id, initial, onClose, onSaved }: Props) 
               <Button variant="outline" size="sm" onClick={chooseClaudeDir}>选择文件夹…</Button>
             </div>
             <p className="px-4 pb-3 text-[11.5px] leading-relaxed text-muted">
-              Claude Code 的登录凭据（明文）、设置、记忆与 .claude.json 都保存在这个 Mac 文件夹，挂载为容器的 /root/.claude。可以选择已有的 .claude 文件夹继续使用其中的登录与记忆；不能使用 Mac 自己的 ~/.claude，每个容器账号需要各自的文件夹。
+              Claude Code 的登录凭据（明文）、设置、记忆与 .claude.json 都保存在这个本机文件夹，挂载为容器的 /root/.claude。可以选择已有的 .claude 文件夹继续使用其中的登录与记忆；不能使用本机自己的 .claude，每个容器账号需要各自的文件夹。
               {id && "更改后需要重建容器，原有数据不会自动搬移。"}
             </p>
           </div>
         </section>
 
         <section>
-          <div className="group-label">镜像与 SSH</div>
+          <div className="group-label">{runtime?.sshAgent ? "镜像与 SSH" : "镜像"}</div>
           <div className="list-card">
             <Line label="镜像">
               <Select aria-label="镜像" value={customImage ? "custom" : ""} onChange={(e) => setCustomImage(e.target.value === "custom")}>
                 <option value="">内置镜像（Debian、Node 22、Claude Code、Python、编译工具）</option>
-                <option value="custom">使用 OrbStack 中已有的镜像</option>
+                <option value="custom">使用 {runtimeName} 中已有的镜像</option>
               </Select>
             </Line>
             {customImage && (
@@ -164,10 +167,12 @@ export function ContainerDialog({ open, id, initial, onClose, onSaved }: Props) 
                 <Input aria-label="镜像名称" className="font-mono text-xs" placeholder="例如 cloaked-claude:latest" value={value.image} onChange={(e) => setValue({ ...value, image: e.target.value })} />
               </Line>
             )}
-            <Line label="SSH agent">
-              <Switch checked={value.sshAgent} onCheckedChange={(sshAgent) => setValue({ ...value, sshAgent })} label="转发 Mac 的 SSH agent" />
-              <span className="text-[11.5px] text-muted">{value.sshAgent ? "转发 Mac 的 SSH agent（私钥不进入容器）" : "不转发"}</span>
-            </Line>
+            {runtime?.sshAgent && (
+              <Line label="SSH agent">
+                <Switch checked={value.sshAgent} onCheckedChange={(sshAgent) => setValue({ ...value, sshAgent })} label="转发本机的 SSH agent" />
+                <span className="text-[11.5px] text-muted">{value.sshAgent ? "转发本机的 SSH agent（私钥不进入容器）" : "不转发"}</span>
+              </Line>
+            )}
             <p className="px-4 pb-3 text-[11.5px] leading-relaxed text-muted">
               内置镜像在第一次打开时构建，需要几分钟。自定义镜像需要包含 claude 命令；镜像的修改在重建容器后生效。
             </p>

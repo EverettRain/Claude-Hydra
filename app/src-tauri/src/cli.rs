@@ -12,7 +12,7 @@ const HELP: &str = "Claude-Hydra - 同时运行多个 Claude 桌面端账号
   --restart <账号>     重启账号的 Claude（让新的启动参数生效）
   --add-account        新建账号并打开登录界面
   --list               列出账号及运行状态
-  --container <名称>   在当前终端进入 Claude Code 容器账号（macOS + OrbStack）
+  --container <名称>   进入 Claude Code 容器账号（macOS 在当前终端；Windows 打开新的终端窗口）
   --watch              执行一次“保持运行”检查
   --version            打印版本号";
 
@@ -37,6 +37,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         return None;
     }
     if first == "--container" {
+        sys::own_console(&format!("Claude Code - {}", args.get(1).map(String::as_str).unwrap_or("")));
         let result = args.get(1).ok_or("--container 需要一个容器账号名称。".to_string())
             .and_then(|n| crate::container::resolve(n).ok_or_else(|| format!("没有名为“{n}”的容器账号。")))
             .and_then(|id| {
