@@ -96,7 +96,7 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 | 泄漏途径 | 处理方式 |
 | --- | --- |
 | DNS | 通过 SOCKS5 代理（`--proxy-server=socks5://…`）把域名原样交给节点解析；Claude 自身已关闭 DNS 预解析 |
-| WebRTC | 账号浏览器（Chrome 等）用 `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`，不暴露本机或 STUN 地址。Claude 桌面版是 Electron 应用，WebRTC 策略只能由应用自己设置，这个开关对它无效：探针实测页面能读到本机网卡地址（包括网卡上的公网地址），是否暴露取决于 Claude 自身 |
+| WebRTC | 账号浏览器（Chrome 等）用 `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`，不暴露本机或 STUN 地址。Claude 桌面版是 Electron 应用，WebRTC 策略只能由应用自己设置，这个开关对它无效：探针实测页面能读到本机网卡地址（包括网卡上的公网地址），是否暴露取决于 Claude 自身。Windows 上开启沙箱隔离后，沙箱里列出的网卡只剩局域网与本机地址，公网地址读不到 |
 | UDP / QUIC | `--disable-quic`；中继拒绝 SOCKS5 UDP ASSOCIATE |
 | IPv6 | Claude 只连接 127.0.0.1 中继，不直接使用本机 IPv6 |
 | 子进程 | Claude Code、MCP 等通过 `HTTP(S)_PROXY`、`ALL_PROXY`、`NODE_USE_ENV_PROXY` 指向同一中继 |
@@ -120,7 +120,7 @@ Claude 不接受调试开关，无法直接看到它的每条网络路径实际�
 测试分 **不使用保护** 与 **使用保护** 两种：
 
 - macOS 的保护是 Seatbelt（`sandbox-exec`）：探针及其子进程只能连本机中继端口，系统 DNS 服务与其他网络连接都被拒绝。macOS 不允许在沙箱里再建沙箱，而 Chromium 会给自己的每个子进程建沙箱，所以探针在这个模式下关闭了 Chromium 自身的沙箱；同样的原因，Seatbelt 不能用于整个 Claude 桌面版（它的窗口加载线上页面，不应关闭自身沙箱）。启动输出记录在 `probe/seatbelt.log`。
-- Windows 的保护是这个环境的 Sandboxie 沙箱，与开启「沙箱隔离」的账号相同：只放行中继，并加载 Hydra 的 DNS 与身份保护。
+- Windows 的保护是这个环境的 Sandboxie 沙箱，与开启「沙箱隔离」的账号相同：只放行中继，并加载 Hydra 的 DNS 与身份保护（替换机器标识，隐藏网卡上的公网地址）。
 
 探针在 macOS 上使用与本机 Claude 相同版本的 Electron（没有安装 Claude 时，以及在 Windows 上，用较新的稳定版），首次使用时从 Electron 官方 GitHub 发布页下载（约 100 MB），并核对发布页公布的 SHA-256；它有自己的数据目录，不会读写任何账号的 Claude 数据，只访问公开的检测服务。每个环境的探针经它自己的中继联网，删除环境时一并移除。**复制报告（隐藏 IP）** 导出的报告会隐去 IP 与用户目录，便于反馈问题。
 
@@ -279,7 +279,7 @@ Mac 文件夹 → /root/.claude（Claude Code 的登录、设置与 .claude.json
 
 ## 已知限制
 
-- 防泄漏覆盖 Claude 的 Chromium 网络栈与读取代理环境变量的子进程；不读取代理变量或自己建连接的程序、UDP、本机 DNS 查询，以及在系统认证窗口或浏览器中打开的登录页无法拦截。Claude 桌面版的 WebRTC 可能暴露本机网卡地址（见「防泄漏机制」）。需要系统级保证时，请配合防火墙或独立虚拟机。
+- 防泄漏覆盖 Claude 的 Chromium 网络栈与读取代理环境变量的子进程；不读取代理变量或自己建连接的程序、UDP、本机 DNS 查询，以及在系统认证窗口或浏览器中打开的登录页无法拦截。Claude 桌面版的 WebRTC 可能暴露本机网卡地址（见「防泄漏机制」）；Windows 上开启沙箱隔离可以隐藏其中的公网地址，macOS 上没有办法。需要系统级保证时，请配合防火墙或独立虚拟机。
 - 独立数据目录只隔离本地登录数据，不修改设备指纹，也不保证账号之间不被关联。
 - 使用代理节点时，额外启动参数中不能再包含 `--proxy-server` 等代理开关。
 - Claude 会拒绝带调试或网络覆盖开关（如 `--remote-debugging-port`、`--host-resolver-rules`、`--ignore-certificate-errors`）的启动，Hydra 保存环境时会提示移除。

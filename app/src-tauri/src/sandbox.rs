@@ -20,7 +20,9 @@
 //! A box virtualizes files and the registry, not what the system reports about itself, so every
 //! box also carries the identity guard (`idguard.c`, same `InjectDll`) answering the machine GUID,
 //! hardware profile GUID, volume serial, MAC addresses and computer name with values derived per
-//! account (see `identity`). Two accounts then do not look like one device.
+//! account (see `identity`). Two accounts then do not look like one device. It also leaves the
+//! host's public addresses out of every adapter list, so a page cannot read them through WebRTC
+//! (which only lists adapters and sends nothing the network rules could stop).
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -1470,5 +1472,52 @@ if ($needed -gt 0) {
         assert_eq!(a, super::box_name("Account 2"));
         assert_ne!(a, super::box_name("Account 3"));
         assert!(a.len() <= 32 && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'), "{a}");
+    }
+
+    /// The identity guard's address checks, compiled from `idguard.c` itself and run: a box keeps
+    /// the private and local addresses and hides the public ones (see `my_GetAdaptersAddresses`).
+    /// Skipped where no C compiler is installed.
+    #[test]
+    fn identity_guard_hides_only_public_addresses() {
+        // Arrange
+        let source = include_str!("idguard.c");
+        let between = |from: &str, to: &str| -> &str {
+            let start = source.find(from).expect(from);
+            &source[start..start + source[start..].find(to).expect(to)]
+        };
+        let program = format!(
+            "#include <stdio.h>\n{}{}\n{}",
+            between("static int public_ipv4", "static int public_sockaddr"),
+            between("static int parse_ipv4", "/* Unlinks"),
+            r#"int main(void) {
+    const char *v4[] = {"8.8.8.8", "112.86.1.2", "10.0.0.1", "172.16.5.4", "172.32.0.1", "192.168.1.1", "127.0.0.1",
+                        "169.254.3.3", "100.64.0.1", "100.128.0.1", "198.18.0.223", "198.20.0.1", "224.0.0.251", "1.2.3", "256.1.1.1", 0};
+    unsigned char a[4], v6[16] = {0};
+    int i;
+    for (i = 0; v4[i]; i++) printf("%s=%d\n", v4[i], parse_ipv4(v4[i], a) ? public_ipv4(a) : -1);
+    v6[0] = 0x24; v6[1] = 0x09; printf("2409::=%d\n", public_ipv6(v6));
+    v6[0] = 0xfd; v6[1] = 0x07; printf("fd07::=%d\n", public_ipv6(v6));
+    v6[0] = 0xfe; v6[1] = 0x80; printf("fe80::=%d\n", public_ipv6(v6));
+    v6[0] = 0; v6[1] = 0; v6[15] = 1; printf("::1=%d\n", public_ipv6(v6));
+    return 0;
+}
+"#
+        );
+        let dir = std::env::temp_dir().join(format!("hydra-idguard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("check.c"), program).unwrap();
+        let Ok(built) = std::process::Command::new("cc").current_dir(&dir).args(["check.c", "-o", "check"]).status() else { return };
+
+        // Act
+        assert!(built.success(), "the address checks did not compile");
+        let out = std::process::Command::new(dir.join("check")).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Assert
+        let got = String::from_utf8_lossy(&out.stdout);
+        let public: Vec<&str> = got.lines().filter(|l| l.ends_with("=1")).collect();
+        let unreadable: Vec<&str> = got.lines().filter(|l| l.ends_with("=-1")).collect();
+        assert_eq!(public, ["8.8.8.8=1", "112.86.1.2=1", "172.32.0.1=1", "100.128.0.1=1", "198.20.0.1=1", "2409::=1"], "{got}");
+        assert_eq!(unreadable, ["1.2.3=-1", "256.1.1.1=-1"], "not addresses: {got}");
     }
 }

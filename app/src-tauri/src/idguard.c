@@ -32,6 +32,11 @@
  *   - the board, BIOS and disk serials: GetSystemFirmwareTable('RSMB') and the storage descriptor
  *     behind IOCTL_STORAGE_QUERY_PROPERTY. WMI, the other route to them, is closed off in the box.
  *
+ * Every box also leaves the host's public addresses out of the adapter lists (GetAdaptersAddresses,
+ * GetAdaptersInfo, GetIpAddrTable, GetUnicastIpAddressTable): WebRTC hands a page whatever these
+ * list, and listing sends nothing the box's network rules could stop. Private and local addresses
+ * stay, so local networking and the relay keep working.
+ *
  * Not covered: the DHCPv6 DUID (`ipconfig` prints the host's copy from outside the box),
  * NtQueryMultipleValueKey, the SCSI pass-through IOCTLs that can report a disk serial, and
  * NtQueryInformationToken when a program calls ntdll directly instead of GetTokenInformation. The
@@ -68,6 +73,8 @@ typedef NTSTATUS(NTAPI *P_NtQueryVolumeInformationFile)(HANDLE, PIO_STATUS_BLOCK
 typedef NTSTATUS(NTAPI *P_NtQueryInformationFile)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
 typedef ULONG(WINAPI *P_GetAdaptersAddresses)(ULONG, ULONG, PVOID, PIP_ADAPTER_ADDRESSES, PULONG);
 typedef ULONG(WINAPI *P_GetAdaptersInfo)(PIP_ADAPTER_INFO, PULONG);
+typedef DWORD(WINAPI *P_GetIpAddrTable)(PMIB_IPADDRTABLE, PULONG, BOOL);
+typedef DWORD(WINAPI *P_GetUnicastIpAddressTable)(ADDRESS_FAMILY, PMIB_UNICASTIPADDRESS_TABLE *);
 typedef DWORD(WINAPI *P_GetIfTable)(PMIB_IFTABLE, PULONG, BOOL);
 typedef DWORD(WINAPI *P_GetIfEntry)(PMIB_IFROW);
 typedef DWORD(WINAPI *P_GetIfTable2)(PMIB_IF_TABLE2 *);
@@ -143,6 +150,8 @@ static P_NtQueryVolumeInformationFile sys_NtQueryVolumeInformationFile;
 static P_NtQueryInformationFile sys_NtQueryInformationFile;
 static P_GetAdaptersAddresses sys_GetAdaptersAddresses;
 static P_GetAdaptersInfo sys_GetAdaptersInfo;
+static P_GetIpAddrTable sys_GetIpAddrTable;
+static P_GetUnicastIpAddressTable sys_GetUnicastIpAddressTable;
 static P_GetIfTable sys_GetIfTable;
 static P_GetIfEntry sys_GetIfEntry;
 static P_GetIfTable2 sys_GetIfTable2;
@@ -1070,16 +1079,85 @@ static NTSTATUS NTAPI my_NtQueryInformationFile(HANDLE file, PIO_STATUS_BLOCK io
 
 /* --- detours: adapters ------------------------------------------------------ */
 
+/* Whether an address is one the internet can reach this machine at: anything but loopback,
+   private, link-local, carrier-grade NAT (100.64/10), the 198.18/15 range a system proxy's TUN
+   adapter uses, multicast and reserved space; for IPv6, global unicast (2000::/3). */
+static int public_ipv4(const unsigned char *a) {
+    if (a[0] == 0 || a[0] == 10 || a[0] == 127 || a[0] >= 224) return 0;
+    if (a[0] == 172 && (a[1] & 0xF0) == 16) return 0;
+    if (a[0] == 192 && a[1] == 168) return 0;
+    if (a[0] == 169 && a[1] == 254) return 0;
+    if (a[0] == 100 && (a[1] & 0xC0) == 64) return 0;
+    if (a[0] == 198 && (a[1] & 0xFE) == 18) return 0;
+    return 1;
+}
+
+static int public_ipv6(const unsigned char *a) { return (a[0] & 0xE0) == 0x20; }
+
+static int public_sockaddr(const SOCKADDR *address) {
+    if (!address) return 0;
+    if (address->sa_family == AF_INET) return public_ipv4((const unsigned char *)&((const SOCKADDR_IN *)address)->sin_addr);
+    if (address->sa_family == AF_INET6) return public_ipv6(((const SOCKADDR_IN6 *)address)->sin6_addr.s6_addr);
+    return 0;
+}
+
+/* A dotted IPv4 address (GetAdaptersInfo reports them as text); 0 if it is not one. */
+static int parse_ipv4(const char *text, unsigned char *out) {
+    int part = 0, value = -1;
+    for (;; text++) {
+        if (*text >= '0' && *text <= '9') {
+            value = (value < 0 ? 0 : value * 10) + (*text - '0');
+            if (value > 255) return 0;
+        } else if ((*text == '.' || *text == 0) && value >= 0 && part < 4) {
+            out[part++] = (unsigned char)value;
+            value = -1;
+            if (*text == 0) return part == 4;
+        } else {
+            return 0;
+        }
+    }
+}
+
+/* Unlinks the entries of an address list (they all start with Length, Flags, Next, Address) whose
+   address is public. The entries stay in the caller's buffer; only the links skip them. */
+#define DROP_PUBLIC(type, head)                                                                    \
+    do {                                                                                           \
+        type **link_ = &(head);                                                                    \
+        while (*link_) {                                                                           \
+            if (public_sockaddr((*link_)->Address.lpSockaddr)) *link_ = (*link_)->Next;            \
+            else link_ = &(*link_)->Next;                                                          \
+        }                                                                                          \
+    } while (0)
+
+/* A page in a boxed browser lists the adapters through WebRTC (Chromium builds its host
+   candidates from GetAdaptersAddresses) and can send what it finds over the proxied connection:
+   the network rules of the box cannot stop that, since listing sends nothing. So a box shows the
+   host's private addresses only, which keeps local networking and the relay working. */
 static ULONG WINAPI my_GetAdaptersAddresses(ULONG family, ULONG flags, PVOID reserved,
                                             PIP_ADAPTER_ADDRESSES addresses, PULONG size) {
     ULONG result = sys_GetAdaptersAddresses(family, flags, reserved, addresses, size);
     PIP_ADAPTER_ADDRESSES adapter;
     if (result != NO_ERROR || !addresses) return result;
     for (adapter = addresses; adapter; adapter = adapter->Next) {
-        if (adapter->PhysicalAddressLength != 6) continue;
-        adapter_mac(adapter->AdapterName, adapter->PhysicalAddress);
+        DROP_PUBLIC(IP_ADAPTER_UNICAST_ADDRESS, adapter->FirstUnicastAddress);
+        DROP_PUBLIC(IP_ADAPTER_ANYCAST_ADDRESS, adapter->FirstAnycastAddress);
+        DROP_PUBLIC(IP_ADAPTER_DNS_SERVER_ADDRESS, adapter->FirstDnsServerAddress);
+        DROP_PUBLIC(IP_ADAPTER_PREFIX, adapter->FirstPrefix);
+        DROP_PUBLIC(IP_ADAPTER_GATEWAY_ADDRESS_LH, adapter->FirstGatewayAddress);
+        if (have_mac && adapter->PhysicalAddressLength == 6) adapter_mac(adapter->AdapterName, adapter->PhysicalAddress);
     }
     return result;
+}
+
+/* The IPv4-only form lists addresses as text, the first one inside the adapter entry itself: a
+   public one reads 0.0.0.0, as for an adapter without an address. */
+static void blank_public(IP_ADDR_STRING *list) {
+    unsigned char a[4];
+    for (; list; list = list->Next) {
+        if (!parse_ipv4(list->IpAddress.String, a) || !public_ipv4(a)) continue;
+        lstrcpynA(list->IpAddress.String, "0.0.0.0", sizeof(list->IpAddress.String));
+        lstrcpynA(list->IpMask.String, "0.0.0.0", sizeof(list->IpMask.String));
+    }
 }
 
 static ULONG WINAPI my_GetAdaptersInfo(PIP_ADAPTER_INFO adapters, PULONG size) {
@@ -1087,9 +1165,29 @@ static ULONG WINAPI my_GetAdaptersInfo(PIP_ADAPTER_INFO adapters, PULONG size) {
     PIP_ADAPTER_INFO adapter;
     if (result != NO_ERROR || !adapters) return result;
     for (adapter = adapters; adapter; adapter = adapter->Next) {
-        if (adapter->AddressLength != 6) continue;
-        adapter_mac(adapter->AdapterName, adapter->Address);
+        blank_public(&adapter->IpAddressList);
+        blank_public(&adapter->GatewayList);
+        if (have_mac && adapter->AddressLength == 6) adapter_mac(adapter->AdapterName, adapter->Address);
     }
+    return result;
+}
+
+static DWORD WINAPI my_GetIpAddrTable(PMIB_IPADDRTABLE table, PULONG size, BOOL order) {
+    DWORD result = sys_GetIpAddrTable(table, size, order), i, kept = 0;
+    if (result != NO_ERROR || !table) return result;
+    for (i = 0; i < table->dwNumEntries; i++)
+        if (!public_ipv4((const unsigned char *)&table->table[i].dwAddr)) table->table[kept++] = table->table[i];
+    table->dwNumEntries = kept;
+    return result;
+}
+
+static DWORD WINAPI my_GetUnicastIpAddressTable(ADDRESS_FAMILY family, PMIB_UNICASTIPADDRESS_TABLE *table) {
+    DWORD result = sys_GetUnicastIpAddressTable(family, table);
+    ULONG i, kept = 0;
+    if (result != NO_ERROR || !table || !*table) return result;
+    for (i = 0; i < (*table)->NumEntries; i++)
+        if (!public_sockaddr((const SOCKADDR *)&(*table)->Table[i].Address)) (*table)->Table[kept++] = (*table)->Table[i];
+    (*table)->NumEntries = kept;
     return result;
 }
 
@@ -1765,9 +1863,15 @@ __declspec(dllexport) void __stdcall InjectDllMain(HINSTANCE sbie, ULONG_PTR unu
         HOOK(ntdll, NtQueryVolumeInformationFile);
         HOOK(ntdll, NtQueryInformationFile);
     }
-    if (have_mac && iphlpapi) {
+    if (iphlpapi) {
+        /* Every address list: the host's public addresses stay out of the box, and the MAC
+           addresses are the box's own when it has them. */
         HOOK(iphlpapi, GetAdaptersAddresses);
         HOOK(iphlpapi, GetAdaptersInfo);
+        HOOK(iphlpapi, GetIpAddrTable);
+        HOOK(iphlpapi, GetUnicastIpAddressTable);
+    }
+    if (have_mac && iphlpapi) {
         HOOK(iphlpapi, GetIfTable);
         HOOK(iphlpapi, GetIfEntry);
         HOOK(iphlpapi, GetIfTable2);
