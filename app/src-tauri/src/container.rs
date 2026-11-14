@@ -446,6 +446,19 @@ fn shell_env(env: &BTreeMap<String, String>, timezone: Option<&str>, locale: Opt
     out
 }
 
+/// Variables describing the terminal Hydra was opened in. `docker exec` would otherwise report a
+/// plain `xterm`: Claude Code reads them to pick colours and keys, and to tell the user how to
+/// copy text when the terminal cannot take the clipboard from it (Terminal.app ignores OSC 52).
+const TERMINAL_ENV: [&str; 6] = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LC_TERMINAL", "LC_TERMINAL_VERSION"];
+
+/// The terminal's own variables, unless the environment config sets them.
+fn terminal_env(set: &[(String, String)], read: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    TERMINAL_ENV.iter()
+        .filter(|k| !set.iter().any(|(s, _)| s.eq_ignore_ascii_case(k)))
+        .filter_map(|k| read(k).filter(|v| !v.is_empty()).map(|v| (k.to_string(), v)))
+        .collect()
+}
+
 fn exec_args(workspace: &str, env: &[(String, String)]) -> Vec<String> {
     let mut a: Vec<String> = ["exec", "-it", "-w", "/workspace"].map(String::from).to_vec();
     for (k, v) in env { a.extend(["-e".into(), format!("{k}={v}")]); }
@@ -679,7 +692,9 @@ pub fn enter(id: &str) -> Result<i32, String> {
         country: exit.country.clone(),
         relay_port: port,
     };
-    let args = exec_args(&n.workspace, &shell_env(&effective.env, timezone.as_deref(), locale.as_deref(), &audit));
+    let mut env = shell_env(&effective.env, timezone.as_deref(), locale.as_deref(), &audit);
+    env.extend(terminal_env(&env, |k| std::env::var(k).ok()));
+    let args = exec_args(&n.workspace, &env);
     #[cfg(unix)]
     { Err(docker.exec(args)) }
     #[cfg(not(unix))]
@@ -1020,6 +1035,19 @@ mod tests {
         assert!(a.iter().any(|x| x == "--read-only"));
         assert!(a.windows(2).any(|w| w == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]));
         assert_eq!(a.last().unwrap(), "gw:1");
+    }
+
+    #[test]
+    fn terminal_variables_pass_through_unless_configured() {
+        // Arrange
+        let host = |k: &str| match k { "TERM" => Some("xterm-256color".to_string()), "TERM_PROGRAM" => Some("Apple_Terminal".to_string()), "COLORTERM" => Some(String::new()), _ => None };
+        let configured = vec![("term".to_string(), "screen".to_string())];
+
+        // Act
+        let passed = terminal_env(&configured, host);
+
+        // Assert
+        assert_eq!(passed, vec![("TERM_PROGRAM".to_string(), "Apple_Terminal".to_string())]);
     }
 
     #[test]

@@ -194,7 +194,7 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
                 重新检测
               </Button>
             </Row>
-            <Row label="打开容器使用的终端" hint="容器账号在此终端的新窗口中打开。">
+            <Row label="打开容器使用的终端" hint={runtime?.terminal === "" ? "容器账号在此终端的新窗口中打开。终端（Terminal.app）不支持 Claude Code 在容器里的复制：选中文字时按住 Fn，再用 ⌘C 复制；iTerm2 和 Ghostty 没有这个限制。" : "容器账号在此终端的新窗口中打开。"}>
               <Select
                 aria-label="终端"
                 className="w-48"
