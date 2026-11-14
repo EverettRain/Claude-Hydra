@@ -3,8 +3,9 @@
 //   node app/scripts/release-notes.mjs v1.0.1 [previous-tag]
 //
 // Each commit subject becomes one item, grouped as 新功能 / 改进 / 问题修复; the "- " lines of
-// its body become sub-items (a body without them is kept as one sub-item). Version bumps and
-// trailers (Co-Authored-By, …) are left out. The markdown is what the in-app update dialog
+// its body become sub-items (a body without them is kept as one sub-item). Version bumps,
+// trailers (Co-Authored-By, …) and commits that leave the app untouched (README, docs, CI,
+// these scripts) are left out. The markdown is what the in-app update dialog
 // renders, and what tauri-action writes to the release and to latest.json.
 import { execFileSync } from "node:child_process";
 
@@ -18,11 +19,15 @@ if (!prev) {
 }
 
 const SEP = "\u001e";
-const log = git("log", "--no-merges", `--format=%s%x1f%b${SEP}`, prev ? `${prev}..${tag}` : tag);
+// Each record: subject, body, then the files the commit changed (from --name-only).
+const log = git("log", "--no-merges", "--name-only", `--format=${SEP}%s%x1f%b%x1f`, prev ? `${prev}..${tag}` : tag);
+const outsideApp = (file) => /^(docs\/|\.github\/|app\/scripts\/)/.test(file) || /\.md$/i.test(file);
 const groups = { 新功能: [], 改进: [], 问题修复: [] };
 
 for (const raw of log.split(SEP)) {
-  const [subjectRaw = "", body = ""] = raw.trim().split("\u001f");
+  const [subjectRaw = "", body = "", changed = ""] = raw.trim().split("\u001f");
+  const files = changed.split("\n").map((f) => f.trim()).filter(Boolean);
+  if (files.length && files.every(outsideApp)) continue;
   const subject = subjectRaw.replace(/^(feat|fix|chore|refactor|perf|docs)\s*[:：]\s*/i, "").trim();
   if (!subject || /^(发布|release|bump)\s*v?\d+\.\d+\.\d+/i.test(subject)) continue;
   const lines = body.split("\n").map((l) => l.trim()).filter((l) => l && !/^[\w-]+:\s/.test(l));

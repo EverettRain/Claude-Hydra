@@ -1,8 +1,11 @@
 name: CI
 
+# Changes that leave the app untouched (README, docs, the screenshot script) need no build.
 on:
   push:
+    paths-ignore: ["**.md", "docs/**", "app/scripts/readme-screenshots.sh"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "app/scripts/readme-screenshots.sh"]
   workflow_dispatch:
 
 permissions:
