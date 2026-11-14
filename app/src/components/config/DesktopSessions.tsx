@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Folder, Search, Trash2, Upload } from "lucide-react";
 import { AccountPicker } from "@/components/AccountPicker";
-import { Page } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
@@ -14,16 +13,8 @@ const directory = (s: CodeSession) => imported(s.id) ? "导入的聊天" : s.cwd
 const leaf = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() || path;
 const summary = (r: TransferResult) => `完成 ${r.copied} 条，已存在 ${r.skipped} 条，失败 ${r.failed} 条。`;
 
-export function SessionsPage({ profiles }: { profiles: Profile[] | null }) {
-  const [selected, setSelected] = useState("");
-  const account = profiles?.find(p => p.id === selected) ?? profiles?.[0];
-  return <Page><div className="space-y-3 px-5">
-    {account ? <Library key={account.id} account={account} profiles={profiles ?? []} select={setSelected} />
-      : <p className="text-sm text-muted">{profiles ? "还没有账号。" : "正在读取账号…"}</p>}
-  </div></Page>;
-}
-
-function Library({ account, profiles, select }: { account: Profile; profiles: Profile[]; select: (id: string) => void }) {
+/** The session list Claude.app shows in its sidebar for a desktop account, with imported chats and a recycle bin. */
+export function DesktopSessions({ account, profiles, select }: { account: Profile; profiles: Profile[]; select: (id: string) => void }) {
   const toast = useToast();
   const [trash, setTrash] = useState(false);
   const [query, setQuery] = useState("");
@@ -94,10 +85,7 @@ function Library({ account, profiles, select }: { account: Profile; profiles: Pr
   });
   return <>
     <div className="flex flex-wrap items-center gap-2">
-      <select aria-label="切换账号" className="field w-auto max-w-48" value={account.id} disabled={busy} onChange={e => select(e.target.value)}>
-        {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-      </select>
-      <label className="relative ml-auto min-w-32 flex-1">
+      <label className="relative min-w-32 flex-1">
         <Search className="absolute left-2.5 top-2 h-4 w-4 text-muted" />
         <input className="field pl-8" aria-label="搜索会话" placeholder="搜索会话或工作目录" value={query} onChange={e => setQuery(e.target.value)} />
       </label>

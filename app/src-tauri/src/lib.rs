@@ -1,6 +1,10 @@
 //! Claude-Hydra application entry, system tray management, and Tauri IPC commands.
 
 mod app_icon;
+mod claude_config;
+mod claude_folders;
+mod claude_trash;
+mod code_sessions;
 pub mod browser;
 pub mod cli;
 pub mod code_usage;
@@ -37,6 +41,8 @@ pub mod watchdog;
 use install::Install;
 use profiles::{Profile, ProfileOptions};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -491,6 +497,141 @@ async fn recycle_session(app: AppHandle, account: String, action: String, id: St
     }).await.map_err(|_| "会话操作失败。".to_string())?
 }
 
+/// Runs file work off the main thread, so scanning large data folders keeps the window responsive.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|_| "后台任务失败。".to_string())?
+}
+
+fn claude_folder(app: &AppHandle, id: &str) -> Result<claude_folders::Folder, String> {
+    claude_folders::find(current_install(app).ok().as_ref(), id)
+}
+
+fn claude_folders_of(app: &AppHandle, ids: &[String]) -> Result<Vec<claude_folders::Folder>, String> {
+    let all = claude_folders::list(current_install(app).ok().as_ref());
+    ids.iter().map(|id| all.iter().find(|f| &f.id == id).cloned().ok_or_else(|| "目标位置已不存在，请刷新。".to_string())).collect()
+}
+
+#[tauri::command]
+async fn claude_folder_list(app: AppHandle) -> Result<Vec<claude_folders::Summary>, String> {
+    blocking(move || Ok(claude_folders::list(current_install(&app).ok().as_ref()).into_iter().map(claude_folders::summarize).collect())).await
+}
+
+#[tauri::command]
+async fn claude_folder_open(app: AppHandle, folder: String) -> Result<(), String> {
+    blocking(move || claude_folders::reveal(&claude_folder(&app, &folder)?)).await
+}
+
+#[tauri::command]
+async fn code_session_list(app: AppHandle, folder: String) -> Result<Vec<code_sessions::Session>, String> {
+    blocking(move || Ok(code_sessions::list(&claude_folder(&app, &folder)?))).await
+}
+
+#[tauri::command]
+async fn code_session_read(app: AppHandle, folder: String, id: String, offset: usize, limit: usize) -> Result<code_sessions::Transcript, String> {
+    blocking(move || code_sessions::read(&claude_folder(&app, &folder)?, &id, offset, limit.min(500))).await
+}
+
+#[tauri::command]
+async fn code_session_trash(app: AppHandle, folder: String, ids: Vec<String>) -> Result<usize, String> {
+    blocking(move || code_sessions::trash(&claude_folder(&app, &folder)?, &ids)).await
+}
+
+#[tauri::command]
+async fn code_session_plan(app: AppHandle, source: String, ids: Vec<String>, target: String) -> Result<code_sessions::Plan, String> {
+    blocking(move || {
+        let (src, dst) = (claude_folder(&app, &source)?, claude_folder(&app, &target)?);
+        Ok(code_sessions::plan(&code_sessions::Side { dir: &src.dir, paths: &src.paths }, &ids, &dst))
+    }).await
+}
+
+#[tauri::command]
+async fn code_session_transfer(app: AppHandle, source: String, ids: Vec<String>, target: String, mapping: HashMap<String, String>, remove: bool) -> Result<code_sessions::Outcome, String> {
+    blocking(move || {
+        let (src, dst) = (claude_folder(&app, &source)?, claude_folder(&app, &target)?);
+        code_sessions::transfer(&code_sessions::Side { dir: &src.dir, paths: &src.paths }, &ids, &dst, &mapping, remove.then_some(&src))
+    }).await
+}
+
+#[tauri::command]
+async fn code_session_export(app: AppHandle, folder: String, ids: Vec<String>, path: String) -> Result<usize, String> {
+    blocking(move || code_sessions::export(&claude_folder(&app, &folder)?, &ids, Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn code_session_import_preview(app: AppHandle, path: String, target: String) -> Result<code_sessions::ImportPreview, String> {
+    blocking(move || code_sessions::import_preview(Path::new(&path), &claude_folder(&app, &target)?)).await
+}
+
+#[tauri::command]
+async fn code_session_import(app: AppHandle, path: String, target: String, mapping: HashMap<String, String>) -> Result<code_sessions::Outcome, String> {
+    blocking(move || code_sessions::import(Path::new(&path), &claude_folder(&app, &target)?, &mapping)).await
+}
+
+#[tauri::command]
+async fn claude_trash_list(app: AppHandle, folder: String) -> Result<Vec<claude_trash::Trashed>, String> {
+    blocking(move || Ok(claude_trash::list(&claude_folder(&app, &folder)?))).await
+}
+
+#[tauri::command]
+async fn claude_trash_restore(app: AppHandle, folder: String, id: String) -> Result<(), String> {
+    blocking(move || claude_trash::restore(&claude_folder(&app, &folder)?, &id)).await
+}
+
+#[tauri::command]
+async fn claude_trash_empty(app: AppHandle, folder: String) -> Result<(), String> {
+    blocking(move || claude_trash::empty(&claude_folder(&app, &folder)?)).await
+}
+
+#[tauri::command]
+async fn claude_file_read(app: AppHandle, folder: String, path: String) -> Result<claude_config::TextFile, String> {
+    blocking(move || claude_config::read_file(&claude_folder(&app, &folder)?, &path)).await
+}
+
+#[tauri::command]
+async fn claude_file_save(app: AppHandle, folder: String, path: String, text: String, stamp: String) -> Result<String, String> {
+    blocking(move || claude_config::save_file(&claude_folder(&app, &folder)?, &path, &text, &stamp)).await
+}
+
+#[tauri::command]
+async fn claude_extension_list(app: AppHandle, folder: String) -> Result<Vec<claude_config::Extension>, String> {
+    blocking(move || Ok(claude_config::extensions(&claude_folder(&app, &folder)?))).await
+}
+
+#[tauri::command]
+async fn claude_extension_delete(app: AppHandle, folder: String, path: String) -> Result<(), String> {
+    blocking(move || claude_config::delete_extension(&claude_folder(&app, &folder)?, &path)).await
+}
+
+#[tauri::command]
+async fn claude_extension_copy(app: AppHandle, folder: String, path: String, targets: Vec<String>, overwrite: bool) -> Result<Vec<claude_config::CopyResult>, String> {
+    blocking(move || claude_config::copy_extension(&claude_folder(&app, &folder)?, &path, &claude_folders_of(&app, &targets)?, overwrite)).await
+}
+
+#[tauri::command]
+async fn claude_mcp_list(app: AppHandle, folder: String) -> Result<Vec<claude_config::McpServer>, String> {
+    blocking(move || claude_config::mcp_servers(&claude_folder(&app, &folder)?)).await
+}
+
+#[tauri::command]
+async fn claude_mcp_delete(app: AppHandle, folder: String, project: Option<String>, name: String) -> Result<(), String> {
+    blocking(move || claude_config::delete_mcp(&claude_folder(&app, &folder)?, project.as_deref(), &name)).await
+}
+
+#[tauri::command]
+async fn claude_mcp_copy(app: AppHandle, folder: String, name: String, targets: Vec<String>, overwrite: bool) -> Result<Vec<claude_config::CopyResult>, String> {
+    blocking(move || claude_config::copy_mcp(&claude_folder(&app, &folder)?, &name, &claude_folders_of(&app, &targets)?, overwrite)).await
+}
+
+#[tauri::command]
+async fn claude_plugin_list(app: AppHandle, folder: String) -> Result<Vec<claude_config::Plugin>, String> {
+    blocking(move || Ok(claude_config::plugins(&claude_folder(&app, &folder)?))).await
+}
+
+#[tauri::command]
+async fn claude_plugin_set(app: AppHandle, folder: String, id: String, enabled: bool) -> Result<(), String> {
+    blocking(move || claude_config::set_plugin(&claude_folder(&app, &folder)?, &id, enabled)).await
+}
+
 #[tauri::command]
 async fn profile_quota(app: AppHandle, id: String) -> Result<quota::Quota, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -828,6 +969,29 @@ pub fn run(start_in_tray: bool) {
             import_chats,
             recycle_session,
             copy_sessions,
+            claude_folder_list,
+            claude_folder_open,
+            code_session_list,
+            code_session_read,
+            code_session_trash,
+            code_session_plan,
+            code_session_transfer,
+            code_session_export,
+            code_session_import_preview,
+            code_session_import,
+            claude_trash_list,
+            claude_trash_restore,
+            claude_trash_empty,
+            claude_file_read,
+            claude_file_save,
+            claude_extension_list,
+            claude_extension_delete,
+            claude_extension_copy,
+            claude_mcp_list,
+            claude_mcp_delete,
+            claude_mcp_copy,
+            claude_plugin_list,
+            claude_plugin_set,
             profile_quota,
             releases::release_notes,
             releases::open_release_page,

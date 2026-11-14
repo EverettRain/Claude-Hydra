@@ -5,9 +5,9 @@ import { api, errorText, type AppInfo, type Profile } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import { AboutPage } from "@/pages/AboutPage";
 import { AccountsPage } from "@/pages/AccountsPage";
+import { ConfigPage } from "@/pages/ConfigPage";
 import { ContainersPage } from "@/pages/ContainersPage";
 import { EnvironmentsPage } from "@/pages/EnvironmentsPage";
-import { SessionsPage } from "@/pages/SessionsPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 
@@ -54,7 +54,7 @@ export default function App() {
       {page === "environments" && <EnvironmentsPage onChanged={refresh} />}
       {page === "containers" && <ContainersPage onOpenSettings={() => setPage("settings")} />}
       {page === "dashboard" && <DashboardPage profiles={profiles} />}
-      {page === "sessions" && <SessionsPage profiles={profiles} />}
+      {page === "config" && <ConfigPage profiles={profiles} />}
       {page === "settings" && (
         <SettingsPage info={info} reloadInfo={reloadInfo} theme={theme} onThemeChange={setTheme} onInstallChanged={refresh} />
       )}

@@ -32,6 +32,8 @@ aes-gcm = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Session export files.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

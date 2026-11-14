@@ -114,6 +114,39 @@ export interface CodeSession {
 export interface SessionPreview { sessions: CodeSession[]; targetProblem: string | null; running: boolean }
 export interface TransferResult { copied: number; skipped: number; failed: number }
 
+/** A Claude Code data folder (`CLAUDE_CONFIG_DIR`). */
+export interface ClaudeFolder {
+  /** `local`, `desktop:<account>` or `container:<account>`. */
+  id: string;
+  kind: "local" | "desktop" | "container";
+  name: string;
+  path: string;
+  /** A desktop account without a Claude Code folder of its own uses the Mac's `~/.claude`. */
+  sharedWithLocal: boolean;
+  /** Desktop account the folder belongs to. */
+  profile: string | null;
+}
+/** A location as the picker shows it: session count and latest activity come from file names and times. */
+export interface ClaudeFolderSummary extends ClaudeFolder { exists: boolean; sessions: number; lastActiveAt: number | null }
+export interface ClaudeCodeSession {
+  /** `<project folder>/<session id>`. */
+  id: string; title: string; cwd: string | null; lastActivityAt: number | null; turns: number; model: string | null; size: number;
+}
+export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "result" | "command" | "compact" | "system";
+export interface TranscriptItem { kind: TranscriptKind; text: string; name: string | null; time: number | null; omitted: number; error: boolean }
+export interface Transcript { items: TranscriptItem[]; total: number }
+/** A working folder of the selected sessions and, when Hydra can tell, the same folder on the target side. */
+export interface TransferRoot { cwd: string; sessions: number; target: string | null }
+export interface TransferPlan { roots: TransferRoot[]; choices: string[]; hostTarget: boolean }
+export interface TransferOutcome { copied: number; skipped: number; failed: number; errors: string[] }
+export interface ImportPreview { source: string; sessions: ClaudeCodeSession[]; plan: TransferPlan }
+export interface TrashedItem { id: string; kind: "session" | "skill" | "agent" | "command"; name: string; detail: string | null; deletedAt: number }
+export interface ClaudeTextFile { text: string; stamp: string; exists: boolean }
+export interface ClaudeExtension { kind: "skill" | "agent" | "command"; name: string; description: string | null; path: string; file: string }
+export interface CopyResult { target: string; status: "copied" | "exists" | "failed"; error: string | null }
+export interface McpServer { name: string; project: string | null; transport: string; summary: string; config: unknown }
+export interface ClaudePlugin { id: string; name: string; marketplace: string | null; version: string | null; enabled: boolean; installed: boolean }
+
 export interface ContainerMount {
   /** Absolute folder on the Mac. */
   source: string;
@@ -230,6 +263,30 @@ export const api = {
   readImport: (account: string, id: string) => invoke<string>("read_import", { account, id }),
   sessionPreview: (source: string, target: string, trash = false) => invoke<SessionPreview>("session_preview", { source, target, trash }),
   copySessions: (source: string, target: string, ids: string[], restart = false) => invoke<TransferResult>("copy_sessions", { source, target, ids, restart }),
+  claudeFolders: () => invoke<ClaudeFolderSummary[]>("claude_folder_list"),
+  openClaudeFolder: (folder: string) => invoke<void>("claude_folder_open", { folder }),
+  codeSessions: (folder: string) => invoke<ClaudeCodeSession[]>("code_session_list", { folder }),
+  readCodeSession: (folder: string, id: string, offset: number, limit: number) => invoke<Transcript>("code_session_read", { folder, id, offset, limit }),
+  trashCodeSessions: (folder: string, ids: string[]) => invoke<number>("code_session_trash", { folder, ids }),
+  planCodeSessions: (source: string, ids: string[], target: string) => invoke<TransferPlan>("code_session_plan", { source, ids, target }),
+  transferCodeSessions: (source: string, ids: string[], target: string, mapping: Record<string, string>, remove: boolean) =>
+    invoke<TransferOutcome>("code_session_transfer", { source, ids, target, mapping, remove }),
+  exportCodeSessions: (folder: string, ids: string[], path: string) => invoke<number>("code_session_export", { folder, ids, path }),
+  previewCodeSessionImport: (path: string, target: string) => invoke<ImportPreview>("code_session_import_preview", { path, target }),
+  importCodeSessions: (path: string, target: string, mapping: Record<string, string>) => invoke<TransferOutcome>("code_session_import", { path, target, mapping }),
+  claudeTrash: (folder: string) => invoke<TrashedItem[]>("claude_trash_list", { folder }),
+  restoreClaudeTrash: (folder: string, id: string) => invoke<void>("claude_trash_restore", { folder, id }),
+  emptyClaudeTrash: (folder: string) => invoke<void>("claude_trash_empty", { folder }),
+  readClaudeFile: (folder: string, path: string) => invoke<ClaudeTextFile>("claude_file_read", { folder, path }),
+  saveClaudeFile: (folder: string, path: string, text: string, stamp: string) => invoke<string>("claude_file_save", { folder, path, text, stamp }),
+  claudeExtensions: (folder: string) => invoke<ClaudeExtension[]>("claude_extension_list", { folder }),
+  deleteClaudeExtension: (folder: string, path: string) => invoke<void>("claude_extension_delete", { folder, path }),
+  copyClaudeExtension: (folder: string, path: string, targets: string[], overwrite: boolean) => invoke<CopyResult[]>("claude_extension_copy", { folder, path, targets, overwrite }),
+  mcpServers: (folder: string) => invoke<McpServer[]>("claude_mcp_list", { folder }),
+  deleteMcpServer: (folder: string, project: string | null, name: string) => invoke<void>("claude_mcp_delete", { folder, project, name }),
+  copyMcpServer: (folder: string, name: string, targets: string[], overwrite: boolean) => invoke<CopyResult[]>("claude_mcp_copy", { folder, name, targets, overwrite }),
+  claudePlugins: (folder: string) => invoke<ClaudePlugin[]>("claude_plugin_list", { folder }),
+  setClaudePlugin: (folder: string, id: string, enabled: boolean) => invoke<void>("claude_plugin_set", { folder, id, enabled }),
   releaseNotes: (after: string, upto: string) => invoke<ReleaseNote[]>("release_notes", { after, upto }),
   openReleasePage: (version: string) => invoke<void>("open_release_page", { version }),
   restartApp: () => invoke<void>("restart_app"),

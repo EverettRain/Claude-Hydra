@@ -1,13 +1,13 @@
 import { UpdateNotice } from "./UpdateNotice";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ArrowRightLeft, Box, Globe2, LayoutDashboard, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
+import { Box, FolderCog, Globe2, LayoutDashboard, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
 import type React from "react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { appIconSrc } from "@/lib/appIcon";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-export type PageId = "dashboard" | "accounts" | "environments" | "containers" | "sessions" | "settings" | "about";
+export type PageId = "dashboard" | "accounts" | "environments" | "containers" | "config" | "settings" | "about";
 
 type Icon = React.ComponentType<{ className?: string }>;
 interface NavItem { id: PageId; label: string; icon: Icon }
@@ -19,14 +19,14 @@ const main: NavItem[] = [
   { id: "environments", label: "环境配置", icon: Globe2 },
   // Containers run on OrbStack, which only exists on macOS.
   ...(isMac ? [{ id: "containers" as const, label: "容器", icon: Box }] : []),
-  { id: "sessions", label: "会话迁移", icon: ArrowRightLeft },
+  { id: "config", label: "配置管理", icon: FolderCog },
 ];
 const footer: NavItem[] = [
   { id: "settings", label: "设置", icon: Settings },
   { id: "about", label: "关于", icon: Info },
 ];
 const titles: Record<PageId, string> = {
-  dashboard: "仪表板", accounts: "账号", environments: "环境配置", containers: "容器", sessions: "会话迁移", settings: "设置", about: "关于",
+  dashboard: "仪表板", accounts: "账号", environments: "环境配置", containers: "容器", config: "配置管理", settings: "设置", about: "关于",
 };
 
 const nextTheme: Record<ThemeMode, ThemeMode> = { system: "light", light: "dark", dark: "system" };

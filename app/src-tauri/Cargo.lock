@@ -602,6 +602,7 @@ dependencies = [
  "webview2-com",
  "windows",
  "windows-sys 0.59.0",
+ "zip",
 ]
 
 [[package]]
@@ -5818,6 +5819,7 @@ checksum = "df3845f734baabdd02de353a20580e30ceccd03897def44a4eb8e9654992e294"
 dependencies = [
  "constant_time_eq",
  "crc32fast",
+ "flate2",
  "getrandom 0.4.3",
  "indexmap 2.14.2",
  "libc",
