@@ -61,7 +61,7 @@ fn prompt_text(row: &Value) -> Option<String> {
     let blocks = content.as_array()?;
     if blocks.iter().any(|b| b["type"] == "tool_result") { return None; }
     let text: Vec<&str> = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
-    (!text.is_empty()).then(|| text.join("\n"))
+    (!text.is_empty() || blocks.iter().any(|b| b["type"] == "image")).then(|| text.join("\n"))
 }
 
 /// Slash commands and their output are stored as tagged text; they are not questions.
@@ -321,6 +321,12 @@ pub struct Item {
     /// Characters left out of a long text.
     omitted: usize,
     error: bool,
+    /// Pairs a `tool` item with its `result`: the tool call's id on both.
+    id: Option<String>,
+    /// A `tool` item's input, each long string cut short like `text`.
+    input: Option<Value>,
+    /// Images attached to a prompt or returned by a tool (shown as placeholders).
+    images: usize,
 }
 
 #[derive(Serialize)]
@@ -346,12 +352,26 @@ fn result_text(content: &Value) -> String {
     }
 }
 
+/// `v` with every string longer than `max` characters cut to it.
+fn clip_strings(v: &Value, max: usize) -> Value {
+    match v {
+        Value::String(s) => Value::String(clip(s.clone(), max).0),
+        Value::Array(a) => Value::Array(a.iter().map(|x| clip_strings(x, max)).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), clip_strings(x, max))).collect()),
+        other => other.clone(),
+    }
+}
+
+fn image_count(content: &Value) -> usize {
+    content.as_array().into_iter().flatten().filter(|b| b["type"] == "image").count()
+}
+
 fn items_of(row: &Value) -> Vec<Item> {
     let time = timestamp(&row["timestamp"]);
     let item = |kind, text: String, name: Option<String>, error: bool| {
         let text = if matches!(kind, "tool" | "result") { text } else { text.trim().to_string() };
         let (text, omitted) = clip(text, if matches!(kind, "tool" | "result") { TOOL_LIMIT } else { TEXT_LIMIT });
-        Item { kind, text, name, time, omitted, error }
+        Item { kind, text, name, time, omitted, error, id: None, input: None, images: 0 }
     };
     let command = |text: &str| Some(command_text(text)).filter(|t| !t.is_empty()).map(|t| vec![item("command", t, None, false)]).unwrap_or_default();
     if row["isSidechain"] == true || row["isMeta"] == true { return Vec::new(); }
@@ -359,16 +379,25 @@ fn items_of(row: &Value) -> Vec<Item> {
         Some("user") => {
             if row["isCompactSummary"] == true { return vec![item("compact", result_text(&row["message"]["content"]), None, false)]; }
             if let Some(text) = prompt_text(row) {
-                return if is_command(&text) { command(&text) } else { vec![item("user", text, None, false)] };
+                if is_command(&text) { return command(&text); }
+                return vec![Item { images: image_count(&row["message"]["content"]), ..item("user", text, None, false) }];
             }
             row["message"]["content"].as_array().into_iter().flatten()
                 .filter(|b| b["type"] == "tool_result")
-                .map(|b| item("result", result_text(&b["content"]), None, b["is_error"] == true)).collect()
+                .map(|b| Item {
+                    id: b["tool_use_id"].as_str().map(str::to_owned),
+                    images: image_count(&b["content"]),
+                    ..item("result", result_text(&b["content"]), None, b["is_error"] == true)
+                }).collect()
         }
         Some("assistant") => row["message"]["content"].as_array().into_iter().flatten().filter_map(|b| match b["type"].as_str() {
             Some("text") => b["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| item("assistant", t.into(), None, false)),
             Some("thinking") => b["thinking"].as_str().filter(|t| !t.trim().is_empty()).map(|t| item("thinking", t.into(), None, false)),
-            Some("tool_use") => Some(item("tool", serde_json::to_string_pretty(&b["input"]).unwrap_or_default(), b["name"].as_str().map(str::to_owned), false)),
+            Some("tool_use") => Some(Item {
+                id: b["id"].as_str().map(str::to_owned),
+                input: Some(clip_strings(&b["input"], TOOL_LIMIT)),
+                ..item("tool", serde_json::to_string_pretty(&b["input"]).unwrap_or_default(), b["name"].as_str().map(str::to_owned), false)
+            }),
             _ => None,
         }).collect(),
         Some("system") if row["subtype"] == "compact_boundary" => vec![item("compact", "上下文已压缩".into(), None, false)],
@@ -737,8 +766,8 @@ mod tests {
         let lines = [
             json!({"type":"user","cwd":cwd,"uuid":"a","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"修一下登录"}}),
             json!({"type":"assistant","cwd":sub(cwd, "src"),"uuid":"b","timestamp":"2026-01-01T00:00:05Z","message":{"model":"claude-opus-5-5","content":[
-                {"type":"thinking","thinking":"t","signature":"sig"},{"type":"tool_use","name":"Read","input":{"file_path":sub(cwd, "a.rs")}}]}}),
-            json!({"type":"user","uuid":"c","message":{"content":[{"type":"tool_result","content":"ok","is_error":false}]}}),
+                {"type":"thinking","thinking":"t","signature":"sig"},{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":sub(cwd, "a.rs")}}]}}),
+            json!({"type":"user","uuid":"c","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok","is_error":false}]}}),
             json!({"type":"ai-title","aiTitle":"登录修复"}),
         ].map(|v| v.to_string());
         fs::create_dir_all(dir.join("projects").join(&project).join(SESSION).join("subagents")).unwrap();
@@ -820,6 +849,8 @@ mod tests {
         let kinds: Vec<&str> = t.items.iter().map(|i| i.kind).collect();
         assert_eq!(kinds, ["user", "thinking", "tool", "result"]);
         assert_eq!(t.items[2].name.as_deref(), Some("Read"));
+        assert_eq!(t.items[2].input.as_ref().unwrap()["file_path"], serde_json::json!(sub(&host_root(), "a.rs")));
+        assert_eq!((t.items[2].id.as_deref(), t.items[3].id.as_deref()), (Some("tu1"), Some("tu1")), "a result is paired with its call");
         assert_eq!((page.total, page.items.len(), page.items[0].kind), (4, 1, "thinking"));
         let _ = fs::remove_dir_all(dir);
     }

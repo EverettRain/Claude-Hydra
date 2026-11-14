@@ -46,10 +46,13 @@ interface AppShellProps {
    * container-only setup). The summary line is then left out; the accounts page shows why.
    */
   statusError?: string | null;
+  /** The page draws its own top bar (with drag region and window controls), flush with the top. */
+  bare?: boolean;
   children: React.ReactNode;
 }
 
-function WindowControls() {
+/** Minimise, maximise and close for the frameless window off macOS (macOS has its traffic lights). */
+export function WindowControls() {
   const win = getCurrentWindow();
   const base = "flex h-12 w-11 items-center justify-center text-muted hover:text-fg";
   return (
@@ -79,7 +82,7 @@ function NavRow({ item, active, onSelect, setRef }: { item: NavItem; active: boo
   );
 }
 
-export function AppShell({ activePage, onPageChange, theme, onThemeChange, appIcon, status, statusError, children }: AppShellProps) {
+export function AppShell({ activePage, onPageChange, theme, onThemeChange, appIcon, status, statusError, bare, children }: AppShellProps) {
   const ThemeIcon = theme === "light" ? Sun : theme === "dark" ? Moon : SunMoon;
   const refs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const nav = useRef<HTMLDivElement>(null);
@@ -130,7 +133,7 @@ export function AppShell({ activePage, onPageChange, theme, onThemeChange, appIc
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header data-tauri-drag-region className="flex h-12 shrink-0 items-center justify-between gap-3 pl-5 pr-3">
+        <header data-tauri-drag-region className={cn("flex h-12 shrink-0 items-center justify-between gap-3 pl-5 pr-3", bare && "hidden")}>
           <div data-tauri-drag-region className="pointer-events-none min-w-0 truncate text-[13.5px] font-semibold">{titles[activePage]}</div>
           <div className="flex items-center gap-1">
             <UpdateNotice />

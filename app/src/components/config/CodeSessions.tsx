@@ -1,18 +1,33 @@
 import { open as pickFile, save as pickSave } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, Copy, Download, Folder, MoveRight, Search, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
 import { api, errorText, type ClaudeCodeSession, type ClaudeFolder } from "@/lib/api";
 import { formatSize, formatTime, leaf } from "./shared";
-import { TranscriptView } from "./TranscriptView";
 import { TransferDialog, type Transfer } from "./TransferDialog";
+
+// Loaded on first use, with the Markdown parser it brings.
+const ChatView = lazy(() => import("./ChatView").then((m) => ({ default: m.ChatView })));
 
 const NO_CWD = "未记录工作目录";
 
-/** The Claude Code sessions of one data folder, grouped by working folder. */
-export function CodeSessions({ folder, folders }: { folder: ClaudeFolder; folders: ClaudeFolder[] }) {
+function scrollParent(el: HTMLElement | null): HTMLElement | null {
+  for (let p = el?.parentElement; p; p = p.parentElement) {
+    if (/(auto|scroll)/.test(getComputedStyle(p).overflowY)) return p;
+  }
+  return null;
+}
+
+/**
+ * The Claude Code sessions of one data folder, grouped by working folder. An opened session is
+ * drawn into `chatHost`, which the page shows in place of itself; the list stays mounted behind.
+ */
+export function CodeSessions({ folder, folders, chatHost, onReading }: {
+  folder: ClaudeFolder; folders: ClaudeFolder[]; chatHost: HTMLElement | null; onReading: (open: boolean) => void;
+}) {
   const toast = useToast();
   const [rows, setRows] = useState<ClaudeCodeSession[] | null>(null);
   const [error, setError] = useState("");
@@ -26,6 +41,11 @@ export function CodeSessions({ folder, folders }: { folder: ClaudeFolder; folder
   const [busy, setBusy] = useState(false);
   // Only a slow read (an index still being built) is worth explaining.
   const [slow, setSlow] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  // Where the list was scrolled when a session was opened, to return there.
+  const listScroll = useRef(0);
+  useEffect(() => { onReading(!!reading); }, [reading, onReading]);
+  useEffect(() => () => onReading(false), [onReading]);
 
   useEffect(() => {
     let current = true;
@@ -57,12 +77,22 @@ export function CodeSessions({ folder, folders }: { folder: ClaudeFolder; folder
     try { await work(); } catch (e) { toast(errorText(e), "error"); } finally { setBusy(false); refresh((n) => n + 1); }
   };
   const ids = [...picked];
-  const exportPicked = () => run(async () => {
+  const exportSessions = (ids: string[]) => run(async () => {
     const path = await pickSave({ title: "导出会话", defaultPath: `claude-sessions-${new Date().toISOString().slice(0, 10)}.zip`, filters: [{ name: "Zip", extensions: ["zip"] }] });
     if (!path) return;
     const n = await api.exportCodeSessions(folder.id, ids, path);
     toast(`已导出 ${n} 个会话`);
   });
+  const openSession = (s: ClaudeCodeSession) => {
+    const scroller = scrollParent(root.current);
+    listScroll.current = scroller?.scrollTop ?? 0;
+    setReading(s);
+    scroller?.scrollTo({ top: 0 });
+  };
+  const closeSession = () => {
+    setReading(null);
+    requestAnimationFrame(() => scrollParent(root.current)?.scrollTo({ top: listScroll.current }));
+  };
   const importFile = async () => {
     try {
       const path = await pickFile({ title: "导入会话", filters: [{ name: "Hydra 会话导出", extensions: ["zip"] }] });
@@ -71,7 +101,17 @@ export function CodeSessions({ folder, folders }: { folder: ClaudeFolder; folder
   };
 
   return (
-    <div className="space-y-3">
+    <div ref={root}>
+      {reading && chatHost && createPortal(
+        <Suspense fallback={<p className="py-6 text-center text-sm text-muted">正在打开…</p>}>
+          <ChatView folder={folder.id} session={reading} onBack={closeSession}
+            onCopy={() => setTransfer({ type: "copy", ids: [reading.id] })} onMove={() => setTransfer({ type: "move", ids: [reading.id] })}
+            onExport={() => exportSessions([reading.id])} />
+        </Suspense>,
+        chatHost,
+      )}
+      {/* Kept mounted while a session is open, so going back finds the list as it was. */}
+      <div className={reading ? "hidden" : "space-y-3"}>
       <div className="flex flex-wrap items-center gap-2">
         <label className="relative min-w-40 flex-1">
           <Search className="absolute left-2.5 top-2 h-4 w-4 text-muted" />
@@ -85,7 +125,7 @@ export function CodeSessions({ folder, folders }: { folder: ClaudeFolder; folder
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => setPicked(new Set())}>取消选择</Button>
           <Button size="sm" variant="outline" disabled={busy} onClick={() => setTransfer({ type: "copy", ids })}><Copy />复制到…</Button>
           <Button size="sm" variant="outline" disabled={busy} onClick={() => setTransfer({ type: "move", ids })}><MoveRight />移动到…</Button>
-          <Button size="sm" variant="outline" disabled={busy} onClick={exportPicked}><Download />导出</Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => exportSessions(ids)}><Download />导出</Button>
           <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirmDelete(true)}><Trash2 />删除</Button>
         </div>
       )}
@@ -112,7 +152,7 @@ export function CodeSessions({ folder, folders }: { folder: ClaudeFolder; folder
             {!folded && list.map((s) => (
               <div key={s.id} className="flex items-center gap-2.5 px-3 py-2">
                 <input type="checkbox" aria-label={`选择 ${s.title}`} checked={picked.has(s.id)} disabled={busy} onChange={() => toggle([s.id])} />
-                <button className="min-w-0 flex-1 text-left" onClick={() => setReading(s)}>
+                <button className="min-w-0 flex-1 text-left" onClick={() => openSession(s)}>
                   <span className="block truncate text-[13px] hover:underline" title={s.title}>{s.title}</span>
                   <small className="block truncate text-muted">{formatTime(s.lastActivityAt)} · {s.model ?? "模型未知"} · {s.turns} 轮 · {formatSize(s.size)}</small>
                 </button>
@@ -121,9 +161,13 @@ export function CodeSessions({ folder, folders }: { folder: ClaudeFolder; folder
           </section>
         );
       })}
-      <TranscriptView folder={folder.id} session={reading} onClose={() => setReading(null)} />
+      </div>
       <TransferDialog folder={folder} folders={folders} transfer={transfer} onClose={() => setTransfer(null)}
-        onDone={(message) => { toast(message); setPicked(new Set()); refresh((n) => n + 1); }} />
+        onDone={(message) => {
+          toast(message); setPicked(new Set()); refresh((n) => n + 1);
+          // A moved session is no longer here to read.
+          if (transfer?.type === "move" && reading && transfer.ids.includes(reading.id)) closeSession();
+        }} />
       <Dialog open={confirmDelete} onClose={() => { if (!busy) setConfirmDelete(false); }} title={`删除 ${picked.size} 个会话？`}
         description="会话会移到这个位置的回收站，可以在「回收站」里恢复。"
         footer={<><Button variant="ghost" disabled={busy} onClick={() => setConfirmDelete(false)}>取消</Button>

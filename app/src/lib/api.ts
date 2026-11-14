@@ -133,7 +133,14 @@ export interface ClaudeCodeSession {
   id: string; title: string; cwd: string | null; lastActivityAt: number | null; turns: number; model: string | null; size: number;
 }
 export type TranscriptKind = "user" | "assistant" | "thinking" | "tool" | "result" | "command" | "compact" | "system";
-export interface TranscriptItem { kind: TranscriptKind; text: string; name: string | null; time: number | null; omitted: number; error: boolean }
+export interface TranscriptItem {
+  kind: TranscriptKind; text: string; name: string | null; time: number | null; omitted: number; error: boolean;
+  /** Pairs a tool call with its result. */
+  id: string | null;
+  /** A tool call's input, long strings cut short. */
+  input: Record<string, unknown> | null;
+  images: number;
+}
 export interface Transcript { items: TranscriptItem[]; total: number }
 /** A working folder of the selected sessions and, when Hydra can tell, the same folder on the target side. */
 export interface TransferRoot { cwd: string; sessions: number; target: string | null }

@@ -131,6 +131,44 @@
   }
 }
 
+@layer base {
+  /*
+   * The conversation view (`ChatView`) takes the warm palette of the Claude app, by redefining
+   * the tokens for its subtree only: ivory page, sand bubbles for your messages, near-black ink.
+   */
+  .claude-chat {
+    --bg: 250 249 245;
+    --card: 255 255 255;
+    --card-2: 245 244 237;
+    --pill: 237 234 224;
+    --pill-hover: 229 226 214;
+    --line: 222 219 207;
+    --line-2: 232 230 220;
+    --fg: 20 20 19;
+    --fg-2: 61 61 58;
+    --muted: 115 114 108;
+    --faint: 176 174 165;
+  }
+  .dark .claude-chat {
+    --bg: 38 38 36;
+    --card: 48 48 46;
+    --card-2: 31 30 29;
+    --pill: 20 20 19;
+    --pill-hover: 26 26 25;
+    --line: 62 62 56;
+    --line-2: 52 52 48;
+    --fg: 250 249 245;
+    --fg-2: 194 192 182;
+    --muted: 156 154 146;
+    --faint: 100 99 94;
+  }
+  /* Claude's answers in a serif, as in the app; Chinese falls through to the system face. */
+  .claude-chat .md {
+    font-family: "Tiempos Text", ui-serif, Georgia, Cambria, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", serif;
+    font-size: 14.5px;
+  }
+}
+
 @layer components {
   /* Grouped list card: white surface, hairline edge, rows separated by thin lines. */
   /* No overflow clipping, so row menus can extend past the card; end rows inherit the rounding. */
@@ -149,6 +187,61 @@
   .list-card > * + * {
     border-top: 0.5px solid rgb(var(--line-2));
   }
+  /* Markdown of a session's messages (`Markdown`). */
+  .md {
+    @apply text-[13.5px] leading-[1.7] text-fg;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .md > * + * {
+    @apply mt-3;
+  }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+    @apply font-semibold leading-snug tracking-[-0.01em];
+  }
+  .md h1 { @apply mt-5 text-[19px]; }
+  .md h2 { @apply mt-5 text-[16.5px]; }
+  .md h3 { @apply mt-4 text-[14.5px]; }
+  .md h4, .md h5, .md h6 { @apply mt-3 text-[13.5px]; }
+  .md ul, .md ol {
+    @apply space-y-1 pl-5;
+  }
+  .md ul { list-style: disc; }
+  .md ol { list-style: decimal; }
+  .md li > ul, .md li > ol { @apply mt-1; }
+  .md li.task { @apply -ml-5 list-none; }
+  .md li.task > input { @apply mr-1.5 align-[-1px]; }
+  .md li > p { @apply my-1; }
+  .md blockquote {
+    @apply border-l-2 border-line pl-3 text-fg-2;
+  }
+  .md code {
+    @apply rounded bg-pill px-1 py-px font-mono text-[12.5px];
+  }
+  .md hr { @apply border-line; }
+  .md .md-link {
+    @apply cursor-pointer text-left text-fg underline decoration-muted underline-offset-2 hover:decoration-fg;
+  }
+  .md .table-wrap { @apply overflow-x-auto; }
+  .md table {
+    @apply w-full border-collapse text-[12.5px];
+  }
+  .md th, .md td {
+    @apply border-b-[0.5px] border-line px-2.5 py-1.5 text-left align-top;
+  }
+  .md th { @apply bg-card-2 font-medium; }
+  .md-code {
+    @apply overflow-hidden rounded-lg bg-card-2;
+    box-shadow: var(--card-edge);
+  }
+  .md-code-bar {
+    @apply flex items-center justify-between px-3 py-1 text-[11px] text-muted;
+  }
+  .md-code-bar button { @apply flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-pill hover:text-fg; }
+  .md-code pre {
+    @apply overflow-x-auto px-3 pb-2.5 font-mono text-[12px] leading-5;
+  }
+  .md-code code { @apply bg-transparent p-0 text-[12px]; }
   .group-label {
     @apply px-1 pb-1.5 text-[11px] font-medium uppercase tracking-[0.04em] text-muted;
   }

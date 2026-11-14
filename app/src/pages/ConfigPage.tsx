@@ -27,7 +27,7 @@ function remembered() {
  * Browse and manage every Claude Code data folder: this computer's own, desktop accounts' and containers'.
  * The page opens on a picker of all locations; choosing one folds it into a header above the tabs.
  */
-export function ConfigPage({ profiles }: { profiles: Profile[] | null }) {
+export function ConfigPage({ profiles, onImmersive }: { profiles: Profile[] | null; onImmersive: (on: boolean) => void }) {
   const toast = useToast();
   const [folders, setFolders] = useState<ClaudeFolderSummary[] | null>(null);
   const [error, setError] = useState("");
@@ -36,6 +36,12 @@ export function ConfigPage({ profiles }: { profiles: Profile[] | null }) {
   const [chosen, setChosen] = useState(false);
   const [picking, setPicking] = useState(true);
   const [tab, setTab] = useState<Tab>("sessions");
+  // An opened session takes the whole content area: drawn into this host while the page (still
+  // mounted, so the list keeps its state) is hidden.
+  const [chatHost, setChatHost] = useState<HTMLDivElement | null>(null);
+  const [reading, setReading] = useState(false);
+  useEffect(() => { onImmersive(reading); }, [reading, onImmersive]);
+  useEffect(() => () => onImmersive(false), [onImmersive]);
 
   // Accounts come and go with the account list; reload the locations with it.
   useEffect(() => {
@@ -55,45 +61,50 @@ export function ConfigPage({ profiles }: { profiles: Profile[] | null }) {
   const open = chosen && !picking && folder;
 
   return (
-    <Page>
-      <div className="space-y-3 px-5">
-        {error && <p role="alert" className="text-sm text-danger">{error}</p>}
-        {!folders && !error && <p className="text-sm text-muted">正在读取…</p>}
-        {folders && (
-          <div className="rounded-xl bg-card shadow-card">
-            <Collapse open={!open}>
-              <LocationPicker folders={folders} current={folder?.id ?? ""} onPick={choose} onCancel={chosen && folder ? () => setPicking(false) : undefined} />
-            </Collapse>
-            <Collapse open={!!open}>
-              {folder && <>
-                <LocationHeader folder={folder} onSwitch={() => setPicking(true)}
-                  onReveal={() => api.openClaudeFolder(folder.id).catch((e) => toast(errorText(e), "error"))} />
-                <div role="tablist" aria-label="内容" className="mx-3 mb-3 flex gap-0.5 overflow-x-auto rounded-lg bg-pill p-0.5">
-                  {shown.map((t) => (
-                    <button key={t.id} role="tab" aria-selected={t.id === active} onClick={() => setTab(t.id)}
-                      className={cn("h-7 shrink-0 flex-1 whitespace-nowrap rounded-md px-2.5 text-[12.5px] active:!scale-100",
-                        t.id === active ? "bg-card font-medium text-fg shadow-edge dark:bg-white/[.12]" : "text-muted hover:text-fg")}>
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
-              </>}
-            </Collapse>
-          </div>
-        )}
-        {open && folders && (
-          <div key={`${folder.id}/${active}`} className="view-in">
-            {active === "sessions" && <CodeSessions folder={folder} folders={folders} />}
-            {active === "desktop" && account && profiles && (
-              <DesktopSessions account={account} profiles={profiles} select={(id) => choose(`desktop:${id}`)} />
+    <>
+      <div className={reading ? "hidden" : undefined}>
+        <Page>
+          <div className="space-y-3 px-5">
+            {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+            {!folders && !error && <p className="text-sm text-muted">正在读取…</p>}
+            {folders && (
+              <div className="rounded-xl bg-card shadow-card">
+                <Collapse open={!open}>
+                  <LocationPicker folders={folders} current={folder?.id ?? ""} onPick={choose} onCancel={chosen && folder ? () => setPicking(false) : undefined} />
+                </Collapse>
+                <Collapse open={!!open}>
+                  {folder && <>
+                    <LocationHeader folder={folder} onSwitch={() => setPicking(true)}
+                      onReveal={() => api.openClaudeFolder(folder.id).catch((e) => toast(errorText(e), "error"))} />
+                    <div role="tablist" aria-label="内容" className="mx-3 mb-3 flex gap-0.5 overflow-x-auto rounded-lg bg-pill p-0.5">
+                      {shown.map((t) => (
+                        <button key={t.id} role="tab" aria-selected={t.id === active} onClick={() => setTab(t.id)}
+                          className={cn("h-7 shrink-0 flex-1 whitespace-nowrap rounded-md px-2.5 text-[12.5px] active:!scale-100",
+                            t.id === active ? "bg-card font-medium text-fg shadow-edge dark:bg-white/[.12]" : "text-muted hover:text-fg")}>
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
+                  </>}
+                </Collapse>
+              </div>
             )}
-            {active === "memory" && <MemoryAndSettings folder={folder} />}
-            {active === "extensions" && <Extensions folder={folder} folders={folders} />}
-            {active === "mcp" && <McpAndPlugins folder={folder} folders={folders} />}
-            {active === "trash" && <Trash folder={folder} />}
+            {open && folders && (
+              <div key={`${folder.id}/${active}`} className="view-in">
+                {active === "sessions" && <CodeSessions folder={folder} folders={folders} chatHost={chatHost} onReading={setReading} />}
+                {active === "desktop" && account && profiles && (
+                  <DesktopSessions account={account} profiles={profiles} select={(id) => choose(`desktop:${id}`)} />
+                )}
+                {active === "memory" && <MemoryAndSettings folder={folder} />}
+                {active === "extensions" && <Extensions folder={folder} folders={folders} />}
+                {active === "mcp" && <McpAndPlugins folder={folder} folders={folders} />}
+                {active === "trash" && <Trash folder={folder} />}
+              </div>
+            )}
           </div>
-        )}
+        </Page>
       </div>
-    </Page>
+      <div ref={setChatHost} className={reading ? "h-full" : "hidden"} />
+    </>
   );
 }
