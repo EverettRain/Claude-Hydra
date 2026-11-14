@@ -22,6 +22,8 @@ pub mod login;
 mod mac_url;
 pub mod paths;
 pub mod pricing;
+pub mod probe;
+mod seatbelt;
 pub mod profiles;
 pub mod node;
 pub mod runtime;
@@ -290,6 +292,12 @@ async fn open_account_browser(id: String) -> Result<browser::Check, String> {
         let check = plan.check();
         browser::open(plan).map(|_| check)
     }).await.map_err(|e| e.to_string())?
+}
+
+/// Starts the probe as a Claude of the environment would start (see `probe`).
+#[tauri::command]
+async fn launch_probe(environment: String, protected: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || probe::launch(&environment, protected)).await.map_err(|e| e.to_string())?
 }
 
 /// Checks the account browser's route as opening it would, without opening it.
@@ -727,6 +735,7 @@ struct AppInfo {
     lightweight: bool,
     app_icon: String,
     app_icons: Vec<(String, String)>,
+    hide_privacy_notice: bool,
 }
 
 #[tauri::command]
@@ -749,6 +758,7 @@ fn app_info(app: AppHandle) -> AppInfo {
         lightweight: s.lightweight,
         app_icon: app_icon::current(),
         app_icons: app_icon::choices(),
+        hide_privacy_notice: s.hide_privacy_notice,
     }
 }
 
@@ -770,6 +780,11 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 fn set_require_environment(enabled: bool) -> Result<(), String> {
     settings::update(|s| s.require_environment = Some(enabled))
+}
+
+#[tauri::command]
+fn set_privacy_notice_hidden(hidden: bool) -> Result<(), String> {
+    settings::update(|s| s.hide_privacy_notice = hidden)
 }
 
 #[tauri::command]
@@ -995,6 +1010,7 @@ pub fn run(start_in_tray: bool) {
             prepare_login,
             open_account_browser,
             test_account_browser,
+            launch_probe,
             account_browser_fingerprint,
             set_account_browser,
             resume_account,
@@ -1056,6 +1072,7 @@ pub fn run(start_in_tray: bool) {
             set_autostart,
             set_require_environment,
             set_lightweight,
+            set_privacy_notice_hidden,
             set_claude_path,
             quit_app,
         ])

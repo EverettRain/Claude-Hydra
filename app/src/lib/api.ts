@@ -128,6 +128,8 @@ export interface AppInfo {
   appIcon: string;
   /** Selectable icons: id, display name. */
   appIcons: [string, string][];
+  /** The user turned off the Accounts page's privacy notice. */
+  hidePrivacyNotice: boolean;
 }
 
 
@@ -279,6 +281,8 @@ export const api = {
   prepareLogin: (id: string) => invoke<void>("prepare_login", { id }),
   openAccountBrowser: (id: string) => invoke<BrowserCheck>("open_account_browser", { id }),
   testAccountBrowser: (id: string) => invoke<BrowserCheck>("test_account_browser", { id }),
+  launchProbe: (environment: string, protect: boolean) => invoke<void>("launch_probe", { environment, protected: protect }),
+  setPrivacyNoticeHidden: (hidden: boolean) => invoke<void>("set_privacy_notice_hidden", { hidden }),
   browserFingerprint: (id: string) => invoke<BrowserFingerprint>("account_browser_fingerprint", { id }),
   setAccountBrowser: (id: string, browser: string | null) => invoke<BrowserFingerprint>("set_account_browser", { id, browser }),
   resumeAccount: (id: string) => invoke<string>("resume_account", { id }),

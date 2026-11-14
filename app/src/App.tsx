@@ -53,7 +53,7 @@ export default function App() {
   return (
     <AppShell activePage={page} onPageChange={setPage} theme={theme} onThemeChange={setTheme} appIcon={info?.appIcon}
       status={profiles ? { running: profiles.filter((p) => p.pid).length, total: profiles.length } : null} statusError={loadError} bare={page === "config" && immersive}>
-      {page === "accounts" && <AccountsPage profiles={profiles} loadError={loadError} refresh={refresh} />}
+      {page === "accounts" && <AccountsPage profiles={profiles} loadError={loadError} refresh={refresh} info={info} reloadInfo={reloadInfo} onOpenSettings={() => setPage("settings")} />}
       {page === "environments" && <EnvironmentsPage onChanged={refresh} />}
       {page === "containers" && <ContainersPage onOpenSettings={() => setPage("settings")} />}
       {page === "web" && <WebPage profiles={profiles} />}

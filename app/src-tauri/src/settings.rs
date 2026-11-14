@@ -140,6 +140,9 @@ pub struct Settings {
     /// the interface again. Off, closing only hides the window and reopening is instant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lightweight: bool,
+    /// The user turned off the privacy notice the Accounts page shows on every visit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_privacy_notice: bool,
 }
 
 impl Settings {

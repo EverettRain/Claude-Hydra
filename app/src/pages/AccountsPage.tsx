@@ -23,7 +23,8 @@ import { Page, PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
-import { api, errorText, type Profile } from "@/lib/api";
+import { PrivacyNotice } from "@/components/PrivacyNotice";
+import { api, errorText, type AppInfo, type Profile } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
 
 // The browser sign-in callback router is Windows-only (see login.rs).
@@ -34,10 +35,19 @@ interface Props {
   profiles: Profile[] | null;
   loadError: string | null;
   refresh: () => Promise<void>;
+  info: AppInfo | null;
+  reloadInfo: () => Promise<void>;
+  onOpenSettings: () => void;
 }
 
-export function AccountsPage({ profiles, loadError, refresh }: Props) {
+export function AccountsPage({ profiles, loadError, refresh, info, reloadInfo, onOpenSettings }: Props) {
   const toast = useToast();
+  // Shown on every visit until the user turns it off.
+  const [noticeClosed, setNoticeClosed] = useState(false);
+  const closeNotice = (forever: boolean) => {
+    setNoticeClosed(true);
+    if (forever) api.setPrivacyNoticeHidden(true).then(reloadInfo, (e) => toast(errorText(e), "error"));
+  };
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [editing, setEditing] = useState<Profile | null>(null);
   const [deleting, setDeleting] = useState<Profile | null>(null);
@@ -162,6 +172,9 @@ export function AccountsPage({ profiles, loadError, refresh }: Props) {
       >
         <p className="selectable break-all rounded-lg bg-pill px-3 py-2 font-mono text-[11.5px] text-muted">{deleting?.path}</p>
       </Dialog>
+      {info && !info.hidePrivacyNotice && !noticeClosed && (
+        <PrivacyNotice platform={info.platform} onTest={onOpenSettings} onDismiss={closeNotice} />
+      )}
     </Page>
   );
 }

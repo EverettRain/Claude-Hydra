@@ -9,6 +9,20 @@ use std::process::{Command, Stdio};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+/// How an account's Claude is started, after every check passed: what `launch` runs, and what
+/// the probe (see `probe`) runs instead to see the same environment.
+pub struct Spec {
+    pub env: Vec<(String, String)>,
+    /// Hydra's own switches (proxy, Claude's first-party mode), passed as separate arguments.
+    pub managed: Vec<String>,
+    /// The environment's extra switches, as the user typed them.
+    pub extra: String,
+    sandboxed: bool,
+    pub relay_port: Option<u16>,
+    /// The exit the launch check verified (`None` without a node).
+    pub exit: Option<crate::node::ExitInfo>,
+}
+
 pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     let running = profiles::running_map(install).get(&path_key(&p.path)).copied();
     if let Some(pid) = running {
@@ -18,92 +32,10 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
             return Ok("focused");
         }
     }
-
-    let s = settings::load();
     let outcome = if running.is_some() { "focused" } else { "started" };
-    let effective = s.effective(&p.id);
-    let node = effective.node.clone();
-    let extra = profiles::extra_args(&s, &p.id);
-    if let Some(f) = crate::node::forbidden_switch(&extra) {
-        return Err(format!("Claude 不允许使用启动参数 {f}，带上它会直接退出。请在环境配置的额外启动参数中移除。"));
-    }
-    let mut env = profiles::env_vars(&s, &p.id);
-    // Hydra-managed switches; passed as separate arguments (some contain spaces).
-    let mut managed: Vec<String> = Vec::new();
-    let mut timezone = match effective.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
-    let sandboxed = effective.isolation == "sandboxie";
-    if (node.is_some() || timezone.is_some() || sandboxed) && p.is_default && install.is_msix() {
-        return Err("商店版默认账号无法应用环境配置中的代理节点、时区或沙箱隔离。".into());
-    }
-    // A soft cut (checks kept failing) is not refused here: the relay host re-checks the exit
-    // before it opens the route, and the launch check below verifies it once more.
-    if let Some(reason) = s.account(&p.id).blocked.filter(|_| !s.account(&p.id).blocked_soft) {
-        return Err(format!("账号未启动：出口保护已切断这个账号的网络——{reason}\n请在账号菜单中选择“恢复网络”重新检测，或在环境配置中重新绑定出口。"));
-    }
-    if effective.unusable_node {
-        return Err("账号未启动：这个账号的代理节点无法读取（密码不能在本机解密，或节点配置已损坏）。为避免改用本机网络直连，已拒绝启动。请打开它的环境配置，重新填写节点并保存。".into());
-    }
-    if node.is_none() && !p.is_default && s.requires_environment() {
-        return Err(NO_ENVIRONMENT.into());
-    }
-    // Only the sandboxed launch (not on macOS) needs the port itself.
-    #[cfg(not(target_os = "macos"))]
-    let mut relay_port = None;
-    if let Some(node) = &node {
-        if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
-        // Claude pins itself to a managed egress proxy over `--proxy-server`, so the account
-        // would leave through that proxy (e.g. a local Clash port) instead of its node.
-        if let Some(policy) = sys::claude_egress_policy().filter(|_| !sandboxed || crate::sandbox::available().is_err()) {
-            return Err(format!(
-                "账号未启动：系统策略为 Claude 固定了出口代理 {policy}。Claude 会忽略 Hydra 的代理节点、改走这个代理。如需改走 Hydra 配置，请切换到 Sandboxie-Plus 隔离环境；不使用代理节点的账号不受影响。"
-            ));
-        }
-        let (port, exit) = verify_route(&p.id, effective.environment.as_deref(), node).map_err(|e| format!("账号未启动：{e}"))?;
-        #[cfg(not(target_os = "macos"))]
-        { relay_port = Some(port); }
-        if matches!(effective.timezone.as_str(), "" | "proxy") {
-            timezone = Some(exit_timezone(&exit).map_err(|e| format!("账号未启动：{e}"))?);
-        }
-        managed = crate::node::chromium_args(port);
-        env.retain(|(k, _)| !crate::node::is_proxy_env(k));
-        env.extend(crate::node::child_env(port));
-    }
-    if let Some(tz) = timezone {
-        env.retain(|(k, _)| !k.eq_ignore_ascii_case("TZ"));
-        env.push(("TZ".into(), tz));
-    }
-    if sandboxed {
-        // The box's identity guard answers `GetComputerNameEx` and `GetUserNameEx` with these
-        // values; the environment variables are inherited instead of queried, so they have to be
-        // set to the same values or a program reading `COMPUTERNAME`/`USERNAME` would see two
-        // different machines and accounts.
-        let ids = crate::identity::Identifiers::for_account(&p.id);
-        for (key, value) in
-            crate::identity::identity_env(&ids.computer_name, &ids.user_name, |k| std::env::var(k).ok())
-        {
-            env.retain(|(k, _)| !k.eq_ignore_ascii_case(&key));
-            env.push((key, value));
-        }
-    }
-    // Claude Code started by this account keeps its sign-in, settings and sessions in the
-    // account's own folder instead of the `~/.claude` every account shares.
-    let code_dir = (effective.separate_code && (!p.is_default || sandboxed)).then(|| crate::sandbox::code_dir(&p.id));
-    if let Some(dir) = &code_dir {
-        std::fs::create_dir_all(dir).map_err(|e| format!("账号未启动：无法创建 Claude Code 目录：{e}"))?;
-        env.retain(|(k, _)| !k.eq_ignore_ascii_case("CLAUDE_CONFIG_DIR"));
-        env.push(("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned()));
-    }
-    // With Claude's third-party (API/gateway) mode set up, Claude decides 1P vs 3P from
-    // machine-wide state and can ignore `--user-data-dir` (see `third_party`).
-    if !p.is_default {
-        match crate::third_party::mode() {
-            crate::third_party::Mode::NotConfigured => {}
-            crate::third_party::Mode::FirstParty => managed.push(crate::third_party::KEEP_FIRST_PARTY_SWITCH.into()),
-            crate::third_party::Mode::ThirdParty => {
-                return Err("账号未启动：本机 Claude 处于第三方推理（API / 网关）模式。此模式下 Claude 会忽略账号目录，所有账号都改用共享的 Claude-3p 数据目录，额外账号会直接退出。请打开默认 Claude，在登录页选择用 Claude 账号登录（切回第一方模式）后重试；或在 Claude 中移除第三方推理配置。".into());
-            }
-        }
-    }
+    let Spec { env, managed, extra, sandboxed, relay_port, .. } = prepare_for(&p.id, p.is_default, install.is_msix())?;
+    #[cfg(target_os = "macos")]
+    let _ = (sandboxed, relay_port);
     if p.is_default && install.is_msix() {
         let aumid = install.aumid.as_deref().ok_or("缺少商店版应用标识。")?;
         Command::new("explorer.exe")
@@ -121,23 +53,8 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     #[cfg(target_os = "macos")]
     {
         let app = install.aumid.clone().ok_or("找不到 Claude.app。")?;
-        let mut cmd = Command::new("/usr/bin/open");
-        cmd.args(["-n", "-a", &app]);
-        for (k, v) in &env {
-            cmd.args(["--env", &format!("{k}={v}")]);
-        }
-        let mut pass: Vec<String> = Vec::new();
-        if !p.is_default {
-            pass.push(format!("--user-data-dir={}", p.path));
-        }
-        pass.extend(managed);
-        pass.extend(extra.split_whitespace().map(str::to_string));
-        if !pass.is_empty() {
-            cmd.arg("--args").args(pass);
-        }
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        let status = cmd.status().map_err(|e| format!("无法启动 Claude：{e}"))?;
-        if !status.success() { return Err("无法启动 Claude（open 返回错误）。".into()); }
+        let user_data_dir = (!p.is_default).then(|| p.path.clone());
+        mac_open(&app, &env, &[], user_data_dir.as_deref(), &managed, &extra).map_err(|e| format!("无法启动 Claude：{e}"))?;
         // `open` returns once the app is launched; Claude may still quit right away (e.g. it
         // rejects a switch). Report that instead of a false "started".
         return confirm_running(install, p).map(|_| outcome);
@@ -150,23 +67,16 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         } else {
             install.launch_exe().ok_or("找不到 Claude 的启动程序。Claude 可能正在更新，请稍后再试。")?
         };
-        let mut line = Vec::new();
-        if !p.is_default {
-            line.push(format!("--user-data-dir=\"{}\"", p.path));
-        }
-        line.extend(managed.into_iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a }));
-        if !extra.is_empty() {
-            line.push(extra);
-        }
+        let line = windows_line((!p.is_default).then_some(p.path.as_str()), &managed, &extra);
         let mut cmd = if sandboxed {
             crate::sandbox::configure(&p.id, &p.path, relay_port).map_err(|e| format!("账号未启动：{e}"))?;
-            crate::sandbox::command(&p.id, &exe, &line.join(" "), &env)?
+            crate::sandbox::command(&p.id, &exe, &line, &env)?
         } else {
             let mut cmd = Command::new(&exe);
             #[cfg(windows)]
-            cmd.raw_arg(line.join(" "));
+            cmd.raw_arg(&line);
             #[cfg(not(windows))]
-            cmd.args(line);
+            cmd.args(line.split(' '));
             cmd
         };
         // Claude explains an immediate exit on stderr (e.g. "refusing to start — ..."), so keep it.
@@ -191,6 +101,142 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         }
         result.map(|_| outcome)
     }
+}
+
+/// macOS: starts a new instance of the app bundle `app` as Hydra starts Claude: `env` through
+/// `open --env`, then `lead` arguments, the account's profile folder and the switches.
+#[cfg(target_os = "macos")]
+pub fn mac_open(app: &str, env: &[(String, String)], lead: &[String], user_data_dir: Option<&str>, managed: &[String], extra: &str) -> Result<(), String> {
+    let mut cmd = Command::new("/usr/bin/open");
+    cmd.args(["-n", "-a", app]);
+    for (k, v) in env {
+        cmd.args(["--env", &format!("{k}={v}")]);
+    }
+    let pass = mac_args(lead, user_data_dir, managed, extra);
+    if !pass.is_empty() {
+        cmd.arg("--args").args(pass);
+    }
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let status = cmd.status().map_err(|e| e.to_string())?;
+    if !status.success() { return Err("open 返回错误".into()); }
+    Ok(())
+}
+
+/// Windows: Claude's command line after the program: the profile folder, Hydra's switches, the
+/// extra ones (passed as typed).
+#[cfg(not(target_os = "macos"))]
+pub fn windows_line(user_data_dir: Option<&str>, managed: &[String], extra: &str) -> String {
+    let mut line = Vec::new();
+    if let Some(dir) = user_data_dir {
+        line.push(format!("--user-data-dir=\"{dir}\""));
+    }
+    line.extend(managed.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }));
+    if !extra.is_empty() {
+        line.push(extra.to_string());
+    }
+    line.join(" ")
+}
+
+/// macOS: the arguments Claude gets: `lead`, the profile folder, Hydra's switches, the extra ones.
+#[cfg(target_os = "macos")]
+pub fn mac_args(lead: &[String], user_data_dir: Option<&str>, managed: &[String], extra: &str) -> Vec<String> {
+    let mut pass: Vec<String> = lead.to_vec();
+    if let Some(dir) = user_data_dir {
+        pass.push(format!("--user-data-dir={dir}"));
+    }
+    pass.extend(managed.iter().cloned());
+    pass.extend(extra.split_whitespace().map(str::to_string));
+    pass
+}
+
+/// Runs every check of a launch of account `id` (the default account when `is_default`; `msix`
+/// for the Store build of Claude) and assembles the environment and switches its Claude starts
+/// with. It needs nothing else, so the probe can run it without Claude installed.
+pub fn prepare_for(id: &str, is_default: bool, msix: bool) -> Result<Spec, String> {
+    let s = settings::load();
+    let effective = s.effective(id);
+    let node = effective.node.clone();
+    let extra = profiles::extra_args(&s, id);
+    if let Some(f) = crate::node::forbidden_switch(&extra) {
+        return Err(format!("Claude 不允许使用启动参数 {f}，带上它会直接退出。请在环境配置的额外启动参数中移除。"));
+    }
+    let mut env = profiles::env_vars(&s, id);
+    let mut checked_exit = None;
+    // Hydra-managed switches; passed as separate arguments (some contain spaces).
+    let mut managed: Vec<String> = Vec::new();
+    let mut timezone = match effective.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
+    let sandboxed = effective.isolation == "sandboxie";
+    if (node.is_some() || timezone.is_some() || sandboxed) && is_default && msix {
+        return Err("商店版默认账号无法应用环境配置中的代理节点、时区或沙箱隔离。".into());
+    }
+    // A soft cut (checks kept failing) is not refused here: the relay host re-checks the exit
+    // before it opens the route, and the launch check below verifies it once more.
+    if let Some(reason) = s.account(id).blocked.filter(|_| !s.account(id).blocked_soft) {
+        return Err(format!("账号未启动：出口保护已切断这个账号的网络——{reason}\n请在账号菜单中选择“恢复网络”重新检测，或在环境配置中重新绑定出口。"));
+    }
+    if effective.unusable_node {
+        return Err("账号未启动：这个账号的代理节点无法读取（密码不能在本机解密，或节点配置已损坏）。为避免改用本机网络直连，已拒绝启动。请打开它的环境配置，重新填写节点并保存。".into());
+    }
+    if node.is_none() && !is_default && s.requires_environment() {
+        return Err(NO_ENVIRONMENT.into());
+    }
+    let mut relay_port = None;
+    if let Some(node) = &node {
+        if crate::node::args_conflict(&extra) { return Err("额外启动参数中的代理开关与代理节点冲突，请先移除。".into()); }
+        // Claude pins itself to a managed egress proxy over `--proxy-server`, so the account
+        // would leave through that proxy (e.g. a local Clash port) instead of its node.
+        if let Some(policy) = sys::claude_egress_policy().filter(|_| !sandboxed || crate::sandbox::available().is_err()) {
+            return Err(format!(
+                "账号未启动：系统策略为 Claude 固定了出口代理 {policy}。Claude 会忽略 Hydra 的代理节点、改走这个代理。如需改走 Hydra 配置，请切换到 Sandboxie-Plus 隔离环境；不使用代理节点的账号不受影响。"
+            ));
+        }
+        let (port, exit) = verify_route(id, effective.environment.as_deref(), node).map_err(|e| format!("账号未启动：{e}"))?;
+        relay_port = Some(port);
+        if matches!(effective.timezone.as_str(), "" | "proxy") {
+            timezone = Some(exit_timezone(&exit).map_err(|e| format!("账号未启动：{e}"))?);
+        }
+        checked_exit = Some(exit);
+        managed = crate::node::chromium_args(port);
+        env.retain(|(k, _)| !crate::node::is_proxy_env(k));
+        env.extend(crate::node::child_env(port));
+    }
+    if let Some(tz) = timezone {
+        env.retain(|(k, _)| !k.eq_ignore_ascii_case("TZ"));
+        env.push(("TZ".into(), tz));
+    }
+    if sandboxed {
+        // The box's identity guard answers `GetComputerNameEx` and `GetUserNameEx` with these
+        // values; the environment variables are inherited instead of queried, so they have to be
+        // set to the same values or a program reading `COMPUTERNAME`/`USERNAME` would see two
+        // different machines and accounts.
+        let ids = crate::identity::Identifiers::for_account(id);
+        for (key, value) in
+            crate::identity::identity_env(&ids.computer_name, &ids.user_name, |k| std::env::var(k).ok())
+        {
+            env.retain(|(k, _)| !k.eq_ignore_ascii_case(&key));
+            env.push((key, value));
+        }
+    }
+    // Claude Code started by this account keeps its sign-in, settings and sessions in the
+    // account's own folder instead of the `~/.claude` every account shares.
+    let code_dir = (effective.separate_code && (!is_default || sandboxed)).then(|| crate::sandbox::code_dir(id));
+    if let Some(dir) = &code_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("账号未启动：无法创建 Claude Code 目录：{e}"))?;
+        env.retain(|(k, _)| !k.eq_ignore_ascii_case("CLAUDE_CONFIG_DIR"));
+        env.push(("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned()));
+    }
+    // With Claude's third-party (API/gateway) mode set up, Claude decides 1P vs 3P from
+    // machine-wide state and can ignore `--user-data-dir` (see `third_party`).
+    if !is_default {
+        match crate::third_party::mode() {
+            crate::third_party::Mode::NotConfigured => {}
+            crate::third_party::Mode::FirstParty => managed.push(crate::third_party::KEEP_FIRST_PARTY_SWITCH.into()),
+            crate::third_party::Mode::ThirdParty => {
+                return Err("账号未启动：本机 Claude 处于第三方推理（API / 网关）模式。此模式下 Claude 会忽略账号目录，所有账号都改用共享的 Claude-3p 数据目录，额外账号会直接退出。请打开默认 Claude，在登录页选择用 Claude 账号登录（切回第一方模式）后重试；或在 Claude 中移除第三方推理配置。".into());
+            }
+        }
+    }
+    Ok(Spec { env, managed, extra, sandboxed, relay_port, exit: checked_exit })
 }
 
 /// Checks the exact route an account will use (local relay → node → internet) against its

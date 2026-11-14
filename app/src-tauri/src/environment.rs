@@ -156,7 +156,7 @@ fn view(s: &Settings, id: &str, e: &Environment) -> EnvironmentView {
             isolation: e.isolation.clone(),
             separate_code: e.separate_code,
         },
-        used_by: s.accounts.iter().filter(|(_, a)| a.environment.as_deref() == Some(id)).map(|(aid, _)| account_name(s, aid)).collect(),
+        used_by: s.accounts.iter().filter(|(aid, a)| a.environment.as_deref() == Some(id) && !crate::probe::is_probe(aid)).map(|(aid, _)| account_name(s, aid)).collect(),
         detected_timezone: detected_timezone(s, id, e),
         exit_baseline: e.exit_baseline.clone(),
     }
@@ -252,6 +252,7 @@ pub fn save(install: Option<&crate::install::Install>, id: Option<&str>, input: 
 pub fn delete(id: &str) -> Result<(), String> {
     settings::update(|s| {
         s.environments.remove(id);
+        s.accounts.remove(&crate::probe::account_id(id));
         for (acc_id, acc) in s.accounts.iter_mut().filter(|(_, a)| a.environment.as_deref() == Some(id)) {
             acc.environment = None;
             acc.relay_port = None;

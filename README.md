@@ -43,7 +43,7 @@
 | 多账号并行 | 通过 `--user-data-dir` 为每个账号提供独立的配置与登录态，可同时打开多个 Claude 窗口 |
 | 环境配置 | 把代理节点、时区、窗口语言、启动参数与环境变量保存为“环境”，多个账号共用，修改一处同步生效 |
 | 代理节点 | 支持 Clash 订阅节点（内置 Mihomo 内核，无需另装）与自定义 SOCKS5 / HTTP / HTTPS 节点，附出口检测与换 IP 链接 |
-| 防泄漏 | 内置本机中继，DNS、WebRTC、UDP/QUIC、IPv6 全部经节点或被阻止；节点失效时断网而非直连 |
+| 防泄漏 | 内置本机中继，Claude 的网页请求与 DNS 经节点，读取代理变量的子进程同样经节点；节点失效时断网而非直连 |
 | 时区同步 | 时区可跟随代理出口、跟随系统或手动指定；确认出口后直接显示具体时区 |
 | 仪表板 | 启动首页：容器账号的 token 消耗、API 等价成本、活动热力图与趋势，以及各容器账号的 5 小时与本周额度 |
 | 网页端 | 每个账号独立的浏览器：经该账号的节点联网，时区、语言与页面指纹跟随账号，Cookie 互不相通 |
@@ -96,17 +96,35 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 | 泄漏途径 | 处理方式 |
 | --- | --- |
 | DNS | 通过 SOCKS5 代理（`--proxy-server=socks5://…`）把域名原样交给节点解析；Claude 自身已关闭 DNS 预解析 |
-| WebRTC | `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`，不暴露本机或 STUN 地址 |
+| WebRTC | 账号浏览器（Chrome 等）用 `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`，不暴露本机或 STUN 地址。Claude 桌面版是 Electron 应用，WebRTC 策略只能由应用自己设置，这个开关对它无效：探针实测页面能读到本机网卡地址（包括网卡上的公网地址），是否暴露取决于 Claude 自身 |
 | UDP / QUIC | `--disable-quic`；中继拒绝 SOCKS5 UDP ASSOCIATE |
 | IPv6 | Claude 只连接 127.0.0.1 中继，不直接使用本机 IPv6 |
 | 子进程 | Claude Code、MCP 等通过 `HTTP(S)_PROXY`、`ALL_PROXY`、`NODE_USE_ENV_PROXY` 指向同一中继 |
 | 节点失效 | 每次启动前经“中继 → 节点”检测出口，失败不启动；运行中节点断开或 Hydra 退出，该账号断网，不回退直连 |
 
-上述开关已用无头 Chrome 实测：WebRTC 候选地址由 3 个降为 0；中继关闭时页面无法加载。
+WebRTC 开关已用无头 Chrome 实测：候选地址由 3 个降为 0；中继关闭时页面无法加载。Claude 桌面版实际的网络路径可以用下面的模拟测试检查。
 
 > Claude 会拒绝带 `--host-resolver-rules` 等网络覆盖开关的启动，因此 Hydra 不使用这类开关，也会在保存环境时拦截它们。
 
 > 账号运行期间请保持 Claude-Hydra 在托盘中运行。
+
+### 模拟测试
+
+Claude 不接受调试开关，无法直接看到它的每条网络路径实际从哪里出去。**设置 → Claude 桌面端 → 模拟测试** 选一个带代理节点的环境，按这个环境下账号的启动方式（同样的启动检查、出口检测、环境变量、启动开关，以及带出口保护的中继）启动一个小型 Electron 应用「Hydra 探针」，逐项检查并标出泄漏。本机不需要安装 Claude：
+
+- 页面：时区、语言、`navigator.webdriver`、WebRTC 候选地址；
+- Chromium 网络：代理设置，Cloudflare 与 claude.ai 边缘看到的出口，替你解析域名的 DNS；
+- 主进程 Node：默认代理设置下的 `https` 与 `fetch`，自己建连接的库、直连 IP、本机 DNS 查询、UDP、IPv6 是否绕过节点；
+- 子进程（如 MCP）：读代理变量与不读代理变量的 curl、Node 子进程分别从哪里出去。
+
+测试分 **不使用保护** 与 **使用保护** 两种：
+
+- macOS 的保护是 Seatbelt（`sandbox-exec`）：探针及其子进程只能连本机中继端口，系统 DNS 服务与其他网络连接都被拒绝。macOS 不允许在沙箱里再建沙箱，而 Chromium 会给自己的每个子进程建沙箱，所以探针在这个模式下关闭了 Chromium 自身的沙箱；同样的原因，Seatbelt 不能用于整个 Claude 桌面版（它的窗口加载线上页面，不应关闭自身沙箱）。启动输出记录在 `probe/seatbelt.log`。
+- Windows 的保护是这个环境的 Sandboxie 沙箱，与开启「沙箱隔离」的账号相同：只放行中继，并加载 Hydra 的 DNS 与身份保护。
+
+探针在 macOS 上使用与本机 Claude 相同版本的 Electron（没有安装 Claude 时，以及在 Windows 上，用较新的稳定版），首次使用时从 Electron 官方 GitHub 发布页下载（约 100 MB），并核对发布页公布的 SHA-256；它有自己的数据目录，不会读写任何账号的 Claude 数据，只访问公开的检测服务。每个环境的探针经它自己的中继联网，删除环境时一并移除。**复制报告（隐藏 IP）** 导出的报告会隐去 IP 与用户目录，便于反馈问题。
+
+进入 **账号** 页时会提示上面这些 Hydra 无法保护的地方：macOS 上，对隐私有极高要求时不建议使用 Claude 桌面版；Windows 上建议开启沙箱隔离。提示不会阻止继续使用；勾选「不再显示」后，可在 **设置 → Claude 桌面端** 重新打开。
 
 ## 避免直连的使用建议
 
@@ -255,12 +273,13 @@ Mac 文件夹 → /root/.claude（Claude Code 的登录、设置与 .claude.json
 - `settings.json`：账号与环境配置。节点密码在 Windows 上以 DPAPI 加密保存；macOS 上设置文件权限为仅本人可读。
 - `profiles/<账号ID>`：额外账号的 Claude 数据目录。
 - `mihomo-run/`：Clash 节点运行时的临时目录，内核退出后自动清理。
+- `probe/`：模拟测试用的探针程序、下载的 Electron 与它自己的数据目录，可以随时整个删除。
 - `containers/<容器账号ID>`：网关读取的中继地址、终端入口脚本（macOS）、用量历史 `usage-history.json`，以及默认的 Claude Code 数据文件夹 `claude/`；容器、网关、数据卷与快照保存在 OrbStack / Docker Desktop 中。删除容器账号时一并删除（自选的 Claude 数据文件夹除外）。
 - 默认账号继续使用 Claude 原有的数据目录。
 
 ## 已知限制
 
-- 防泄漏覆盖 Claude 的 Chromium 网络栈与读取代理环境变量的子进程；不读取代理变量、自行直连的子进程，以及在系统认证窗口或浏览器中打开的登录页无法拦截。需要系统级保证时，请配合防火墙或独立虚拟机。
+- 防泄漏覆盖 Claude 的 Chromium 网络栈与读取代理环境变量的子进程；不读取代理变量或自己建连接的程序、UDP、本机 DNS 查询，以及在系统认证窗口或浏览器中打开的登录页无法拦截。Claude 桌面版的 WebRTC 可能暴露本机网卡地址（见「防泄漏机制」）。需要系统级保证时，请配合防火墙或独立虚拟机。
 - 独立数据目录只隔离本地登录数据，不修改设备指纹，也不保证账号之间不被关联。
 - 使用代理节点时，额外启动参数中不能再包含 `--proxy-server` 等代理开关。
 - Claude 会拒绝带调试或网络覆盖开关（如 `--remote-debugging-port`、`--host-resolver-rules`、`--ignore-certificate-errors`）的启动，Hydra 保存环境时会提示移除。

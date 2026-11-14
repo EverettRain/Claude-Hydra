@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Select } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { api, errorText, type AppInfo, type ContainerRuntime } from "@/lib/api";
+import { api, errorText, type AppInfo, type ContainerRuntime, type Environment } from "@/lib/api";
 import { appIconSrc } from "@/lib/appIcon";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -70,6 +70,25 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
   };
 
   const install = info?.install;
+
+  // The probe runs where Hydra has a protection to test: Seatbelt on macOS, Sandboxie on Windows.
+  const protection = info?.platform === "macos" ? "Seatbelt" : info?.platform === "windows" ? "Sandboxie" : null;
+  const [probeEnvs, setProbeEnvs] = useState<Environment[]>([]);
+  const [probeEnv, setProbeEnv] = useState("");
+  // Seatbelt comes with macOS; Sandboxie-Plus has to be installed.
+  const [sandboxie, setSandboxie] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    if (protection !== "Sandboxie") return;
+    api.sandboxStatus().then((dir) => setSandboxie({ ok: true, text: `已检测到 Sandboxie-Plus：${dir}` }), (e) => setSandboxie({ ok: false, text: errorText(e) }));
+  }, [protection]);
+  useEffect(() => {
+    if (!protection) return;
+    api.listEnvironments().then((list) => {
+      const routed = list.filter((e) => e.node);
+      setProbeEnvs(routed);
+      setProbeEnv((current) => routed.some((e) => e.id === current) ? current : routed[0]?.id ?? "");
+    }, () => setProbeEnvs([]));
+  }, [protection]);
 
   return (
     <Page>
@@ -189,6 +208,45 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
               应用
             </Button>
           </div>
+          {protection && (
+            <>
+              <Row label="账号页隐私提示" hint="进入「账号」页时，说明 Claude 桌面版有哪些地方 Hydra 无法保护。">
+                <Switch
+                  checked={!info?.hidePrivacyNotice}
+                  disabled={!info || busy === "notice"}
+                  onCheckedChange={(v) => act("notice", () => api.setPrivacyNoticeHidden(!v))}
+                />
+              </Row>
+              <div className="px-4 py-3">
+                <div className="text-[13px] font-medium">模拟测试</div>
+                <div className="mt-0.5 text-[12px] leading-[18px] text-muted">
+                  {"用一个 Electron 程序（与 Claude 桌面版同一类应用）按所选环境下账号的启动方式启动：同样的启动检查、中继、环境变量与启动开关，逐项检查每条网络路径实际从哪里出去，本机不需要安装 Claude。"}
+                  {protection === "Seatbelt"
+                    ? "「使用保护」用 macOS 的 Seatbelt 只放行中继；macOS 不允许沙箱嵌套，测试程序因此会关闭 Chromium 自身的沙箱，Claude 桌面版不能这样运行。"
+                    : "「使用保护」在这个环境的 Sandboxie 沙箱中运行（需要安装 Sandboxie-Plus），与开启「沙箱隔离」的账号相同。"}
+                  {"首次使用会从 Electron 官方发布页下载约 100 MB。"}
+                </div>
+                {probeEnvs.length ? (
+                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                    <Select aria-label="测试用的环境" className="w-48" value={probeEnv} onChange={(e) => setProbeEnv(e.target.value)}>
+                      {probeEnvs.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    </Select>
+                    <Button variant="outline" size="sm" disabled={!probeEnv || !!busy} onClick={() => act("probe", () => api.launchProbe(probeEnv, false), "已打开测试程序（不使用保护）。")}>
+                      {busy === "probe" && <Loader2 className="animate-spin" />}
+                      不使用保护
+                    </Button>
+                    <Button variant="outline" size="sm" disabled={!probeEnv || !!busy || (protection === "Sandboxie" && !sandboxie?.ok)} onClick={() => act("probe-protected", () => api.launchProbe(probeEnv, true), `已打开测试程序（使用 ${protection} 保护）。`)}>
+                      {busy === "probe-protected" && <Loader2 className="animate-spin" />}
+                      使用保护（{protection}）
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="mt-2 text-[12px] text-muted">还没有带代理节点的环境，请先在「环境配置」中新建一个。</div>
+                )}
+                {sandboxie && <div className={cn("mt-2 text-[12px]", sandboxie.ok ? "text-muted" : "text-warn")}>{sandboxie.text}</div>}
+              </div>
+            </>
+          )}
         </Group>
 
         {containerRuntime && (

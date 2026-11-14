@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src *">
+<title>Hydra 探针</title>
+<style>
+  :root { --fg: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea; --bg: #f5f5f7; --card: #fff; --ok: #1a7f37; --bad: #c4321c; --warn: #b26a00; --accent: #de704e; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f2f2f7; --muted: #98989d; --line: #38383a; --bg: #1c1c1e; --card: #2c2c2e; --ok: #4cc366; --bad: #ff6b5a; --warn: #f5a623; } }
+  body { margin: 0; padding: 24px 28px 40px; font: 13px/1.55 -apple-system, "PingFang SC", system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { margin: 0 0 4px; font-size: 18px; }
+  .sub { color: var(--muted); margin-bottom: 16px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+  button { font: inherit; padding: 5px 12px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #status { color: var(--muted); }
+  section { background: var(--card); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
+  section h2 { margin: 0; padding: 10px 16px; font-size: 12px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); }
+  .row { display: grid; grid-template-columns: 210px 70px 1fr; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .tag { font-weight: 600; }
+  .pass { color: var(--ok); } .fail { color: var(--bad); } .warn, .error { color: var(--warn); } .info { color: var(--muted); }
+  .text { word-break: break-all; }
+  pre { margin: 0; padding: 12px 16px; font: 11.5px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+  <h1>Hydra 探针</h1>
+  <div class="sub" id="sub">按环境的启动方式运行，检查每条网络路径实际从哪里出去。</div>
+  <div class="bar">
+    <button class="primary" id="rerun">重新检测</button>
+    <button id="copy" disabled>复制报告（隐藏 IP）</button>
+    <span id="status">检测中…</span>
+  </div>
+  <div id="report"></div>
+  <script src="renderer.js"></script>
+</body>
+</html>
