@@ -41,6 +41,11 @@ interface AppShellProps {
   appIcon?: string | null;
   /** Running summary shown at the bottom of the sidebar. */
   status?: { running: number; total: number } | null;
+  /**
+   * The account list could not be read, typically because Claude.app is not installed (a
+   * container-only setup). The summary line is then left out; the accounts page shows why.
+   */
+  statusError?: string | null;
   children: React.ReactNode;
 }
 
@@ -74,7 +79,7 @@ function NavRow({ item, active, onSelect, setRef }: { item: NavItem; active: boo
   );
 }
 
-export function AppShell({ activePage, onPageChange, theme, onThemeChange, appIcon, status, children }: AppShellProps) {
+export function AppShell({ activePage, onPageChange, theme, onThemeChange, appIcon, status, statusError, children }: AppShellProps) {
   const ThemeIcon = theme === "light" ? Sun : theme === "dark" ? Moon : SunMoon;
   const refs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const nav = useRef<HTMLDivElement>(null);
@@ -116,10 +121,12 @@ export function AppShell({ activePage, onPageChange, theme, onThemeChange, appIc
           <div className="space-y-0.5 border-t-[0.5px] border-line-2 py-2">{footer.map(row)}</div>
         </div>
 
-        <div className="flex h-9 shrink-0 items-center gap-2 px-[18px] pb-1 text-[11.5px] text-muted">
-          <span className={cn("h-[7px] w-[7px] rounded-full", status?.running ? "bg-ok shadow-[0_0_0_3px_rgb(var(--ok-soft))]" : "bg-faint")} />
-          {status ? `${status.running} 个运行中 · 共 ${status.total} 个账号` : "读取中…"}
-        </div>
+        {(status || !statusError) && (
+          <div className="flex h-9 shrink-0 items-center gap-2 px-[18px] pb-1 text-[11.5px] text-muted">
+            <span className={cn("h-[7px] w-[7px] rounded-full", status?.running ? "bg-ok shadow-[0_0_0_3px_rgb(var(--ok-soft))]" : "bg-faint")} />
+            {status ? `${status.running} 个运行中 · 共 ${status.total} 个账号` : "读取中…"}
+          </div>
+        )}
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
