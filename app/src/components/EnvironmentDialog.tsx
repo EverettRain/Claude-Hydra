@@ -117,7 +117,7 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
           <div className="list-card">
             <Line label="出口规则">
               <Select aria-label="出口规则" value={env.exitRule} disabled={!env.node} onChange={(e) => setEnv({ ...env, exitRule: e.target.value as ExitRule })}>
-                {EXIT_RULES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                {EXIT_RULES.map(([v, label]) => <option key={v} value={v}>{v === "" && env.allowCn ? "不限" : label}</option>)}
               </Select>
             </Line>
             {env.node && env.exitRule && (
@@ -130,9 +130,11 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
                 )}
               </div>
             )}
-            <Line label="受限地区出口">
-              <Switch checked={env.allowCn} onCheckedChange={(allowCn) => setEnv({ ...env, allowCn })} label="允许不支持地区的出口" />
-              <span className="text-[11.5px] text-muted" title="中国大陆、香港、澳门、俄罗斯、白俄罗斯、伊朗、朝鲜、古巴、叙利亚">{env.allowCn ? "允许" : "拦截 Claude 不提供服务的地区（推荐）"}</span>
+            <Line label="放行不支持地区">
+              <Switch checked={env.allowCn} onCheckedChange={(allowCn) => setEnv({ ...env, allowCn })} label="放行 Claude 不提供服务地区的出口" />
+              <span className={env.allowCn ? "text-[11.5px] text-warn" : "text-[11.5px] text-muted"} title="中国大陆、香港、澳门、俄罗斯、白俄罗斯、伊朗、朝鲜、古巴、叙利亚">
+                {env.allowCn ? "已放行：出口在这些地区也照常联网" : "拦截（推荐）：出口在中国大陆、香港等地区时不启动，运行中则断网"}
+              </span>
             </Line>
             <Line label="独立 Code">
               <Switch checked={env.separateCode || env.isolation === "sandboxie"} disabled={env.isolation === "sandboxie"} onCheckedChange={(separateCode) => setEnv({ ...env, separateCode })} label="每个账号使用独立的 Claude Code 登录与配置" />
