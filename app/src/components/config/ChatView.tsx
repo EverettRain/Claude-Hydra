@@ -4,6 +4,7 @@ import { WindowControls } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { api, errorText, type ClaudeCodeSession, type TranscriptItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { Dialog } from "@/components/ui/dialog";
 import { CodeBlock, Markdown } from "./Markdown";
 import { formatTime, leaf } from "./shared";
 
@@ -23,6 +24,50 @@ const QUESTION_TOOL = "AskUserQuestion";
 
 /** True while rendering a file to save: every fold's content is included, as nothing loads later. */
 export const Exporting = createContext(false);
+
+/**
+ * Where a conversation's images come from: loaded one by one on request in the app, or fetched
+ * beforehand (keyed `index:n`) for a saved page. Images are large, so the app never loads them
+ * unasked.
+ */
+export interface ImageSource { load?: (index: number, n: number) => Promise<string>; preloaded?: Map<string, string> }
+const Images = createContext<{ source: ImageSource; indexOf: (item: TranscriptItem) => number }>({ source: {}, indexOf: () => -1 });
+
+/** The images of a prompt or a tool result: a button until asked for, then thumbnails that open full size. */
+function ImageStrip({ item }: { item: TranscriptItem }) {
+  const { source, indexOf } = useContext(Images);
+  const index = indexOf(item);
+  const all = Array.from({ length: item.images }, (_, n) => n);
+  const [srcs, setSrcs] = useState<(string | null)[] | null>(() => source.preloaded ? all.map((n) => source.preloaded!.get(`${index}:${n}`) ?? null) : null);
+  const [busy, setBusy] = useState(false);
+  const [zoom, setZoom] = useState<string | null>(null);
+  if (!item.images) return null;
+  const show = async () => {
+    if (!source.load) return;
+    setBusy(true);
+    setSrcs(await Promise.all(all.map((n) => source.load!(index, n).catch(() => null))));
+    setBusy(false);
+  };
+  if (!srcs) {
+    return (
+      <button className="flex items-center gap-1 text-[12px] text-muted hover:text-fg" disabled={busy || !source.load} onClick={show}>
+        <ImageIcon className="h-3.5 w-3.5" />{busy ? "正在读取图片…" : `显示 ${item.images} 张图片`}
+      </button>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-2">
+      {srcs.map((src, n) => src
+        ? <button key={n} className="overflow-hidden rounded-lg bg-card shadow-card" title="查看大图" onClick={() => setZoom(src)}>
+            <img src={src} alt={`图片 ${n + 1}`} className="block max-h-48 max-w-[min(100%,320px)] object-contain" />
+          </button>
+        : <span key={n} className="rounded-lg bg-card-2 px-2.5 py-1.5 text-[11.5px] text-muted">图片 {n + 1} 无法显示</span>)}
+      <Dialog open={!!zoom} onClose={() => setZoom(null)} title="图片" className="max-w-[90vw]">
+        {zoom && <img src={zoom} alt="" className="mx-auto max-h-[75vh] max-w-full object-contain" />}
+      </Dialog>
+    </div>
+  );
+}
 
 /**
  * A native `<details>` fold, so a saved page opens and closes without scripts. In the app its
@@ -133,10 +178,11 @@ function ToolRow({ call }: { call: Call }) {
           {tool && <Input tool={tool} />}
           {result && (
             <div>
-              <div className={cn("mb-1 text-[11px]", failed ? "text-danger" : "text-muted")}>{failed ? "出错" : "结果"}{result.images ? ` · ${result.images} 张图片` : ""}</div>
+              <div className={cn("mb-1 text-[11px]", failed ? "text-danger" : "text-muted")}>{failed ? "出错" : "结果"}</div>
               <pre className={cn("selectable max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md px-2 py-1.5 font-mono text-[11.5px] leading-[1.55]",
                 failed ? "bg-danger-soft text-danger" : "bg-card")}>{result.text || "（没有输出）"}</pre>
               {result.omitted > 0 && <p className="mt-1 text-[11px] text-muted">另有 {result.omitted.toLocaleString()} 个字符未显示</p>}
+              <div className="mt-1.5"><ImageStrip item={result} /></div>
             </div>
           )}
           {tool && !result && <p className="text-[11.5px] text-muted">没有记录结果</p>}
@@ -259,7 +305,7 @@ function Message({ block }: { block: Block }): ReactNode {
       <div className="flex justify-end">
         <div className="max-w-[85%] space-y-1 rounded-2xl bg-pill px-3.5 py-2 text-[13.5px] leading-[1.65]">
           {item.text && <div className="selectable whitespace-pre-wrap break-words">{item.text}</div>}
-          {item.images > 0 && <div className="flex items-center gap-1 text-[12px] text-muted"><ImageIcon className="h-3.5 w-3.5" />附带 {item.images} 张图片</div>}
+          <ImageStrip item={item} />
         </div>
       </div>
     );
@@ -271,9 +317,14 @@ function Message({ block }: { block: Block }): ReactNode {
 }
 
 /** A session's conversation: messages, folded work and question cards. Also rendered into saved pages. */
-export function Conversation({ items }: { items: TranscriptItem[] }) {
+export function Conversation({ items, images }: { items: TranscriptItem[]; images: ImageSource }) {
   const blocks = useMemo(() => build(items), [items]);
-  return <>{blocks.map((b, i) => <Message key={i} block={b} />)}</>;
+  // Images are fetched by their item's position in the session, which is its place in `items`.
+  const value = useMemo(() => {
+    const at = new Map(items.map((it, i) => [it, i]));
+    return { source: images, indexOf: (item: TranscriptItem) => at.get(item) ?? -1 };
+  }, [items, images]);
+  return <Images.Provider value={value}>{blocks.map((b, i) => <Message key={i} block={b} />)}</Images.Provider>;
 }
 
 /** One session as a conversation filling the content area, loaded page by page as it scrolls. */
@@ -288,6 +339,7 @@ export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, on
   const [loading, setLoading] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const body = useRef<HTMLDivElement>(null);
+  const images = useMemo<ImageSource>(() => ({ load: (index, n) => api.sessionImage(folder, session.id, index, n) }), [folder, session.id]);
   // Escape goes back, unless a dialog (copy, move) is open on top.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !document.querySelector("[data-dialog-layer]")) onBack(); };
@@ -329,7 +381,7 @@ export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, on
       </div>
       <div ref={body} className="min-h-0 flex-1 overflow-y-auto px-5 pt-5">
       <div className="mx-auto max-w-[760px] space-y-4 pb-8">
-        <Conversation items={items} />
+        <Conversation items={items} images={images} />
         {error && <p role="alert" className="text-sm text-danger">{error} <button className="underline" onClick={() => load(items.length)}>重试</button></p>}
         {loading && <p className="text-center text-sm text-muted">正在读取…</p>}
         {!loading && !error && total === 0 && <p className="text-center text-sm text-muted">这个会话没有可显示的内容。</p>}

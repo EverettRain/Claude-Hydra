@@ -284,6 +284,8 @@ export const api = {
   openClaudeFolder: (folder: string) => invoke<void>("claude_folder_open", { folder }),
   codeSessions: (folder: string) => invoke<ClaudeCodeSession[]>("code_session_list", { folder }),
   readCodeSession: (folder: string, id: string, offset: number, limit: number) => invoke<Transcript>("code_session_read", { folder, id, offset, limit }),
+  /** The n-th image of item `index` of a session, as a data URL. */
+  sessionImage: (folder: string, id: string, index: number, n: number) => invoke<string>("code_session_image", { folder, id, index, n }),
   trashCodeSessions: (folder: string, ids: string[]) => invoke<number>("code_session_trash", { folder, ids }),
   planCodeSessions: (source: string, ids: string[], target: string) => invoke<TransferPlan>("code_session_plan", { source, ids, target }),
   transferCodeSessions: (source: string, ids: string[], target: string, mapping: Record<string, string>, remove: boolean) =>

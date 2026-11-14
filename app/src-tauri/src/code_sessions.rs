@@ -366,31 +366,39 @@ fn image_count(content: &Value) -> usize {
     content.as_array().into_iter().flatten().filter(|b| b["type"] == "image").count()
 }
 
+#[cfg(test)]
 fn items_of(row: &Value) -> Vec<Item> {
+    entries(row).into_iter().map(|(item, _)| item).collect()
+}
+
+/// The items a transcript row shows, each with the content its images are in (a prompt's
+/// message, a tool result's output); referenced rather than copied, as images are large.
+fn entries(row: &Value) -> Vec<(Item, Option<&Value>)> {
     let time = timestamp(&row["timestamp"]);
     let item = |kind, text: String, name: Option<String>, error: bool| {
         let text = if matches!(kind, "tool" | "result") { text } else { text.trim().to_string() };
         let (text, omitted) = clip(text, if matches!(kind, "tool" | "result") { TOOL_LIMIT } else { TEXT_LIMIT });
         Item { kind, text, name, time, omitted, error, id: None, input: None, images: 0 }
     };
-    let command = |text: &str| Some(command_text(text)).filter(|t| !t.is_empty()).map(|t| vec![item("command", t, None, false)]).unwrap_or_default();
+    let command = |text: &str| Some(command_text(text)).filter(|t| !t.is_empty()).map(|t| vec![(item("command", t, None, false), None)]).unwrap_or_default();
     if row["isSidechain"] == true || row["isMeta"] == true { return Vec::new(); }
     match row["type"].as_str() {
         Some("user") => {
-            if row["isCompactSummary"] == true { return vec![item("compact", result_text(&row["message"]["content"]), None, false)]; }
+            if row["isCompactSummary"] == true { return vec![(item("compact", result_text(&row["message"]["content"]), None, false), None)]; }
+            let content = &row["message"]["content"];
             if let Some(text) = prompt_text(row) {
                 if is_command(&text) { return command(&text); }
-                return vec![Item { images: image_count(&row["message"]["content"]), ..item("user", text, None, false) }];
+                return vec![(Item { images: image_count(content), ..item("user", text, None, false) }, Some(content))];
             }
-            row["message"]["content"].as_array().into_iter().flatten()
+            content.as_array().into_iter().flatten()
                 .filter(|b| b["type"] == "tool_result")
-                .map(|b| Item {
+                .map(|b| (Item {
                     id: b["tool_use_id"].as_str().map(str::to_owned),
                     images: image_count(&b["content"]),
                     ..item("result", result_text(&b["content"]), None, b["is_error"] == true)
-                }).collect()
+                }, Some(&b["content"]))).collect()
         }
-        Some("assistant") => row["message"]["content"].as_array().into_iter().flatten().filter_map(|b| match b["type"].as_str() {
+        Some("assistant") => row["message"]["content"].as_array().into_iter().flatten().filter_map(|b| Some((match b["type"].as_str() {
             Some("text") => b["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| item("assistant", t.into(), None, false)),
             Some("thinking") => b["thinking"].as_str().filter(|t| !t.trim().is_empty()).map(|t| item("thinking", t.into(), None, false)),
             Some("tool_use") => Some(Item {
@@ -399,13 +407,13 @@ fn items_of(row: &Value) -> Vec<Item> {
                 ..item("tool", serde_json::to_string_pretty(&b["input"]).unwrap_or_default(), b["name"].as_str().map(str::to_owned), false)
             }),
             _ => None,
-        }).collect(),
-        Some("system") if row["subtype"] == "compact_boundary" => vec![item("compact", "上下文已压缩".into(), None, false)],
+        }?, None))).collect(),
+        Some("system") if row["subtype"] == "compact_boundary" => vec![(item("compact", "上下文已压缩".into(), None, false), None)],
         Some("system") if row["subtype"] == "local_command" => command(row["content"].as_str().unwrap_or_default()),
         // Connection notices of Remote Control repeat on every reconnect and say nothing about the work.
         Some("system") if row["subtype"] == "bridge_status" => Vec::new(),
         Some("system") => row["content"].as_str().filter(|t| !t.trim().is_empty())
-            .map(|t| vec![item("system", t.into(), None, row["level"] == "error")]).unwrap_or_default(),
+            .map(|t| vec![(item("system", t.into(), None, row["level"] == "error"), None)]).unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -419,12 +427,40 @@ pub fn read(f: &Folder, id: &str, offset: usize, limit: usize) -> Result<Transcr
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { break };
         let Ok(row) = serde_json::from_str::<Value>(&line) else { continue };
-        for it in items_of(&row) {
+        for (it, _) in entries(&row) {
             if total >= offset && items.len() < limit { items.push(it); }
             total += 1;
         }
     }
     Ok(Transcript { items, total })
+}
+
+/// Image formats a page shows directly.
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// The `n`-th image of item `index` (counted as `read` counts them), as a data URL to show.
+pub fn image(f: &Folder, id: &str, index: usize, n: usize) -> Result<String, String> {
+    let gone = || "这张图片已不在会话记录里，请重新打开会话。".to_string();
+    let files = Files::parse(id)?;
+    let file = fs::File::open(f.dir.join(files.transcript())).map_err(|_| "找不到这个会话，请刷新。")?;
+    let mut at = 0;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        let Ok(row) = serde_json::from_str::<Value>(&line) else { continue };
+        for (_, content) in entries(&row) {
+            if at == index {
+                let block = content.and_then(Value::as_array).into_iter().flatten().filter(|b| b["type"] == "image").nth(n).ok_or_else(gone)?;
+                let source = &block["source"];
+                let media = source["media_type"].as_str().filter(|m| IMAGE_TYPES.contains(m));
+                return match (source["type"].as_str(), media, source["data"].as_str()) {
+                    (Some("base64"), Some(media), Some(data)) => Ok(format!("data:{media};base64,{data}")),
+                    _ => Err("只能显示内嵌在会话记录里的 PNG、JPEG、GIF、WebP 图片。".into()),
+                };
+            }
+            at += 1;
+        }
+    }
+    Err(gone())
 }
 
 // ---- recycle bin ----
@@ -852,6 +888,38 @@ mod tests {
         assert_eq!(t.items[2].input.as_ref().unwrap()["file_path"], serde_json::json!(sub(&host_root(), "a.rs")));
         assert_eq!((t.items[2].id.as_deref(), t.items[3].id.as_deref()), (Some("tu1"), Some("tu1")), "a result is paired with its call");
         assert_eq!((page.total, page.items.len(), page.items[0].kind), (4, 1, "thinking"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn images_are_read_one_at_a_time_from_their_item() {
+        // Arrange
+        let dir = temp();
+        let png = |data: &str| serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}});
+        let rows = [
+            serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": "看图"}, png("AAA"), png("BBB")]}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t", "name": "Read", "input": {}}]}}),
+            serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": [png("CCC"),
+                {"type": "image", "source": {"type": "base64", "media_type": "image/svg+xml", "data": "PHN2Zz4="}}]}]}}),
+        ].map(|r| r.to_string());
+        fs::create_dir_all(dir.join("projects/-p")).unwrap();
+        fs::write(dir.join("projects/-p").join(format!("{SESSION}.jsonl")), rows.join("\n")).unwrap();
+        let f = folder(&dir, Paths::Host);
+        let id = format!("-p/{SESSION}");
+
+        // Act
+        let listed = read(&f, &id, 0, 10).unwrap();
+        let second = image(&f, &id, 0, 1);
+        let from_tool = image(&f, &id, 2, 0);
+        let svg = image(&f, &id, 2, 1);
+        let missing = image(&f, &id, 0, 2);
+
+        // Assert
+        let counts: Vec<usize> = listed.items.iter().map(|i| i.images).collect();
+        assert_eq!(counts, [2, 0, 2]);
+        assert_eq!(second.unwrap(), "data:image/png;base64,BBB");
+        assert_eq!(from_tool.unwrap(), "data:image/png;base64,CCC");
+        assert!(svg.is_err() && missing.is_err());
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -542,6 +542,11 @@ async fn code_session_read(app: AppHandle, folder: String, id: String, offset: u
 }
 
 #[tauri::command]
+async fn code_session_image(app: AppHandle, folder: String, id: String, index: usize, n: usize) -> Result<String, String> {
+    blocking(move || code_sessions::image(&claude_folder(&app, &folder)?, &id, index, n)).await
+}
+
+#[tauri::command]
 async fn code_session_trash(app: AppHandle, folder: String, ids: Vec<String>) -> Result<usize, String> {
     blocking(move || code_sessions::trash(&claude_folder(&app, &folder)?, &ids)).await
 }
@@ -1020,6 +1025,7 @@ pub fn run(start_in_tray: bool) {
             claude_folder_open,
             code_session_list,
             code_session_read,
+            code_session_image,
             code_session_trash,
             code_session_plan,
             code_session_transfer,
