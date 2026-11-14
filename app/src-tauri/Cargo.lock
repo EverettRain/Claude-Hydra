@@ -502,6 +502,7 @@ dependencies = [
  "base64 0.22.1",
  "cc",
  "iana-time-zone",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -519,8 +520,6 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
- "webview2-com",
- "windows",
  "windows-sys 0.59.0",
  "zip",
 ]

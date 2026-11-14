@@ -10,6 +10,7 @@ import { ContainersPage } from "@/pages/ContainersPage";
 import { EnvironmentsPage } from "@/pages/EnvironmentsPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { WebPage } from "@/pages/WebPage";
 
 export default function App() {
   const [page, setPage] = useState<PageId>("dashboard");
@@ -55,6 +56,7 @@ export default function App() {
       {page === "accounts" && <AccountsPage profiles={profiles} loadError={loadError} refresh={refresh} />}
       {page === "environments" && <EnvironmentsPage onChanged={refresh} />}
       {page === "containers" && <ContainersPage onOpenSettings={() => setPage("settings")} />}
+      {page === "web" && <WebPage profiles={profiles} />}
       {page === "dashboard" && <DashboardPage />}
       {page === "config" && <ConfigPage profiles={profiles} onImmersive={setImmersive} />}
       {page === "settings" && (

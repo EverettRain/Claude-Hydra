@@ -10,6 +10,7 @@ pub mod cli;
 pub mod code_usage;
 pub mod container;
 mod dashboard;
+mod chromium;
 mod quota_history;
 pub mod environment;
 pub mod guard;
@@ -280,13 +281,32 @@ async fn prepare_login(app: AppHandle, id: String) -> Result<(), String> {
     r
 }
 
-/// Opens the account's own browser on its exit IP and time zone (`url` defaults to sign-in).
+/// Opens the account's own browser on its exit IP and time zone; returns what the route check
+/// before it found.
 #[tauri::command]
-async fn open_account_browser(app: AppHandle, id: String, url: Option<String>) -> Result<(), String> {
-    let a = app.clone();
-    tauri::async_runtime::spawn_blocking(move || browser::open(&a, browser::plan(&id, url.as_deref())?))
-        .await.map_err(|e| e.to_string())?
+async fn open_account_browser(id: String) -> Result<browser::Check, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let plan = browser::plan(&id, None)?;
+        let check = plan.check();
+        browser::open(plan).map(|_| check)
+    }).await.map_err(|e| e.to_string())?
 }
+
+/// Checks the account browser's route as opening it would, without opening it.
+#[tauri::command]
+async fn test_account_browser(id: String) -> Result<browser::Check, String> {
+    tauri::async_runtime::spawn_blocking(move || browser::test(&id)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn account_browser_fingerprint(id: String) -> browser::Fingerprint { browser::fingerprint(&id) }
+
+#[tauri::command]
+fn set_account_browser(id: String, browser: Option<String>) -> Result<browser::Fingerprint, String> {
+    browser::set_browser(&id, browser)?;
+    Ok(browser::fingerprint(&id))
+}
+
 
 /// Re-checks a blocked account's exit and restores its network when it complies again.
 #[tauri::command]
@@ -393,6 +413,7 @@ async fn delete_container(id: String) -> Result<Option<String>, String> {
     let r = tauri::async_runtime::spawn_blocking(move || {
         let note = container::delete(&id)?;
         quota_history::delete(&id);
+        browser::forget(&id);
         Ok::<_, String>(note)
     }).await.map_err(|e| e.to_string())?;
     relay::sync_soon();
@@ -973,6 +994,9 @@ pub fn run(start_in_tray: bool) {
             setup_login_router,
             prepare_login,
             open_account_browser,
+            test_account_browser,
+            account_browser_fingerprint,
+            set_account_browser,
             resume_account,
             rebind_exit,
             sandbox_status,
@@ -1054,7 +1078,7 @@ pub fn run(start_in_tray: bool) {
             let restored = handle.clone();
             guard::on_restore(move |_id| after_change(&restored));
             relay::start_monitor();
-            browser::start_watcher(handle.clone());
+            browser::start_watcher();
             browser::remember_fallback();
             environment::migrate();
             // Starting Clash-node relays waits for each Mihomo core; keep the window responsive.

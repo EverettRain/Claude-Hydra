@@ -231,7 +231,7 @@ function AccountRow({ p, busy, onLaunch, onClose, onRestart, onEdit, onLogin, on
           items={[
             { label: "编辑…", icon: Pencil, onSelect: onEdit },
             ...(p.blocked ? [{ label: "恢复网络（重新检测出口）", icon: ShieldAlert, onSelect: onResume }] : []),
-            ...(IS_WINDOWS && p.environment ? [{ label: "打开账号浏览器", icon: Globe, onSelect: onBrowser }] : []),
+            ...((IS_WINDOWS || IS_MAC) && p.environment ? [{ label: "打开账号浏览器", icon: Globe, onSelect: onBrowser }] : []),
             ...(IS_WINDOWS || (IS_MAC && !p.isDefault) ? [{ label: "准备浏览器登录", icon: Link2, onSelect: onLogin }] : []),
             { label: "重启", icon: RotateCw, onSelect: onRestart, disabled: !isRunning },
             { label: "打开数据目录", icon: FolderOpen, onSelect: onFolder },

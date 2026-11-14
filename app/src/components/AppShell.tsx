@@ -1,25 +1,25 @@
 import { UpdateNotice } from "./UpdateNotice";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Box, FolderCog, Globe2, LayoutDashboard, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
+import { Box, FolderCog, Globe, Globe2, LayoutDashboard, Info, Minus, Moon, Settings, Square, Sun, SunMoon, Users, X } from "lucide-react";
 import type React from "react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { appIconSrc } from "@/lib/appIcon";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-export type PageId = "dashboard" | "accounts" | "environments" | "containers" | "config" | "settings" | "about";
+export type PageId = "dashboard" | "accounts" | "environments" | "containers" | "web" | "config" | "settings" | "about";
 
 type Icon = React.ComponentType<{ className?: string }>;
 interface NavItem { id: PageId; label: string; icon: Icon }
 
 const isMac = navigator.userAgent.includes("Mac");
-/** Containers run on OrbStack (macOS) or Docker Desktop (Windows). */
+/** Containers run on OrbStack (macOS) or Docker Desktop (Windows); account browsers exist on both. */
 export const hasContainers = isMac || navigator.userAgent.includes("Windows");
 const main: NavItem[] = [
   { id: "dashboard", label: "仪表板", icon: LayoutDashboard },
   { id: "accounts", label: "账号", icon: Users },
   { id: "environments", label: "环境配置", icon: Globe2 },
-  ...(hasContainers ? [{ id: "containers" as const, label: "容器", icon: Box }] : []),
+  ...(hasContainers ? [{ id: "containers" as const, label: "容器", icon: Box }, { id: "web" as const, label: "网页端", icon: Globe }] : []),
   { id: "config", label: "配置管理", icon: FolderCog },
 ];
 const footer: NavItem[] = [
@@ -27,7 +27,7 @@ const footer: NavItem[] = [
   { id: "about", label: "关于", icon: Info },
 ];
 const titles: Record<PageId, string> = {
-  dashboard: "仪表板", accounts: "账号", environments: "环境配置", containers: "容器", config: "配置管理", settings: "设置", about: "关于",
+  dashboard: "仪表板", accounts: "账号", environments: "环境配置", containers: "容器", web: "网页端", config: "配置管理", settings: "设置", about: "关于",
 };
 
 const nextTheme: Record<ThemeMode, ThemeMode> = { system: "light", light: "dark", dark: "system" };

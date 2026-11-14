@@ -190,7 +190,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
         {runtime?.supported && (
           <p className="px-1 text-[11.5px] leading-relaxed text-muted">
             打开时选择项目文件夹，Hydra 会先经本机中继检测出口，再启动网关和容器并核对两者处于同一网络空间，全部通过后在该文件夹中启动 Claude Code。
-            Claude Code 登录时显示的链接请在与该账号相同出口的浏览器中打开。账号运行期间请保持 Claude-Hydra 在托盘中运行，退出后容器会断网。
+            Claude Code 登录时显示的链接请在左侧「网页端」中用这个容器账号打开，出口与时区和容器一致。账号运行期间请保持 Claude-Hydra 在托盘中运行，退出后容器会断网。
           </p>
         )}
       </div>

@@ -73,6 +73,35 @@ export interface NodeCheck { exit: ExitInfo; quality: string | null; risk: strin
 export interface ReleaseNote { version: string; date: string; body: string }
 export interface ExitInfo { ip: string; country: string; region: string; city: string; timezone: string; checkedAt: number }
 
+/** What a route check found for an account's browser. */
+export interface BrowserCheck {
+  /** null: no node, the browser would use this machine's network. */
+  exit: ExitInfo | null;
+  /** The zone pages will see; null = the system's. */
+  timezone: string | null;
+  locale: string;
+  /** Only a standalone test looks these up. */
+  quality: string | null;
+  risk: string | null;
+}
+
+/** What an account's browser presents to pages. */
+export interface BrowserFingerprint {
+  /** The browser that will show the pages and its executable (none on Windows), or why none. */
+  browser: string | null;
+  browserPath: string | null;
+  browserError: string | null;
+  /** Installed browsers the account can choose from (empty on Windows); null choice = the first. */
+  browsers: string[];
+  browserChoice: string | null;
+  /** "" / "proxy" follow the exit, "system", or an IANA name. */
+  timezone: string;
+  exitTimezone: string | null;
+  locale: string;
+  proxied: boolean;
+  dataDir: string;
+}
+
 export interface Install {
   kind: string;
   exe: string | null;
@@ -248,7 +277,10 @@ export const api = {
   createShortcut: (id: string) => invoke<string>("create_shortcut", { id }),
   setupLoginRouter: () => invoke<void>("setup_login_router"),
   prepareLogin: (id: string) => invoke<void>("prepare_login", { id }),
-  openAccountBrowser: (id: string, url?: string) => invoke<void>("open_account_browser", { id, url: url ?? null }),
+  openAccountBrowser: (id: string) => invoke<BrowserCheck>("open_account_browser", { id }),
+  testAccountBrowser: (id: string) => invoke<BrowserCheck>("test_account_browser", { id }),
+  browserFingerprint: (id: string) => invoke<BrowserFingerprint>("account_browser_fingerprint", { id }),
+  setAccountBrowser: (id: string, browser: string | null) => invoke<BrowserFingerprint>("set_account_browser", { id, browser }),
   resumeAccount: (id: string) => invoke<string>("resume_account", { id }),
   rebindExit: (id: string) => invoke<string>("rebind_exit", { id }),
   sandboxStatus: () => invoke<string>("sandbox_status"),

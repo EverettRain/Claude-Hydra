@@ -44,6 +44,10 @@ pub struct AccountConfig {
     pub relay_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<crate::node::ExitInfo>,
+    /// Installed browser the account browser runs (`chromium::installed` name); `None` = the
+    /// first one found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
     /// Id of the assigned environment config; `None` = direct connection, system timezone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
