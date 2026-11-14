@@ -1,4 +1,4 @@
-import type { CodeAccount, CodeUsage, Tokens } from "./api";
+import type { CodeUsage, Tokens } from "./api";
 
 export const ZERO: Tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
 
@@ -88,11 +88,4 @@ export function duration(ms: number): string {
   return h ? `${h}h ${minutes % 60}m` : `${minutes}m`;
 }
 
-/** "Max 20x", "Pro" … from the subscription type and rate-limit tier Claude Code stores. */
-export function planLabel(a: CodeAccount): string | null {
-  const tier = a.tier?.toLowerCase() ?? "";
-  const multiple = tier.match(/max_(\d+)x/)?.[1];
-  if (multiple) return `Max ${multiple}x`;
-  if (!a.plan) return null;
-  return a.plan.charAt(0).toUpperCase() + a.plan.slice(1);
-}
+

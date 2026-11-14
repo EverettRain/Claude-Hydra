@@ -129,9 +129,6 @@ pub struct Settings {
     /// Terminal app container accounts open in (see `terminal::APPS`); "" = Terminal.app.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub terminal: String,
-    /// Stops the background quota readings (see `quota_history`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub quota_sampling_off: bool,
     /// App icon id (see `app_icon`); "" = the bundled default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_icon: String,

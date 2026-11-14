@@ -321,40 +321,29 @@ pub fn scan_all(sources: &[(PathBuf, PathBuf)]) -> (Vec<Usage>, Usage) {
     (ledgers.iter().map(usage).collect(), usage(&combine(&ledgers)))
 }
 
-/// Who is signed in, without any secret.
+/// Who is signed in, from what Claude Code records about the account in `.claude.json`. The
+/// credentials file is never opened: a third-party app may not collect Claude sign-in tokens.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub signed_in: bool,
-    /// e.g. "pro" | "max" | "team"
+    /// The plan as Claude names it, e.g. "Max".
     pub plan: Option<String>,
-    /// e.g. "default_claude_max_20x"
-    pub tier: Option<String>,
     pub email: Option<String>,
     pub organization: Option<String>,
-    /// When the access token expires (ms); Claude Code refreshes it while it runs.
-    pub expires_at: Option<u64>,
 }
 
 fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// Claude Code's OAuth entry in `.credentials.json` (Linux stores it as a plain file).
-pub(crate) fn oauth(dir: &Path) -> Option<Value> {
-    read_json(&dir.join(".credentials.json")).map(|v| v["claudeAiOauth"].clone()).filter(|v| v["accessToken"].as_str().is_some_and(|t| !t.is_empty()))
-}
-
 pub fn account(dir: &Path) -> Account {
     let text = |v: &Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
-    let oauth = oauth(dir);
     // With CLAUDE_CONFIG_DIR, `.claude.json` lives inside the folder.
     let profile = read_json(&dir.join(".claude.json")).map(|v| v["oauthAccount"].clone()).unwrap_or(Value::Null);
     Account {
-        signed_in: oauth.is_some(),
-        plan: oauth.as_ref().and_then(|o| text(&o["subscriptionType"])),
-        tier: oauth.as_ref().and_then(|o| text(&o["rateLimitTier"])),
-        expires_at: oauth.as_ref().and_then(|o| o["expiresAt"].as_u64()),
+        signed_in: text(&profile["accountUuid"]).or_else(|| text(&profile["emailAddress"])).is_some(),
+        plan: text(&profile["planDisplayName"]),
         email: text(&profile["emailAddress"]),
         organization: text(&profile["organizationName"]),
     }
@@ -449,21 +438,25 @@ mod tests {
     }
 
     #[test]
-    fn account_reads_plan_and_identity_but_no_secret() {
+    fn account_comes_from_the_profile_never_the_credentials() {
         // Arrange
         let dir = std::env::temp_dir().join(format!("hydra-code-usage-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"sk-secret","refreshToken":"rt","expiresAt":1800000000000,"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}"#).unwrap();
-        std::fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"a@example.com","organizationName":"Org"}}"#).unwrap();
+        std::fs::write(dir.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"sk-secret","subscriptionType":"pro"}}"#).unwrap();
+        std::fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"a@example.com","organizationName":"Org","planDisplayName":"Max"}}"#).unwrap();
+        let empty = dir.join("signed-out");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(empty.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"sk-other"}}"#).unwrap();
 
         // Act
         let a = account(&dir);
-        let shown = serde_json::to_string(&a).unwrap();
+        let none = account(&empty);
 
         // Assert
         assert!(a.signed_in);
-        assert_eq!((a.plan.as_deref(), a.email.as_deref(), a.expires_at), (Some("max"), Some("a@example.com"), Some(1_800_000_000_000)));
-        assert!(!shown.contains("sk-secret") && !shown.contains("\"rt\""));
+        assert_eq!((a.plan.as_deref(), a.email.as_deref(), a.organization.as_deref()), (Some("Max"), Some("a@example.com"), Some("Org")));
+        assert!(!none.signed_in, "a credentials file alone is not read");
+        assert!(!serde_json::to_string(&a).unwrap().contains("sk-"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

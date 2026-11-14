@@ -55,7 +55,7 @@ export default function App() {
       {page === "accounts" && <AccountsPage profiles={profiles} loadError={loadError} refresh={refresh} />}
       {page === "environments" && <EnvironmentsPage onChanged={refresh} />}
       {page === "containers" && <ContainersPage onOpenSettings={() => setPage("settings")} />}
-      {page === "dashboard" && <DashboardPage profiles={profiles} />}
+      {page === "dashboard" && <DashboardPage />}
       {page === "config" && <ConfigPage profiles={profiles} onImmersive={setImmersive} />}
       {page === "settings" && (
         <SettingsPage info={info} reloadInfo={reloadInfo} theme={theme} onThemeChange={setTheme} onInstallChanged={refresh} />

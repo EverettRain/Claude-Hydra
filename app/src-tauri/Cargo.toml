@@ -28,10 +28,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"] }
 base64 = "0.22"
-aes-gcm = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
 # Session export files.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
@@ -43,10 +41,6 @@ tauri-plugin-single-instance = "2"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData"] }
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
-sha1 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 # Same versions Tauri's WebView2 backend uses; for the account browser's DevTools calls.

@@ -1,137 +1,19 @@
-import { ProfileAvatar } from "@/components/ProfileAvatar";
-import { listen } from "@tauri-apps/api/event";
-import { Box, ChartLine, ChevronDown, Loader2, RefreshCw } from "lucide-react";
+import { Box, ChartLine, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Heatmap, type Metric } from "@/components/Heatmap";
-import { QuotaTrend } from "@/components/QuotaTrend";
 import { Group, Page, PageHeader } from "@/components/PageHeader";
 import { Tag } from "@/components/Tag";
 import { TrendChart } from "@/components/TrendChart";
 import { Button } from "@/components/ui/button";
-import { api, errorText, type Profile, type Quota, type QuotaHistory, type QuotaWindow, type Tokens, type UsageDashboard } from "@/lib/api";
-import { latestQuota, windowLabel } from "@/lib/quotaHistory";
-import { byDay, compact, daily, duration, highlights, money, planLabel, sumDays, totalOf } from "@/lib/usage";
+import { api, errorText, type Tokens, type UsageDashboard } from "@/lib/api";
+import { byDay, compact, daily, duration, highlights, money, sumDays, totalOf } from "@/lib/usage";
 import { cn, relativeTime } from "@/lib/utils";
 
-// Cache contains only quota results, never credentials; it survives page navigation.
-const cache = new Map<string, Quota>();
-const RETRY_MS = 60_000;
-const attempts = new Map<string, number>();
 const RANGES = [7, 30, 90] as const;
 const MAX_MODELS = 6;
 const isMac = navigator.userAgent.includes("Mac");
 // The last dashboard of this session: shown at once when the page is opened again.
 let lastDashboard: UsageDashboard | null = null;
-
-function Meter({ value }: { value: QuotaWindow }) {
-  const title = `${windowLabel(value.id)}已用`;
-  const date = value.resetsAt ? new Date(value.resetsAt) : null;
-  const pct = value.utilization;
-  const tone = pct >= 90 ? "bg-danger" : pct >= 75 ? "bg-warn" : "bg-fg";
-  return (
-    <div className="min-w-0 flex-1">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[11.5px] text-muted">{title}</span>
-        <span className="font-mono text-[12px] tabular-nums text-fg">{`${pct.toFixed(1)}%`}</span>
-      </div>
-      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-pill">
-        <div className={cn("h-full rounded-full transition-[width] duration-500 ease-soft", tone)} style={{ width: `${Math.max(pct, 1.5)}%` }} />
-      </div>
-      <div className="mt-1 h-4 text-[10.5px] text-faint">{date && !Number.isNaN(date.getTime()) ? `重置 ${date.toLocaleString()}` : ""}</div>
-    </div>
-  );
-}
-
-/** Quota refresh shared by desktop and container accounts: cached, at most once a minute each. */
-function useQuota() {
-  const [values, setValues] = useState<Record<string, Quota>>(() => Object.fromEntries(cache));
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  // Readings taken in the background (see quota_history.rs) update the page as they arrive.
-  useEffect(() => {
-    const un = listen<[string, Quota]>("quota-sampled", ({ payload: [id, q] }) => {
-      cache.set(id, q);
-      setValues((old) => ({ ...old, [id]: q }));
-    });
-    return () => { void un.then((f) => f()); };
-  }, []);
-  const refresh = async (id: string, fetch: () => Promise<Quota>) => {
-    const since = Date.now() - (attempts.get(id) ?? 0);
-    if (since < RETRY_MS) {
-      setErrors((old) => ({ ...old, [id]: `请在 ${Math.ceil((RETRY_MS - since) / 1000)} 秒后再次刷新。` }));
-      return;
-    }
-    attempts.set(id, Date.now());
-    setBusy(id);
-    setErrors((old) => ({ ...old, [id]: "" }));
-    try {
-      const result = await fetch();
-      cache.set(id, result);
-      setValues((old) => ({ ...old, [id]: result }));
-    } catch (e) {
-      setErrors((old) => ({ ...old, [id]: errorText(e) }));
-    } finally {
-      setBusy(null);
-    }
-  };
-  // Accounts without a reading this session show their last recorded one until refreshed.
-  const seed = useCallback((ids: string[]) => {
-    for (const id of ids.filter((id) => !cache.has(id))) {
-      api.quotaHistory(id).then((h) => {
-        const q = latestQuota(h);
-        if (q && !cache.has(id)) {
-          cache.set(id, q);
-          setValues((old) => (old[id] ? old : { ...old, [id]: q }));
-        }
-      }, () => { /* no history yet */ });
-    }
-  }, []);
-  return { values, errors, busy, refresh, seed };
-}
-
-function QuotaBlock({ id, q, error }: { id: string; q?: Quota; error?: string }) {
-  const [open, setOpen] = useState(false);
-  const [history, setHistory] = useState<QuotaHistory | null>(null);
-  const [historyError, setHistoryError] = useState("");
-  // Reload whenever a new reading arrives, so the trend ends at the latest one.
-  useEffect(() => {
-    if (!open) return;
-    api.quotaHistory(id).then((h) => { setHistory(h); setHistoryError(""); }, (e) => setHistoryError(errorText(e)));
-  }, [open, id, q?.fetchedAt]);
-  return (
-    <>
-      {q && (
-        <div className="mt-3 grid grid-cols-2 gap-x-6 pl-10">
-          {q.windows.map((w) => <Meter key={w.id} value={w} />)}
-        </div>
-      )}
-      {q && (
-        <div className="pl-10">
-          <div className="flex items-center gap-3 text-[11.5px] text-muted">
-            <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1 hover:text-fg active:!scale-100" aria-expanded={open}>
-              <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-180")} />
-              剩余额度趋势
-            </button>
-            <span className="text-faint">读于 {relativeTime(q.fetchedAt)}</span>
-          </div>
-          {open && (
-            <div className="mt-2 rounded-xl border border-line-2 p-3">
-              {historyError ? <p className="text-[12px] text-danger">{historyError}</p>
-                : history ? <QuotaTrend history={history} order={q.windows.map((w) => w.id)} />
-                : <p className="text-[12px] text-muted">正在读取…</p>}
-            </div>
-          )}
-        </div>
-      )}
-      {error && (
-        <p className="selectable mt-2 whitespace-pre-line break-all pl-10 text-[12px] text-danger">
-          {error}
-          {q && " 当前显示的是上次结果。"}
-        </p>
-      )}
-    </>
-  );
-}
 
 function Segmented<T extends string | number>({ value, options, onChange, label }: { value: T; options: [T, string][]; onChange: (v: T) => void; label: string }) {
   return (
@@ -193,7 +75,7 @@ function Bars({ title, rows, metric }: { title: string; rows: BarRow[]; metric: 
 const valueOf = (t: Tokens, cost: number | null, metric: Metric) => (metric === "tokens" ? totalOf(t) : cost);
 const shortModel = (m: string) => m.replace(/^claude-/, "");
 
-function ContainerDashboard({ quota }: { quota: ReturnType<typeof useQuota> }) {
+function ContainerDashboard() {
   const [data, setData] = useState<UsageDashboard | null>(lastDashboard);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -223,8 +105,6 @@ function ContainerDashboard({ quota }: { quota: ReturnType<typeof useQuota> }) {
     }
     void load();
   }, [load]);
-  const { seed } = quota;
-  useEffect(() => { if (data) seed(data.containers.map((c) => c.id)); }, [data, seed]);
 
   const usages = useMemo(() => data?.containers.map((c) => c.usage) ?? [], [data]);
   const days = useMemo(() => byDay(usages), [usages]);
@@ -307,7 +187,7 @@ function ContainerDashboard({ quota }: { quota: ReturnType<typeof useQuota> }) {
       <Group label="容器账号">
         {data.containers.map((c) => {
           const month = daily([c.usage], 30);
-          const plan = planLabel(c.account);
+          const plan = c.account.plan;
           return (
             <div key={c.id} className="px-4 py-3">
               <div className="flex items-center gap-3">
@@ -315,7 +195,7 @@ function ContainerDashboard({ quota }: { quota: ReturnType<typeof useQuota> }) {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
                     <span className="truncate text-[13.5px] font-medium">{c.name}</span>
-                    {plan && <Tag title={`订阅：${c.account.tier ?? plan}`}>{plan}</Tag>}
+                    {plan && <Tag title="订阅">{plan}</Tag>}
                     {!c.account.signedIn && <Tag tone="warn">未登录</Tag>}
                     {c.blocked && (c.blockedSoft
                       ? <Tag tone="warn" title={c.blocked}>核验中断网</Tag>
@@ -328,27 +208,19 @@ function ContainerDashboard({ quota }: { quota: ReturnType<typeof useQuota> }) {
                 <Button variant="ghost" size="iconSm" aria-label="查看趋势" title="查看趋势" onClick={() => { setSeries(c.id); setTab("trend"); panel.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}>
                   <ChartLine />
                 </Button>
-                <Button variant="outline" size="sm" disabled={quota.busy !== null || !c.account.signedIn} onClick={() => quota.refresh(c.id, () => api.containerQuota(c.id))}>
-                  {quota.busy === c.id ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                  {quota.busy === c.id ? "读取中" : "额度"}
-                </Button>
               </div>
-              <QuotaBlock id={c.id} q={quota.values[c.id]} error={quota.errors[c.id]} />
             </div>
           );
         })}
       </Group>
       <p className="px-1 text-[11.5px] leading-relaxed text-muted">
-        Token 与成本读取自各容器 Claude 数据文件夹中的会话记录，不联网；每次读取后按小时汇总存入 Hydra 的用量历史，Claude Code 清理旧会话记录（默认 30 天）后，已记录的消耗仍然保留，但从未被 Hydra 读取过的旧记录无法补回。成本是按官方 API 单价估算的等价金额，不是订阅的实际扣费。额度经该账号的代理节点查询；手动刷新过一次的账号，Hydra 运行期间每 10 分钟在后台再记录一次，用于剩余额度趋势（可在设置中关闭）。
+        Token 与成本读取自各容器 Claude 数据文件夹中的会话记录，不联网；每次读取后按小时汇总存入 Hydra 的用量历史，Claude Code 清理旧会话记录（默认 30 天）后，已记录的消耗仍然保留，但从未被 Hydra 读取过的旧记录无法补回。成本是按官方 API 单价估算的等价金额，不是订阅的实际扣费。订阅的剩余额度请在 Claude Code 中用 /usage 查看：读取额度需要使用账号的登录凭据，Anthropic 不允许第三方应用这样做。
       </p>
     </>
   );
 }
 
-export function DashboardPage({ profiles }: { profiles: Profile[] | null }) {
-  const quota = useQuota();
-  const { seed } = quota;
-  useEffect(() => { if (profiles) seed(profiles.map((p) => p.id)); }, [profiles, seed]);
+export function DashboardPage() {
   const [, tick] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(() => tick((value) => value + 1), 30_000);
@@ -356,34 +228,9 @@ export function DashboardPage({ profiles }: { profiles: Profile[] | null }) {
   }, []);
   return (
     <Page>
-      <PageHeader title="仪表板" subtitle="Claude Code 的 token 消耗、成本与订阅额度。" />
+      <PageHeader title="仪表板" subtitle="Claude Code 容器的 token 消耗与成本。" />
       <div className="space-y-5 px-5">
-        <ContainerDashboard quota={quota} />
-
-        {/* Container-only setups have no Claude desktop and therefore no desktop accounts. */}
-        {profiles && profiles.length > 0 && (
-          <Group label="桌面账号额度">
-            {profiles.map((profile) => {
-              const q = quota.values[profile.id];
-              return (
-                <div key={profile.id} className="px-4 py-3">
-                  <div className="flex items-center gap-3">
-                    <ProfileAvatar badge={profile.badge} isDefault={profile.isDefault} color={profile.color} className="h-7 w-7 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13.5px] font-medium">{profile.name}</div>
-                      <div className="text-[11px] text-muted">{q ? `${relativeTime(new Date(q.fetchedAt).getTime())}更新` : "尚未读取"}</div>
-                    </div>
-                    <Button variant="outline" size="sm" disabled={quota.busy !== null} onClick={() => quota.refresh(profile.id, () => api.profileQuota(profile.id))}>
-                      {quota.busy === profile.id ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                      {quota.busy === profile.id ? "读取中" : "刷新"}
-                    </Button>
-                  </div>
-                  <QuotaBlock id={profile.id} q={q} error={quota.errors[profile.id]} />
-                </div>
-              );
-            })}
-          </Group>
-        )}
+        <ContainerDashboard />
       </div>
     </Page>
   );

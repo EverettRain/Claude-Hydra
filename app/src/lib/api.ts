@@ -95,20 +95,12 @@ export interface AppInfo {
   requireEnvironment: boolean;
   /** Closing the window destroys it (frees memory) instead of hiding it. */
   lightweight: boolean;
-  /** Quota is re-read in the background for the trend. */
-  quotaSampling: boolean;
   /** Chosen app icon id. */
   appIcon: string;
   /** Selectable icons: id, display name. */
   appIcons: [string, string][];
 }
 
-/** A usage window as the service names it: "five_hour", "seven_day", "seven_day_opus", … */
-export interface QuotaWindow { id: string; utilization: number; resetsAt: string | null }
-export interface Quota { windows: QuotaWindow[]; fetchedAt: number }
-/** Consecutive unchanged readings of one cycle (times in ms). */
-export interface QuotaRun { utilization: number; resetsAt: number | null; from: number; to: number; samples: number }
-export interface QuotaHistory { windows: Record<string, QuotaRun[]> }
 
 export interface CodeSession {
   id: string; title: string; cwd: string | null; cwdExists: boolean; lastActivityAt: number | null; model: string | null; turns: number | null; inTarget: boolean;
@@ -206,13 +198,10 @@ export interface ContainerRuntime {
 export interface Tokens { input: number; output: number; cacheCreation: number; cacheRead: number }
 export interface CodeAccount {
   signedIn: boolean;
-  /** e.g. "pro" | "max" */
+  /** The plan as Claude names it, e.g. "Max". */
   plan: string | null;
-  /** e.g. "default_claude_max_20x" */
-  tier: string | null;
   email: string | null;
   organization: string | null;
-  expiresAt: number | null;
 }
 export interface CodeUsage {
   /** Start of each UTC hour (ms) with recorded usage; `cost` is API-equivalent USD. */
@@ -266,15 +255,11 @@ export const api = {
   createContainerShortcut: (id: string) => invoke<string>("create_container_shortcut", { id }),
   usageDashboard: () => invoke<UsageDashboard>("usage_dashboard"),
   usageDashboardCached: () => invoke<UsageDashboard | null>("usage_dashboard_cached"),
-  containerQuota: (id: string) => invoke<Quota>("container_quota", { id }),
-  quotaHistory: (id: string) => invoke<QuotaHistory>("quota_history", { id }),
-  setQuotaSampling: (enabled: boolean) => invoke<void>("set_quota_sampling", { enabled }),
   diagnostics: () => invoke<string>("diagnostics"),
   saveTranscript: (text: string) => invoke<string>("save_transcript", { text }),
   revealTranscript: (path: string) => invoke<void>("reveal_transcript", { path }),
   checkNode: (node: NodeConfig) => invoke<[ExitInfo, string | null, string]>("check_node", { node }),
   refreshNodeIp: (url: string) => invoke<string>("refresh_node_ip", { url }),
-  profileQuota: (id: string) => invoke<Quota>("profile_quota", { id }),
   recycleSession: (account: string, action: "delete" | "restore" | "empty", id = "") => invoke<void>("recycle_session", { account, action, id }),
   importChats: (account: string, raw: string) => invoke<TransferResult>("import_chats", { account, raw }),
   readImport: (account: string, id: string) => invoke<string>("read_import", { account, id }),

@@ -23,8 +23,6 @@ pub mod pricing;
 pub mod profiles;
 pub mod node;
 pub mod orbstack;
-pub mod quota;
-mod quota_history;
 mod releases;
 pub mod sandbox;
 pub mod clash;
@@ -232,7 +230,6 @@ fn save_profile_options(app: AppHandle, id: String, options: ProfileOptions) -> 
 #[tauri::command]
 fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     profiles::remove(&current_install(&app)?, &id)?;
-    quota_history::delete(&id);
     // Starting or re-checking a node can take seconds; never on the UI thread.
     relay::sync_soon();
     after_change(&app);
@@ -387,11 +384,7 @@ async fn rebuild_container(id: String, keep_changes: bool) -> Result<(), String>
 
 #[tauri::command]
 async fn delete_container(id: String) -> Result<Option<String>, String> {
-    let r = tauri::async_runtime::spawn_blocking(move || {
-        let note = container::delete(&id)?;
-        quota_history::delete(&id);
-        Ok::<_, String>(note)
-    }).await.map_err(|e| e.to_string())?;
+    let r = tauri::async_runtime::spawn_blocking(move || container::delete(&id)).await.map_err(|e| e.to_string())?;
     relay::sync_soon();
     r
 }
@@ -406,25 +399,6 @@ async fn usage_dashboard() -> Result<dashboard::Dashboard, String> {
 #[tauri::command]
 fn usage_dashboard_cached() -> Option<dashboard::Dashboard> {
     dashboard::cached()
-}
-
-#[tauri::command]
-async fn container_quota(id: String) -> Result<quota::Quota, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let q = quota::fetch_container(&id)?;
-        quota_history::record(&id, &q);
-        Ok(q)
-    }).await.map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn quota_history(id: String) -> Result<quota_history::History, String> {
-    tauri::async_runtime::spawn_blocking(move || quota_history::read(&id)).await.map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-fn set_quota_sampling(enabled: bool) -> Result<(), String> {
-    settings::update(|s| s.quota_sampling_off = !enabled)
 }
 
 #[tauri::command]
@@ -658,16 +632,6 @@ async fn claude_plugin_set(app: AppHandle, folder: String, id: String, enabled: 
 }
 
 #[tauri::command]
-async fn profile_quota(app: AppHandle, id: String) -> Result<quota::Quota, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let (install, profile) = find(&app, &id)?;
-        let q = quota::fetch(&install, &profile)?;
-        quota_history::record(&id, &q);
-        Ok(q)
-    }).await.map_err(|_| "额度查询任务失败。".to_string())?
-}
-
-#[tauri::command]
 async fn save_transcript(app: AppHandle, text: String) -> Result<String, String> {
     use std::{fs::OpenOptions, io::Write};
     let dir = app.path().download_dir().map_err(|_| "无法定位下载目录。")?;
@@ -723,7 +687,6 @@ struct AppInfo {
     autostart: bool,
     /// Extra accounts refuse to start without a proxy environment.
     require_environment: bool,
-    quota_sampling: bool,
     lightweight: bool,
     app_icon: String,
     app_icons: Vec<(String, String)>,
@@ -746,7 +709,6 @@ fn app_info(app: AppHandle) -> AppInfo {
         settings_path: paths::settings_path().to_string_lossy().into(),
         autostart: sys::autostart_enabled(),
         require_environment: s.requires_environment(),
-        quota_sampling: !s.quota_sampling_off,
         lightweight: s.lightweight,
         app_icon: app_icon::current(),
         app_icons: app_icon::choices(),
@@ -1012,9 +974,6 @@ pub fn run(start_in_tray: bool) {
             create_container_shortcut,
             usage_dashboard,
             usage_dashboard_cached,
-            container_quota,
-            quota_history,
-            set_quota_sampling,
             diagnostics,
             session_preview,
             read_import,
@@ -1046,7 +1005,6 @@ pub fn run(start_in_tray: bool) {
             claude_mcp_copy,
             claude_plugin_list,
             claude_plugin_set,
-            profile_quota,
             releases::release_notes,
             releases::open_release_page,
             releases::restart_app,
@@ -1079,8 +1037,6 @@ pub fn run(start_in_tray: bool) {
             let restored = handle.clone();
             guard::on_restore(move |_id| after_change(&restored));
             relay::start_monitor();
-            let sampled = handle.clone();
-            quota_history::start_sampler(move |id, q| { let _ = sampled.emit_to("main", "quota-sampled", (id, q)); });
             browser::start_watcher(handle.clone());
             browser::remember_fallback();
             environment::migrate();

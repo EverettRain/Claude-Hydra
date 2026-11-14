@@ -231,19 +231,6 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
           </Group>
         )}
 
-        <Group label="用量">
-          <Row
-            label="后台记录剩余额度"
-            hint={`手动刷新过一次额度的账号，Hydra 运行期间每 10 分钟经该账号的代理节点再读一次，用于额度趋势。${info?.platform === "macos" ? "macOS 桌面账号读取凭据需要钥匙串授权，只在手动刷新时记录。" : ""}`}
-          >
-            <Switch
-              checked={!!info?.quotaSampling}
-              disabled={!info || busy === "sampling"}
-              onCheckedChange={(v) => act("sampling", () => api.setQuotaSampling(v))}
-            />
-          </Row>
-        </Group>
-
         <Group label="数据与诊断">
           <div className="py-1">
             <KeyValue k="根目录" v={info?.storageRoot} />

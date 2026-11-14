@@ -50,7 +50,7 @@ fi
 say "生成示例数据：$DEMO"
 rm -rf "$DEMO"
 python3 - "$DEMO" <<'PY'
-import hashlib, json, os, random, sys, time
+import json, os, random, sys, time
 
 demo = sys.argv[1]
 random.seed(7)
@@ -96,8 +96,6 @@ settings = {
     },
     "requireEnvironment": True,
     "terminal": "iterm",
-    # No background quota readings: the demo accounts have nothing to read, and nothing should go out.
-    "quotaSamplingOff": True,
 }
 if not os.path.isdir("/Applications/Claude.app"):
     # A stand-in, only so the desktop accounts list; nothing is ever launched from it.
@@ -216,9 +214,7 @@ def recent(folder, cwd, title, ago, turns):
     s.save(t + turns * 600e3)
 
 def account(folder, email):
-    write(f"{folder}/.claude.json", {"oauthAccount": {"emailAddress": email}})
-    write(f"{folder}/.credentials.json", {"claudeAiOauth": {"accessToken": "demo-not-a-token", "subscriptionType": "max",
-                                                            "rateLimitTier": "default_claude_max_20x", "expiresAt": now + 30 * DAY}})
+    write(f"{folder}/.claude.json", {"oauthAccount": {"accountUuid": "00000000-0000-4000-8000-000000000000", "emailAddress": email, "planDisplayName": "Max"}})
     write(f"{folder}/CLAUDE.md", "# 全局记忆\n\n- 回复使用中文。\n- 修改代码时跟随项目已有风格。\n")
 
 us, jp = f"{root}/containers/ctr-1/claude", f"{root}/containers/ctr-2/claude"
@@ -231,28 +227,6 @@ recent(us, "/workspace/shop-api", "排查订单状态不同步", 5 * HOUR, 12)
 conversation(us)
 recent(f"{demo}/.claude", f"{code}/web", "整理组件目录结构", DAY, 6)
 
-# ---- quota history (what the dashboard's remaining-quota view reads) ------------------------
-
-def quota(account_id, level):
-    five, week = [], []
-    t = now - 7 * DAY
-    while t < now:
-        reset = t + 5 * HOUR
-        for i in range(5):
-            five.append({"utilization": min(99, round(level * (i + 1) * (8 + random.random() * 10))), "resetsAt": reset,
-                         "from": t + i * HOUR, "to": t + (i + 1) * HOUR - 60_000, "samples": 6})
-        t += 5 * HOUR
-    used, t = 4.0, now - 7 * DAY
-    while t < now:
-        used = min(95, used + level * random.random() * 4)
-        week.append({"utilization": round(used), "resetsAt": now + 3 * DAY, "from": t, "to": t + 6 * HOUR - 60_000, "samples": 36})
-        t += 6 * HOUR
-    safe = "".join(c if c.isascii() and (c.isalnum() or c in "-_") else "_" for c in account_id)
-    digest = hashlib.sha256(account_id.encode()).hexdigest()[:8]
-    write(f"{root}/quota-history/{safe}-{digest}.json", {"version": 1, "windows": {"five_hour": five, "seven_day": week}})
-
-for account_id, level in [("ctr-1", 1.1), ("ctr-2", 0.6), ("default", 0.7), ("work", 0.5), ("research", 1.3)]:
-    quota(account_id, level)
 PY
 
 # ---- driving the app --------------------------------------------------------------------
