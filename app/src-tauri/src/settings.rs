@@ -135,6 +135,10 @@ pub struct Settings {
     /// App icon id (see `app_icon`); "" = the bundled default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_icon: String,
+    /// Closing the window destroys it, giving back the memory of its web view; reopening loads
+    /// the interface again. Off, closing only hides the window and reopening is instant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lightweight: bool,
 }
 
 impl Settings {

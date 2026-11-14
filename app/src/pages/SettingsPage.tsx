@@ -127,6 +127,13 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
               onCheckedChange={(v) => act("auto", () => api.setAutostart(v))}
             />
           </Row>
+          <Row label="轻量模式" hint="关闭窗口时释放界面占用的内存，再次打开需要重新加载，会慢一些。关闭此项时，关闭窗口只是隐藏，再打开立即显示。托盘菜单里也可以切换。">
+            <Switch
+              checked={!!info?.lightweight}
+              disabled={!info || busy === "light"}
+              onCheckedChange={(v) => act("light", () => api.setLightweight(v))}
+            />
+          </Row>
           {info?.platform === "windows" && (
             <Row label="登录与链接路由" hint="注册后在 Windows 默认应用中把 Claude-Hydra 设为默认浏览器（以及 claude 链接）。之后 Claude 打开的谷歌登录等链接会进入该账号的专属浏览器，与账号同一出口 IP 和时区；其他链接仍交给你原来的浏览器。">
               <Button variant="outline" size="sm" disabled={busy === "router"} onClick={() => act("router", () => api.setupLoginRouter(), "已注册。请在系统设置中把 Claude-Hydra 设为默认浏览器。")}>

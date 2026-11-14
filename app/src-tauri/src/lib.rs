@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder};
 
@@ -709,6 +709,7 @@ struct AppInfo {
     /// Extra accounts refuse to start without a proxy environment.
     require_environment: bool,
     quota_sampling: bool,
+    lightweight: bool,
     app_icon: String,
     app_icons: Vec<(String, String)>,
 }
@@ -731,6 +732,7 @@ fn app_info(app: AppHandle) -> AppInfo {
         autostart: sys::autostart_enabled(),
         require_environment: s.requires_environment(),
         quota_sampling: !s.quota_sampling_off,
+        lightweight: s.lightweight,
         app_icon: app_icon::current(),
         app_icons: app_icon::choices(),
     }
@@ -754,6 +756,13 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 fn set_require_environment(enabled: bool) -> Result<(), String> {
     settings::update(|s| s.require_environment = Some(enabled))
+}
+
+#[tauri::command]
+fn set_lightweight(app: AppHandle, enabled: bool) -> Result<(), String> {
+    settings::update(|s| s.lightweight = enabled)?;
+    refresh_tray(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -834,6 +843,7 @@ fn build_menu(app: &AppHandle, list: &[Profile]) -> tauri::Result<Menu<tauri::Wr
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(app, "add", "添加账号…", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "show", "打开 Claude-Hydra", true, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "lightweight", "轻量模式（关闭窗口时释放内存）", true, settings::load().lightweight, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?)?;
     Ok(menu)
@@ -857,6 +867,10 @@ fn on_menu(app: &AppHandle, id: &str) {
     match id {
         "show" => show_main(app),
         "quit" => app.exit(0),
+        "lightweight" => {
+            if let Err(e) = settings::update(|s| s.lightweight = !s.lightweight) { sys::error_box(&e); }
+            refresh_tray(app);
+        }
         "add" => {
             let app = app.clone();
             std::thread::spawn(move || {
@@ -890,7 +904,8 @@ fn start_background(app: AppHandle) {
         #[cfg(windows)]
         let mut tagged: std::collections::HashMap<u32, (usize, usize, String)> = std::collections::HashMap::new();
         loop {
-            let open = app.get_webview_window("main").is_some();
+            // A hidden window (closed without light mode) is not being looked at.
+            let open = app.get_webview_window("main").is_some_and(|w| w.is_visible().unwrap_or(false));
             std::thread::sleep(Duration::from_secs(if open { 3 } else { 10 }));
             if let Ok(i) = current_install(&app) {
                 let list = profiles::list(&i, true);
@@ -933,6 +948,16 @@ pub fn run(start_in_tray: bool) {
         // `--tray` instances are started only to make sure a host runs (e.g. by link routing).
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| if !args.iter().any(|a| a == "--tray") { show_main(app) }))
         .manage(AppState::default())
+        // Closing the main window hides it unless light mode is on, so reopening it is instant
+        // instead of loading the whole interface again.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && !settings::load().lightweight {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_profiles,
             launch_profile,
@@ -1014,6 +1039,7 @@ pub fn run(start_in_tray: bool) {
             set_app_icon,
             set_autostart,
             set_require_environment,
+            set_lightweight,
             set_claude_path,
             quit_app,
         ])

@@ -93,6 +93,8 @@ export interface AppInfo {
   autostart: boolean;
   /** Extra accounts refuse to start without a proxy environment. */
   requireEnvironment: boolean;
+  /** Closing the window destroys it (frees memory) instead of hiding it. */
+  lightweight: boolean;
   /** Quota is re-read in the background for the trend. */
   quotaSampling: boolean;
   /** Chosen app icon id. */
@@ -308,6 +310,7 @@ export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   setRequireEnvironment: (enabled: boolean) => invoke<void>("set_require_environment", { enabled }),
+  setLightweight: (enabled: boolean) => invoke<void>("set_lightweight", { enabled }),
   setAppIcon: (id: string) => invoke<void>("set_app_icon", { id }),
   setClaudePath: (path: string | null) => invoke<void>("set_claude_path", { path }),
   quit: () => invoke<void>("quit_app"),
