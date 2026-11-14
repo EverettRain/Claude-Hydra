@@ -131,7 +131,7 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 ## 仪表板与用量统计
 
 <div align="center">
-<img src="docs/images/usage.png" alt="用量统计" width="720">
+<img src="docs/images/dashboard.png" alt="仪表板" width="720">
 </div>
 
 在 **仪表板** 的「桌面账号额度」中点击账号右侧的 **刷新**，读取 Claude 返回的 5 小时、每周以及按模型的周额度（包含同账号在其他设备上的用量）。同一账号 60 秒内不重复请求；配置了节点的账号经节点查询。
@@ -152,9 +152,19 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 
 ## 配置管理
 
+<div align="center">
+<img src="docs/images/config.png" alt="配置管理" width="720">
+</div>
+
 左侧 **配置管理** 页以 Claude Code 的数据目录为单位管理会话和配置，不用再去 Finder 里翻文件夹。页面先列出所有位置，按**本机**（`~/.claude`，Windows 为 `%USERPROFILE%\.claude`）、**桌面版账号**（有独立 Claude Code 目录时用它自己的，否则与本机共用）、**容器账号**（容器设置里的 Claude 数据文件夹）分组，显示会话数和最近活动，位置多时可搜索。选中后列表收起到顶部，旁边有 **在 Finder 中显示**（Windows 为资源管理器）和 **切换位置** 按钮。容器账号只在 macOS 上有，其余功能 Windows 同样可用。登录凭据不会被显示、复制或导出。
 
-**会话**：按工作目录分组列出标题、最后活动时间、模型、轮数和大小，可搜索；点标题以对话的形式阅读：你的消息是气泡，Claude 的回复按 Markdown 显示（含表格和代码块），思考与工具调用折叠成一块，展开可看命令、文件改动和结果；链接点击时复制而不打开。勾选后可以：
+**会话**：按工作目录分组列出标题、最后活动时间、模型、轮数和大小，可搜索；点标题以对话的形式阅读：你的消息是气泡，Claude 的回复按 Markdown 显示（含表格和代码块），思考与工具调用折叠成一块，展开可看命令、文件改动和结果；链接点击时复制而不打开。
+
+<div align="center">
+<img src="docs/images/chat.png" alt="以对话形式阅读会话" width="720">
+</div>
+
+勾选后可以：
 
 1. **复制到 / 移动到**其他位置。Claude Code 只在会话原来的工作目录下列出它（`claude --resume`），所以迁移时每个工作目录都要对应到目标那一侧：Hydra 按容器共享的文件夹自动换算（例如 Mac 上的 `/Users/me/code/app` ↔ 容器里的 `/workspace/app`），换算不了的由你指定。只改写记录里的工作目录，对话内容原样保留；目标里已有的会话跳过，不覆盖。移动会把原会话放进来源位置的回收站。
 2. **导出**为 zip，在另一台电脑或另一个位置 **导入**，导入时同样换算工作目录。阅读某个会话时，也可以把它导出为网页（单个 HTML 文件），用浏览器直接打开，样式和 App 里一致，折叠的工具调用可以展开。
@@ -176,6 +186,10 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 设计细节见 [docs/claude-config-management.md](docs/claude-config-management.md)。
 
 ## Claude Code 容器（macOS + OrbStack）
+
+<div align="center">
+<img src="docs/images/containers.png" alt="容器页面" width="720">
+</div>
 
 在左侧 **容器** 页新建容器账号：选择一个**带代理节点**的环境，添加要共享的项目文件夹。点容器进入它的页面：项目列表里每个项目可以直接开始 **新会话**，展开后可以 **继续** 最近的会话；要在新目录里开始，点 **新项目**，在共享文件夹里逐级选择。出口检测通过后，终端会在该目录中直接启动 Claude Code，检测不通过则不启动。也可以选 **只打开终端** 自己操作。在 **配置管理** 里阅读容器的会话时，可以点 **在容器中继续** 接着这个会话。Hydra 不内置容器运行时，使用你自己安装的 [OrbStack](https://orbstack.dev)（`docker --context orbstack`）；docker 路径与打开容器用的终端（Terminal.app / iTerm2 / Ghostty）在 **设置 → OrbStack 容器** 中配置。
 
