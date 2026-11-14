@@ -41,6 +41,11 @@ const LABEL_ROLE: &str = "claude-hydra.role";
 const LABEL_SPEC: &str = "claude-hydra.spec";
 const LABEL_IMAGE: &str = "claude-hydra.image";
 
+/// Proxy variables a docker client may add to every container it creates (its `proxies`
+/// config, or Docker Desktop's proxy settings). The gateway already carries all traffic, and a
+/// proxy address means nothing inside its network namespace; set empty, the client adds none.
+const CLIENT_PROXY_ENV: [&str; 8] = ["HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "ftp_proxy", "no_proxy"];
+
 /// Linux capabilities the workspace keeps (file ownership for installs and builds); nothing
 /// network-related, so the gateway's firewall cannot be changed from inside.
 const WORKSPACE_CAPS: [&str; 7] = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "SYS_CHROOT"];
@@ -481,6 +486,7 @@ fn workspace_args(id: &str, n: &Names, spec: &ContainerSpec, dirs: &HostDirs, im
     a.extend(["--network".into(), format!("container:{gateway_id}"), "--cap-drop".into(), "ALL".into()]);
     for cap in WORKSPACE_CAPS { a.extend(["--cap-add".into(), cap.into()]); }
     a.extend(["--security-opt".into(), "no-new-privileges:true".into()]);
+    for k in CLIENT_PROXY_ENV { a.extend(["-e".into(), format!("{k}=")]); }
     for (k, v) in [(LABEL_ID, id), (LABEL_ROLE, "workspace"), (LABEL_SPEC, &fingerprint(spec)), (LABEL_IMAGE, image_label)] {
         a.extend(["--label".into(), format!("{k}={v}")]);
     }
@@ -1342,6 +1348,7 @@ mod tests {
         assert!(has(["-v", "claude-hydra-1a-home:/root"]));
         assert!(has(["--mount", "type=bind,source=/Users/u/claude data,target=/root/.claude"]));
         assert!(has(["-e", "CLAUDE_CONFIG_DIR=/root/.claude"]));
+        for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "NO_PROXY"] { assert!(has(["-e", &format!("{k}=")]), "{k} cannot come from the docker client"); }
         assert!(has(["--mount", "type=bind,source=/state/bin,target=/opt/claude-hydra/bin,readonly"]), "tools are read-only inside the container");
         assert!(has(["--mount", "type=bind,source=/Users/u/Workspace Of Claude,target=/workspace/Workspace Of Claude"]));
         assert!(has(["--mount", r#"type=bind,"source=D:\a,b\x","target=/workspace/a,b""#]), "commas are quoted as CSV fields");
