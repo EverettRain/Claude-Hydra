@@ -39,7 +39,10 @@ pub fn run(args: &[String]) -> Option<i32> {
     if first == "--container" {
         let result = args.get(1).ok_or("--container 需要一个容器账号名称。".to_string())
             .and_then(|n| crate::container::resolve(n).ok_or_else(|| format!("没有名为“{n}”的容器账号。")))
-            .and_then(|id| crate::container::enter(&id));
+            .and_then(|id| {
+                let token = (args.get(2).map(String::as_str) == Some("--launch")).then(|| args.get(3).map(String::as_str).unwrap_or_default());
+                crate::container::enter(&id, token)
+            });
         return Some(match result {
             Ok(code) => code,
             Err(e) => {

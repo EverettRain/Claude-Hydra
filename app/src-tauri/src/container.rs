@@ -459,10 +459,17 @@ fn terminal_env(set: &[(String, String)], read: impl Fn(&str) -> Option<String>)
         .collect()
 }
 
-fn exec_args(workspace: &str, env: &[(String, String)]) -> Vec<String> {
-    let mut a: Vec<String> = ["exec", "-it", "-w", "/workspace"].map(String::from).to_vec();
+fn exec_args(workspace: &str, env: &[(String, String)], launch: Option<&Launch>) -> Vec<String> {
+    let dir = launch.map(|l| l.cwd.as_str()).unwrap_or(crate::claude_folders::WORKSPACE);
+    let mut a: Vec<String> = ["exec", "-it", "-w", dir].map(String::from).to_vec();
     for (k, v) in env { a.extend(["-e".into(), format!("{k}={v}")]); }
-    let shell = format!("export PATH=\"{TOOLS_DIR}:$PATH\"; if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi");
+    // Claude Code first, when asked for; leaving it drops into a shell in the same folder.
+    let claude = match launch {
+        Some(Launch { resume: Some(session), .. }) => format!("claude --resume {session}; "),
+        Some(_) => "claude; ".to_string(),
+        None => String::new(),
+    };
+    let shell = format!("export PATH=\"{TOOLS_DIR}:$PATH\"; {claude}if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi");
     a.extend([workspace.to_string(), "sh".into(), "-c".into(), shell]);
     a
 }
@@ -641,11 +648,15 @@ fn ensure_workspace(docker: &Docker, id: &str, n: &Names, spec: &ContainerSpec, 
     Ok(())
 }
 
-/// Terminal entry (`claude-hydra --container <id>`): prepares everything, then replaces this
-/// process with a shell in the container. Returns only on failure (or, off Unix, on exit).
-pub fn enter(id: &str) -> Result<i32, String> {
+/// Terminal entry (`claude-hydra --container <id> [--launch <token>]`): prepares everything, then
+/// replaces this process with a shell in the container, or Claude Code in a project when the app
+/// asked for one. Every check runs first: a failed exit check starts nothing. Returns only on
+/// failure (or, off Unix, on exit).
+pub fn enter(id: &str, token: Option<&str>) -> Result<i32, String> {
     let s = settings::load();
     let (name, spec) = account(&s, id)?;
+    let launch = token.map(|t| take_launch(id, t)).transpose()?;
+    if let Some(l) = &launch { check_launch(&spec, l)?; }
     let n = names(id)?;
     let docker = orbstack::connect()?;
     let effective = s.effective(id);
@@ -683,7 +694,14 @@ pub fn enter(id: &str) -> Result<i32, String> {
     say(&format!("[目录]  {}", if folders.is_empty() { "（未共享文件夹）".into() } else { folders.join("  ") }));
     say("[网络]  仅经本账号的代理节点（UDP / IPv6 / 直连均被阻止）");
     say("[审计]  hydra-audit 检查出口、直连与泄露并打分；hydra-audit watch 持续监测");
-    say("输入 claude 启动 Claude Code。登录时显示的链接请在与该账号同出口的浏览器中打开。");
+    match &launch {
+        Some(l) => {
+            say(&format!("[项目]  {}", l.cwd));
+            say(if l.resume.is_some() { "出口检测通过，正在继续会话。登录时显示的链接请在与该账号同出口的浏览器中打开。" }
+                else { "出口检测通过，正在启动 Claude Code。登录时显示的链接请在与该账号同出口的浏览器中打开。" });
+        }
+        None => say("输入 claude 启动 Claude Code。登录时显示的链接请在与该账号同出口的浏览器中打开。"),
+    }
     say("");
 
     let baseline = environment.and_then(|e| e.exit_baseline.as_ref()).map(|b| b.ip.clone());
@@ -694,7 +712,7 @@ pub fn enter(id: &str) -> Result<i32, String> {
     };
     let mut env = shell_env(&effective.env, timezone.as_deref(), locale.as_deref(), &audit);
     env.extend(terminal_env(&env, |k| std::env::var(k).ok()));
-    let args = exec_args(&n.workspace, &env);
+    let args = exec_args(&n.workspace, &env, launch.as_ref());
     #[cfg(unix)]
     { Err(docker.exec(args)) }
     #[cfg(not(unix))]
@@ -702,24 +720,155 @@ pub fn enter(id: &str) -> Result<i32, String> {
 }
 
 /// The script a terminal runs to enter the account (also used for desktop shortcuts).
-fn write_entry(path: &Path, id: &str) -> Result<(), String> {
+fn write_entry(path: &Path, id: &str, token: Option<&str>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("无法获取当前程序路径：{e}"))?;
-    crate::sys::write_shortcut(path, &exe, &format!("--container {id}"), "")
+    let launch = token.map(|t| format!(" --launch {t}")).unwrap_or_default();
+    crate::sys::write_shortcut(path, &exe, &format!("--container {id}{launch}"), "")
 }
 
-/// Quick checks, then a terminal window that runs `enter`.
-pub fn open(id: &str) -> Result<(), String> {
+/// Quick checks, then a terminal window that runs `enter`, in a project when `launch` says so.
+pub fn open(id: &str, launch: Option<Launch>) -> Result<(), String> {
     let s = settings::load();
     let (_, spec) = account(&s, id)?;
+    if let Some(l) = &launch { check_launch(&spec, l)?; }
     let (docker, _) = orbstack::connect_with(s.docker_path.as_deref())?;
     check_node(&s.effective(id))?;
     if let Some(reason) = s.account(id).blocked { return Err(blocked(&reason, s.account(id).blocked_soft)); }
     if let Some(reason) = pending(&spec, live_workspaces(&docker)?.get(id)).0 { return Err(reason); }
     let dir = state_dir(id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建容器状态目录：{e}"))?;
-    let script = dir.join("enter.command");
-    write_entry(&script, id)?;
+    let Some(launch) = launch else {
+        let script = dir.join("enter.command");
+        write_entry(&script, id, None)?;
+        return crate::terminal::open(&s.terminal, &script);
+    };
+    clear_stale_launches(&dir);
+    // The request travels in a file and the terminal gets only its token, so folder names with
+    // spaces or quotes never pass through a shell command line.
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let request = serde_json::to_vec(&launch).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("launch-{token}.json")), request).map_err(|e| format!("无法保存打开请求：{e}"))?;
+    let script = dir.join(format!("enter-{token}.command"));
+    write_entry(&script, id, Some(&token))?;
     crate::terminal::open(&s.terminal, &script)
+}
+
+// ---- projects --------------------------------------------------------------------------
+
+/// What a terminal opened from the app does once every check has passed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Launch {
+    /// Working folder in the container, inside a shared folder.
+    pub cwd: String,
+    /// Claude Code session to resume; a new session otherwise.
+    pub resume: Option<String>,
+}
+
+/// A launch request is used once, by the terminal it was made for; one left behind (a terminal
+/// that never started) is useless after a while.
+const LAUNCH_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn clear_stale_launches(dir: &Path) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("launch-") || name.starts_with("enter-")) { continue; }
+        let old = e.metadata().and_then(|m| m.modified()).ok()
+            .and_then(|t| std::time::SystemTime::now().duration_since(t).ok()).is_some_and(|age| age > LAUNCH_TTL);
+        if old { let _ = std::fs::remove_file(e.path()); }
+    }
+}
+
+fn take_launch(id: &str, token: &str) -> Result<Launch, String> {
+    if token.is_empty() || !token.chars().all(|c| c.is_ascii_hexdigit()) { return Err("打开请求无效。".into()); }
+    let dir = state_dir(id);
+    let file = dir.join(format!("launch-{token}.json"));
+    let raw = std::fs::read(&file).map_err(|_| "打开请求已失效，请回到 Claude-Hydra 重新打开。".to_string())?;
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(dir.join(format!("enter-{token}.command")));
+    serde_json::from_slice(&raw).map_err(|_| "打开请求无效。".to_string())
+}
+
+fn folder_paths(spec: &ContainerSpec) -> crate::claude_folders::Paths {
+    crate::claude_folders::Paths::Container(spec.mounts.iter().map(|m| (m.name.clone(), PathBuf::from(&m.source))).collect())
+}
+
+/// A working folder must be inside a shared folder and exist on the Mac, or be `/workspace` itself
+/// (where sessions started outside any shared folder resume); a session id is passed to a shell,
+/// so it may only hold the characters of one.
+fn check_launch(spec: &ContainerSpec, l: &Launch) -> Result<(), String> {
+    let paths = folder_paths(spec);
+    let inside = l.cwd.starts_with("/workspace/") && !l.cwd.split('/').any(|p| p == ".." || p == ".");
+    let root = l.cwd == crate::claude_folders::WORKSPACE;
+    if !root && (!inside || !paths.to_host(&l.cwd).is_some_and(|h| h.is_dir())) {
+        return Err(format!("{} 不在这个容器的共享文件夹里，或文件夹已不存在。", l.cwd));
+    }
+    if l.resume.as_deref().is_some_and(|r| r.is_empty() || !r.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+        return Err("会话标识无效。".into());
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    /// The folder in the container.
+    cwd: String,
+    /// The same folder on the Mac.
+    host: String,
+    sessions: usize,
+    last_active_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct Projects {
+    /// Folders Claude Code has worked in, most recent first.
+    recent: Vec<Project>,
+    /// The shared folders themselves, to start somewhere new.
+    shared: Vec<Project>,
+}
+
+pub fn projects(id: &str) -> Result<Projects, String> {
+    let (_, spec) = account(&settings::load(), id)?;
+    let paths = folder_paths(&spec);
+    let folder = crate::claude_folders::find(None, &format!("container:{id}"))?;
+    let mut recent: BTreeMap<String, Project> = BTreeMap::new();
+    for s in crate::code_sessions::list(&folder) {
+        let Some(cwd) = s.cwd else { continue };
+        let Some(host) = paths.to_host(&cwd).filter(|h| h.is_dir()) else { continue };
+        let p = recent.entry(cwd.clone()).or_insert(Project { cwd, host: host.to_string_lossy().into_owned(), sessions: 0, last_active_at: None });
+        p.sessions += 1;
+        p.last_active_at = p.last_active_at.max(s.last_activity_at);
+    }
+    let mut recent: Vec<Project> = recent.into_values().collect();
+    recent.sort_by_key(|p| std::cmp::Reverse(p.last_active_at));
+    let shared = spec.mounts.iter().map(|m| {
+        let cwd = format!("{}/{}", crate::claude_folders::WORKSPACE, m.name);
+        let inside = |p: &&Project| p.cwd == cwd || p.cwd.starts_with(&format!("{cwd}/"));
+        Project {
+            sessions: recent.iter().filter(inside).map(|p| p.sessions).sum(),
+            last_active_at: recent.iter().filter(inside).filter_map(|p| p.last_active_at).max(),
+            host: m.source.clone(), cwd,
+        }
+    }).collect();
+    Ok(Projects { recent, shared })
+}
+
+#[derive(Serialize)]
+pub struct Subfolder { name: String, cwd: String }
+
+/// The folders inside `cwd`, a folder of a shared folder; hidden ones are left out.
+pub fn subfolders(id: &str, cwd: &str) -> Result<Vec<Subfolder>, String> {
+    let (_, spec) = account(&settings::load(), id)?;
+    check_launch(&spec, &Launch { cwd: cwd.to_string(), resume: None })?;
+    let host = folder_paths(&spec).to_host(cwd).ok_or("文件夹不在共享范围内。")?;
+    let mut out: Vec<Subfolder> = std::fs::read_dir(&host).map_err(|e| format!("无法读取文件夹：{e}"))?.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .map(|name| Subfolder { cwd: format!("{cwd}/{name}"), name }).collect();
+    out.sort_by_key(|f| f.name.to_lowercase());
+    Ok(out)
 }
 
 /// Stops the workspace and its gateway (open terminals in it end). Nothing is deleted.
@@ -782,7 +931,7 @@ pub fn create_shortcut(id: &str) -> Result<PathBuf, String> {
     let desktop = crate::paths::desktop_dir().ok_or("无法定位桌面目录。")?;
     let safe: String = name.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect();
     let path = desktop.join(format!("Claude Code - {safe}.command"));
-    write_entry(&path, id)?;
+    write_entry(&path, id, None)?;
     Ok(path)
 }
 
@@ -1038,6 +1187,44 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_starts_claude_in_its_folder_then_leaves_a_shell() {
+        // Arrange
+        let new = Launch { cwd: "/workspace/my app".into(), resume: None };
+        let resume = Launch { cwd: "/workspace/app".into(), resume: Some("1b2c-3d".into()) };
+
+        // Act
+        let plain = exec_args("ws", &[], None);
+        let started = exec_args("ws", &[], Some(&new));
+        let resumed = exec_args("ws", &[], Some(&resume));
+
+        // Assert
+        assert_eq!(plain[3], "/workspace");
+        assert!(!plain.last().unwrap().contains("claude;") && !plain.last().unwrap().contains("claude --"));
+        assert_eq!(started[3], "/workspace/my app", "the folder is an argument of its own, never part of the shell command");
+        assert!(started.last().unwrap().contains("claude; if command -v bash"));
+        assert!(resumed.last().unwrap().contains("claude --resume 1b2c-3d; "));
+    }
+
+    #[test]
+    fn launches_stay_inside_existing_shared_folders() {
+        // Arrange
+        let root = std::env::temp_dir().join(format!("hydra-launch-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let spec = ContainerSpec { mounts: vec![Mount { source: root.to_string_lossy().into(), name: "app".into() }], ..Default::default() };
+        let at = |cwd: &str, resume: Option<&str>| check_launch(&spec, &Launch { cwd: cwd.into(), resume: resume.map(Into::into) });
+
+        // Act
+        let inside = [at("/workspace/app", None), at("/workspace/app/src", Some("a1-b2")), at("/workspace", Some("a1"))];
+        let outside = [at("/workspace/app/missing", None), at("/workspace/app/../app", None), at("/workspacex", None),
+            at("/workspace/other", None), at("/workspace/app", Some("x; rm -rf /")), at("/workspace/app", Some(""))];
+
+        // Assert
+        assert!(inside.iter().all(|r| r.is_ok()));
+        assert!(outside.iter().all(|r| r.is_err()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn terminal_variables_pass_through_unless_configured() {
         // Arrange
         let host = |k: &str| match k { "TERM" => Some("xterm-256color".to_string()), "TERM_PROGRAM" => Some("Apple_Terminal".to_string()), "COLORTERM" => Some(String::new()), _ => None };
@@ -1102,7 +1289,7 @@ mod tests {
         let env = vec![("A".to_string(), "x y; z".to_string())];
 
         // Act
-        let a = exec_args("claude-hydra-1a", &env);
+        let a = exec_args("claude-hydra-1a", &env, None);
 
         // Assert
         assert!(a.windows(2).any(|w| w == ["-e", "A=x y; z"]));

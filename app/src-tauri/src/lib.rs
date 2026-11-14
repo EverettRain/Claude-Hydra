@@ -361,8 +361,18 @@ fn save_container(id: Option<String>, input: container::ContainerInput) -> Resul
 }
 
 #[tauri::command]
-async fn open_container(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || container::open(&id)).await.map_err(|e| e.to_string())?
+async fn open_container(id: String, launch: Option<container::Launch>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || container::open(&id, launch)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn container_projects(id: String) -> Result<container::Projects, String> {
+    blocking(move || container::projects(&id)).await
+}
+
+#[tauri::command]
+async fn container_subfolders(id: String, cwd: String) -> Result<Vec<container::Subfolder>, String> {
+    blocking(move || container::subfolders(&id, &cwd)).await
 }
 
 #[tauri::command]
@@ -954,6 +964,8 @@ pub fn run(start_in_tray: bool) {
             list_containers,
             save_container,
             open_container,
+            container_projects,
+            container_subfolders,
             stop_container,
             rebuild_container,
             delete_container,

@@ -1,6 +1,7 @@
 import { Box, Hammer, Link2, Loader2, MoreHorizontal, Pencil, Plus, Power, RefreshCw, ShieldAlert, SquareTerminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { ContainerDialog } from "@/components/ContainerDialog";
+import { ContainerDetail } from "@/components/ContainerDetail";
 import { Menu } from "@/components/Menu";
 import { Page, PageHeader } from "@/components/PageHeader";
 import { Tag } from "@/components/Tag";
@@ -8,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { api, errorText, type Container, type ContainerInput, type ContainerRuntime } from "@/lib/api";
+import { api, errorText, type Container, type ContainerInput, type ContainerLaunch, type ContainerRuntime } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type Editing = { id: string | null; initial?: ContainerInput } | null;
@@ -27,6 +28,8 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
   const [rebuilding, setRebuilding] = useState<Container | null>(null);
   const [keepChanges, setKeepChanges] = useState(true);
   const [deleting, setDeleting] = useState<Container | null>(null);
+  // The container whose page is open, by id so it follows reloads of the list.
+  const [viewing, setViewing] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -53,7 +56,35 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
     }
   };
 
-  const openTerminal = (c: Container) => run(c, "打开中", () => api.openContainer(c.id), `已在终端中打开 ${c.name}`);
+  const openTerminal = (c: Container, launch: ContainerLaunch | null) => run(c, "打开中", () => api.openContainer(c.id, launch ?? undefined),
+    launch ? `已在终端中打开 ${c.name}，出口检测通过后启动 Claude Code` : `已在终端中打开 ${c.name}`);
+
+  const editDialog = (
+    <ContainerDialog
+      open={!!editing}
+      id={editing?.id ?? null}
+      initial={editing?.initial}
+      onClose={() => setEditing(null)}
+      onSaved={async () => {
+        const created = !editing?.id;
+        setEditing(null);
+        toast(created ? "已创建容器账号，点“打开”进入。" : "已保存。环境的修改在新开的终端中生效。");
+        await load();
+      }}
+    />
+  );
+  const shown = viewing ? items?.find((c) => c.id === viewing) : undefined;
+  if (shown) {
+    return (
+      <Page>
+        <div className="px-5 pt-1">
+          <ContainerDetail container={shown} busy={busy[shown.id]} onBack={() => setViewing(null)}
+            onOpen={(launch) => void openTerminal(shown, launch)} onEdit={() => setEditing({ id: shown.id, initial: toInput(shown) })} />
+        </div>
+        {editDialog}
+      </Page>
+    );
+  }
 
   return (
     <Page>
@@ -86,7 +117,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
           <button onClick={() => setEditing({ id: null })} className="flex w-full flex-col items-center gap-1.5 rounded-xl border border-dashed border-line px-4 py-10 text-muted hover:border-faint hover:text-fg active:!scale-100">
             <Box className="h-5 w-5" />
             <span className="text-[13px] font-medium">还没有容器账号</span>
-            <span className="text-[12px]">新建一个：选择带代理节点的环境和要共享的项目文件夹，打开后在终端中输入 claude</span>
+            <span className="text-[12px]">新建一个：选择带代理节点的环境和要共享的项目文件夹，打开后选择项目，直接进入 Claude Code</span>
           </button>
         )}
 
@@ -95,7 +126,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
             {items.map((c) => {
               const isRunning = c.state === "running";
               return (
-                <div key={c.id} onDoubleClick={() => openTerminal(c)} className="group flex items-center gap-3 px-4 py-3 hover:bg-card-2">
+                <div key={c.id} onClick={() => setViewing(c.id)} className="group flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-card-2">
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-pill text-fg-2">
                     <Box className="h-4 w-4" />
                   </span>
@@ -120,14 +151,14 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
                       </span>
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-1" onDoubleClick={(e) => e.stopPropagation()}>
+                  <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
                     {busy[c.id] ? (
                       <span className="flex h-7 items-center gap-1.5 px-2 text-[12.5px] text-muted">
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         {busy[c.id]}
                       </span>
                     ) : (
-                      <Button variant="outline" size="sm" className="min-w-[72px]" disabled={!!c.rebuild} onClick={() => openTerminal(c)}>
+                      <Button variant="outline" size="sm" className="min-w-[72px]" onClick={() => setViewing(c.id)}>
                         <SquareTerminal />
                         打开
                       </Button>
@@ -157,24 +188,13 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
 
         {runtime?.supported && (
           <p className="px-1 text-[11.5px] leading-relaxed text-muted">
-            打开时 Hydra 会先经本机中继检测出口，再启动网关和容器，并核对两者处于同一网络空间；终端中输入 claude 即可开始。
+            打开时选择项目文件夹，Hydra 会先经本机中继检测出口，再启动网关和容器并核对两者处于同一网络空间，全部通过后在该文件夹中启动 Claude Code。
             Claude Code 登录时显示的链接会在 Mac 的浏览器中打开，请让浏览器使用与该账号相同的出口。账号运行期间请保持 Claude-Hydra 在托盘中运行，退出后容器会断网。
           </p>
         )}
       </div>
 
-      <ContainerDialog
-        open={!!editing}
-        id={editing?.id ?? null}
-        initial={editing?.initial}
-        onClose={() => setEditing(null)}
-        onSaved={async () => {
-          const created = !editing?.id;
-          setEditing(null);
-          toast(created ? "已创建容器账号，点“打开”进入。" : "已保存。环境的修改在新开的终端中生效。");
-          await load();
-        }}
-      />
+      {editDialog}
 
       <Dialog
         open={!!rebuilding}

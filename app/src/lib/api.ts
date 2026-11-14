@@ -154,6 +154,12 @@ export interface CopyResult { target: string; status: "copied" | "exists" | "fai
 export interface McpServer { name: string; project: string | null; transport: string; summary: string; config: unknown }
 export interface ClaudePlugin { id: string; name: string; marketplace: string | null; version: string | null; enabled: boolean; installed: boolean }
 
+/** What a container terminal opened from Hydra runs after the exit check passes. */
+export interface ContainerLaunch { cwd: string; resume?: string | null }
+export interface ContainerProject { cwd: string; host: string; sessions: number; lastActiveAt: number | null }
+export interface ContainerProjects { recent: ContainerProject[]; shared: ContainerProject[] }
+export interface ContainerSubfolder { name: string; cwd: string }
+
 export interface ContainerMount {
   /** Absolute folder on the Mac. */
   source: string;
@@ -249,7 +255,9 @@ export const api = {
   setContainerRuntime: (dockerPath: string | null, terminal: string) => invoke<void>("set_container_runtime", { dockerPath, terminal }),
   listContainers: () => invoke<Container[]>("list_containers"),
   saveContainer: (id: string | null, input: ContainerInput) => invoke<string>("save_container", { id, input }),
-  openContainer: (id: string) => invoke<void>("open_container", { id }),
+  openContainer: (id: string, launch?: ContainerLaunch) => invoke<void>("open_container", { id, launch: launch ?? null }),
+  containerProjects: (id: string) => invoke<ContainerProjects>("container_projects", { id }),
+  containerSubfolders: (id: string, cwd: string) => invoke<ContainerSubfolder[]>("container_subfolders", { id, cwd }),
   stopContainer: (id: string) => invoke<void>("stop_container", { id }),
   rebuildContainer: (id: string, keepChanges: boolean) => invoke<void>("rebuild_container", { id, keepChanges }),
   deleteContainer: (id: string) => invoke<string | null>("delete_container", { id }),

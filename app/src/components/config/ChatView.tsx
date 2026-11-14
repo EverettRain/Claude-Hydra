@@ -1,4 +1,4 @@
-import { AlertCircle, ArrowLeft, Check, ChevronRight, Copy, Download, ImageIcon, MoveRight, Wrench } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, ChevronRight, Copy, Download, ImageIcon, MoveRight, Play, Wrench } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { WindowControls } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
@@ -258,8 +258,10 @@ function Message({ block }: { block: Block }): ReactNode {
 }
 
 /** One session as a conversation filling the content area, loaded page by page as it scrolls. */
-export function ChatView({ folder, session, onBack, onCopy, onMove, onExport }: {
+export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, onResume }: {
   folder: string; session: ClaudeCodeSession; onBack: () => void; onCopy: () => void; onMove: () => void; onExport: () => void;
+  /** Continues the session in its container; absent elsewhere. */
+  onResume?: () => void;
 }) {
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [total, setTotal] = useState<number | null>(null);
@@ -300,6 +302,7 @@ export function ChatView({ folder, session, onBack, onCopy, onMove, onExport }: 
             {session.cwd ?? "未记录工作目录"} · {session.model ?? "模型未知"} · {formatTime(session.lastActivityAt)}
           </p>
         </div>
+        {onResume && <Button size="sm" variant="outline" title="出口检测通过后，在容器里继续这个会话" onClick={onResume}><Play />在容器中继续</Button>}
         <Button size="iconSm" variant="ghost" aria-label="复制到其他位置" title="复制到其他位置" onClick={onCopy}><Copy /></Button>
         <Button size="iconSm" variant="ghost" aria-label="移动到其他位置" title="移动到其他位置" onClick={onMove}><MoveRight /></Button>
         <Button size="iconSm" variant="ghost" aria-label="导出" title="导出" onClick={onExport}><Download /></Button>

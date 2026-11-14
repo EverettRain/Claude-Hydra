@@ -89,6 +89,11 @@ export function CodeSessions({ folder, folders, chatHost, onReading }: {
     setReading(s);
     scroller?.scrollTo({ top: 0 });
   };
+  const resume = (s: ClaudeCodeSession) => {
+    const container = folder.id.slice("container:".length);
+    api.openContainer(container, { cwd: s.cwd!, resume: s.id.split("/")[1] })
+      .then(() => toast("已在终端中打开，出口检测通过后会继续这个会话"), (e) => toast(errorText(e), "error"));
+  };
   const closeSession = () => {
     setReading(null);
     requestAnimationFrame(() => scrollParent(root.current)?.scrollTo({ top: listScroll.current }));
@@ -106,7 +111,8 @@ export function CodeSessions({ folder, folders, chatHost, onReading }: {
         <Suspense fallback={<p className="py-6 text-center text-sm text-muted">正在打开…</p>}>
           <ChatView folder={folder.id} session={reading} onBack={closeSession}
             onCopy={() => setTransfer({ type: "copy", ids: [reading.id] })} onMove={() => setTransfer({ type: "move", ids: [reading.id] })}
-            onExport={() => exportSessions([reading.id])} />
+            onExport={() => exportSessions([reading.id])}
+            onResume={folder.kind === "container" && reading.cwd ? () => resume(reading) : undefined} />
         </Suspense>,
         chatHost,
       )}

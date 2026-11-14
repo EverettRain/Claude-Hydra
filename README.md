@@ -177,7 +177,7 @@ Claude 只看得到本机中继地址；节点的账号密码保存在 Hydra 内
 
 ## Claude Code 容器（macOS + OrbStack）
 
-在左侧 **容器** 页新建容器账号：选择一个**带代理节点**的环境，添加要共享的项目文件夹，点 **打开** 即在终端中进入容器，输入 `claude` 开始使用。Hydra 不内置容器运行时，使用你自己安装的 [OrbStack](https://orbstack.dev)（`docker --context orbstack`）；docker 路径与打开容器用的终端（Terminal.app / iTerm2 / Ghostty）在 **设置 → OrbStack 容器** 中配置。
+在左侧 **容器** 页新建容器账号：选择一个**带代理节点**的环境，添加要共享的项目文件夹。点容器进入它的页面：项目列表里每个项目可以直接开始 **新会话**，展开后可以 **继续** 最近的会话；要在新目录里开始，点 **新项目**，在共享文件夹里逐级选择。出口检测通过后，终端会在该目录中直接启动 Claude Code，检测不通过则不启动。也可以选 **只打开终端** 自己操作。在 **配置管理** 里阅读容器的会话时，可以点 **在容器中继续** 接着这个会话。Hydra 不内置容器运行时，使用你自己安装的 [OrbStack](https://orbstack.dev)（`docker --context orbstack`）；docker 路径与打开容器用的终端（Terminal.app / iTerm2 / Ghostty）在 **设置 → OrbStack 容器** 中配置。
 
 每个容器账号有自己的一套：
 
