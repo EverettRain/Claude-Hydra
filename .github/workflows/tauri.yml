@@ -1,8 +1,10 @@
 name: CI
 
 # Changes that leave the app untouched (README, docs, the screenshot script) need no build.
+# Branches only: a release tag points at a commit CI already built, and release.yml builds it.
 on:
   push:
+    branches: ["**"]
     paths-ignore: ["**.md", "docs/**", "app/scripts/readme-screenshots.sh"]
   pull_request:
     paths-ignore: ["**.md", "docs/**", "app/scripts/readme-screenshots.sh"]
