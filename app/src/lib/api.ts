@@ -289,6 +289,7 @@ export const api = {
   transferCodeSessions: (source: string, ids: string[], target: string, mapping: Record<string, string>, remove: boolean) =>
     invoke<TransferOutcome>("code_session_transfer", { source, ids, target, mapping, remove }),
   exportCodeSessions: (folder: string, ids: string[], path: string) => invoke<number>("code_session_export", { folder, ids, path }),
+  saveHtml: (path: string, html: string) => invoke<void>("save_html", { path, html }),
   previewCodeSessionImport: (path: string, target: string) => invoke<ImportPreview>("code_session_import_preview", { path, target }),
   importCodeSessions: (path: string, target: string, mapping: Record<string, string>) => invoke<TransferOutcome>("code_session_import", { path, target, mapping }),
   claudeTrash: (folder: string) => invoke<TrashedItem[]>("claude_trash_list", { folder }),

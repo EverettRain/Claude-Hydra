@@ -1,5 +1,5 @@
-import { AlertCircle, ArrowLeft, Check, ChevronRight, Copy, Download, ImageIcon, MoveRight, Play, Wrench } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AlertCircle, ArrowLeft, Check, ChevronRight, Copy, Download, FileText, ImageIcon, MoveRight, Play, Wrench } from "lucide-react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { WindowControls } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { api, errorText, type ClaudeCodeSession, type TranscriptItem } from "@/lib/api";
@@ -20,6 +20,25 @@ type Block =
   | { type: "question"; call: Call };
 
 const QUESTION_TOOL = "AskUserQuestion";
+
+/** True while rendering a file to save: every fold's content is included, as nothing loads later. */
+export const Exporting = createContext(false);
+
+/**
+ * A native `<details>` fold, so a saved page opens and closes without scripts. In the app its
+ * content is rendered only once opened, keeping long sessions light. Folds nest, so each kind
+ * names its own group (`group/work`, `group/tool`) for styles that follow its open state.
+ */
+function Fold({ summary, className, summaryClass, children }: { summary: ReactNode; className?: string; summaryClass?: string; children: ReactNode }) {
+  const all = useContext(Exporting);
+  const [open, setOpen] = useState(false);
+  return (
+    <details className={className} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className={cn("cursor-pointer list-none [&::-webkit-details-marker]:hidden", summaryClass)}>{summary}</summary>
+      {(open || all) && children}
+    </details>
+  );
+}
 
 function build(items: TranscriptItem[]): Block[] {
   const out: Block[] = [];
@@ -100,19 +119,16 @@ function Input({ tool }: { tool: TranscriptItem }) {
 }
 
 function ToolRow({ call }: { call: Call }) {
-  const [open, setOpen] = useState(false);
   const { tool, result } = call;
   const name = tool?.name ?? "工具结果";
   const failed = !!result?.error;
   return (
-    <div>
-      <button className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[12.5px] hover:bg-pill" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-muted transition-transform", open && "rotate-90")} />
-        <span className="shrink-0 font-medium">{name}</span>
-        <span className="min-w-0 truncate text-muted">{tool ? summary(name, tool.input) : ""}</span>
-        {failed && <AlertCircle className="ml-auto h-3.5 w-3.5 shrink-0 text-danger" aria-label="出错" />}
-      </button>
-      {open && (
+    <Fold className="group/tool" summaryClass="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[12.5px] hover:bg-pill" summary={<>
+      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted transition-transform group-open/tool:rotate-90" />
+      <span className="shrink-0 font-medium">{name}</span>
+      <span className="min-w-0 truncate text-muted">{tool ? summary(name, tool.input) : ""}</span>
+      {failed && <AlertCircle className="ml-auto h-3.5 w-3.5 shrink-0 text-danger" aria-label="出错" />}
+    </>}>
         <div className="ml-5 space-y-2 border-l border-line py-1.5 pl-3">
           {tool && <Input tool={tool} />}
           {result && (
@@ -125,42 +141,39 @@ function ToolRow({ call }: { call: Call }) {
           )}
           {tool && !result && <p className="text-[11.5px] text-muted">没有记录结果</p>}
         </div>
-      )}
-    </div>
+    </Fold>
   );
 }
 
+/** Two lines of the thinking until opened; the whole of it is in the summary, so it needs no content. */
 function Thinking({ item }: { item: TranscriptItem }) {
-  const [open, setOpen] = useState(false);
   return (
-    <button className={cn("w-full rounded-md px-1.5 py-1 text-left text-[12.5px] italic text-muted hover:bg-pill", !open && "line-clamp-2")} onClick={() => setOpen(!open)}>
-      <span className="selectable whitespace-pre-wrap">{item.text}</span>
-    </button>
+    <details className="group/think">
+      <summary className="cursor-pointer list-none rounded-md px-1.5 py-1 text-[12.5px] italic text-muted hover:bg-pill [&::-webkit-details-marker]:hidden">
+        <span className="selectable line-clamp-2 whitespace-pre-wrap group-open/think:line-clamp-none">{item.text}</span>
+      </summary>
+    </details>
   );
 }
 
 /** Thinking and tool calls between two messages, folded like the Claude app does. */
 function Work({ steps }: { steps: Step[] }) {
-  const [open, setOpen] = useState(false);
   const tools = steps.filter((s): s is Extract<Step, { type: "tool" }> => s.type === "tool");
   const failed = tools.filter((s) => s.call.result?.error).length;
   const names = [...new Set(tools.map((s) => s.call.tool?.name).filter(Boolean))].slice(0, 3).join("、");
   const label = tools.length ? `${steps.length > tools.length ? "思考并" : ""}使用了 ${tools.length} 个工具` : "思考";
   return (
-    <div className="rounded-xl bg-card-2">
-      <button className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-fg-2" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Wrench className="h-3.5 w-3.5 shrink-0 text-muted" />
-        <span className="shrink-0">{label}</span>
-        {names && <span className="min-w-0 truncate text-muted">{names}</span>}
-        {failed > 0 && <span className="shrink-0 text-danger">{failed} 个出错</span>}
-        <ChevronRight className={cn("ml-auto h-3.5 w-3.5 shrink-0 text-muted transition-transform", open && "rotate-90")} />
-      </button>
-      {open && (
-        <div className="space-y-0.5 px-2 pb-2">
-          {steps.map((s, i) => s.type === "thinking" ? <Thinking key={i} item={s.item} /> : <ToolRow key={i} call={s.call} />)}
-        </div>
-      )}
-    </div>
+    <Fold className="group/work rounded-xl bg-card-2" summaryClass="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-fg-2" summary={<>
+      <Wrench className="h-3.5 w-3.5 shrink-0 text-muted" />
+      <span className="shrink-0">{label}</span>
+      {names && <span className="min-w-0 truncate text-muted">{names}</span>}
+      {failed > 0 && <span className="shrink-0 text-danger">{failed} 个出错</span>}
+      <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-muted transition-transform group-open/work:rotate-90" />
+    </>}>
+      <div className="space-y-0.5 px-2 pb-2">
+        {steps.map((s, i) => s.type === "thinking" ? <Thinking key={i} item={s.item} /> : <ToolRow key={i} call={s.call} />)}
+      </div>
+    </Fold>
   );
 }
 
@@ -257,9 +270,15 @@ function Message({ block }: { block: Block }): ReactNode {
   return <Note item={item} />;
 }
 
+/** A session's conversation: messages, folded work and question cards. Also rendered into saved pages. */
+export function Conversation({ items }: { items: TranscriptItem[] }) {
+  const blocks = useMemo(() => build(items), [items]);
+  return <>{blocks.map((b, i) => <Message key={i} block={b} />)}</>;
+}
+
 /** One session as a conversation filling the content area, loaded page by page as it scrolls. */
-export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, onResume }: {
-  folder: string; session: ClaudeCodeSession; onBack: () => void; onCopy: () => void; onMove: () => void; onExport: () => void;
+export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, onExportHtml, onResume }: {
+  folder: string; session: ClaudeCodeSession; onBack: () => void; onCopy: () => void; onMove: () => void; onExport: () => void; onExportHtml: () => void;
   /** Continues the session in its container; absent elsewhere. */
   onResume?: () => void;
 }) {
@@ -289,7 +308,6 @@ export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, on
     seen.observe(end.current);
     return () => seen.disconnect();
   }, [more, loading, error, items.length]);
-  const blocks = useMemo(() => build(items), [items]);
 
   return (
     <div className="claude-chat flex h-full flex-col bg-bg text-fg">
@@ -305,12 +323,13 @@ export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, on
         {onResume && <Button size="sm" variant="outline" title="出口检测通过后，在容器里继续这个会话" onClick={onResume}><Play />在容器中继续</Button>}
         <Button size="iconSm" variant="ghost" aria-label="复制到其他位置" title="复制到其他位置" onClick={onCopy}><Copy /></Button>
         <Button size="iconSm" variant="ghost" aria-label="移动到其他位置" title="移动到其他位置" onClick={onMove}><MoveRight /></Button>
-        <Button size="iconSm" variant="ghost" aria-label="导出" title="导出" onClick={onExport}><Download /></Button>
+        <Button size="iconSm" variant="ghost" aria-label="导出为网页" title="导出为网页（HTML，可直接用浏览器阅读）" onClick={onExportHtml}><FileText /></Button>
+        <Button size="iconSm" variant="ghost" aria-label="导出备份" title="导出备份（zip，可导入到其他位置继续使用）" onClick={onExport}><Download /></Button>
         {!isMac && <WindowControls />}
       </div>
       <div ref={body} className="min-h-0 flex-1 overflow-y-auto px-5 pt-5">
       <div className="mx-auto max-w-[760px] space-y-4 pb-8">
-        {blocks.map((b, i) => <Message key={i} block={b} />)}
+        <Conversation items={items} />
         {error && <p role="alert" className="text-sm text-danger">{error} <button className="underline" onClick={() => load(items.length)}>重试</button></p>}
         {loading && <p className="text-center text-sm text-muted">正在读取…</p>}
         {!loading && !error && total === 0 && <p className="text-center text-sm text-muted">这个会话没有可显示的内容。</p>}

@@ -83,6 +83,14 @@ export function CodeSessions({ folder, folders, chatHost, onReading }: {
     const n = await api.exportCodeSessions(folder.id, ids, path);
     toast(`已导出 ${n} 个会话`);
   });
+  const exportPage = (s: ClaudeCodeSession) => run(async () => {
+    const name = s.title.replace(/[\\/:*?"<>|\n]/g, " ").trim().slice(0, 80) || "会话";
+    const path = await pickSave({ title: "导出为网页", defaultPath: `${name}.html`, filters: [{ name: "网页", extensions: ["html"] }] });
+    if (!path) return;
+    const { sessionHtml } = await import("./exportHtml");
+    await api.saveHtml(path, await sessionHtml(folder.id, s));
+    toast("已导出为网页，可以直接用浏览器打开");
+  });
   const openSession = (s: ClaudeCodeSession) => {
     const scroller = scrollParent(root.current);
     listScroll.current = scroller?.scrollTop ?? 0;
@@ -111,7 +119,7 @@ export function CodeSessions({ folder, folders, chatHost, onReading }: {
         <Suspense fallback={<p className="py-6 text-center text-sm text-muted">正在打开…</p>}>
           <ChatView folder={folder.id} session={reading} onBack={closeSession}
             onCopy={() => setTransfer({ type: "copy", ids: [reading.id] })} onMove={() => setTransfer({ type: "move", ids: [reading.id] })}
-            onExport={() => exportSessions([reading.id])}
+            onExport={() => exportSessions([reading.id])} onExportHtml={() => exportPage(reading)}
             onResume={folder.kind === "container" && reading.cwd ? () => resume(reading) : undefined} />
         </Suspense>,
         chatHost,

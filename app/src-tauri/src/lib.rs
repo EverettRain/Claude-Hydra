@@ -567,6 +567,16 @@ async fn code_session_export(app: AppHandle, folder: String, ids: Vec<String>, p
     blocking(move || code_sessions::export(&claude_folder(&app, &folder)?, &ids, Path::new(&path))).await
 }
 
+/// Saves a session exported as a web page to the path picked in the save dialog.
+#[tauri::command]
+async fn save_html(path: String, html: String) -> Result<(), String> {
+    blocking(move || {
+        let lower = path.to_lowercase();
+        if !(lower.ends_with(".html") || lower.ends_with(".htm")) { return Err("只能保存为 .html 文件。".into()); }
+        std::fs::write(&path, html).map_err(|e| format!("无法保存：{e}"))
+    }).await
+}
+
 #[tauri::command]
 async fn code_session_import_preview(app: AppHandle, path: String, target: String) -> Result<code_sessions::ImportPreview, String> {
     blocking(move || code_sessions::import_preview(Path::new(&path), &claude_folder(&app, &target)?)).await
@@ -1014,6 +1024,7 @@ pub fn run(start_in_tray: bool) {
             code_session_plan,
             code_session_transfer,
             code_session_export,
+            save_html,
             code_session_import_preview,
             code_session_import,
             claude_trash_list,
