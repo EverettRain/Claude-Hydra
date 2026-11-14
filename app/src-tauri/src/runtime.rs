@@ -44,7 +44,11 @@ pub const DOCKER_DESKTOP: Runtime = Runtime {
     name: "Docker Desktop",
     context: "desktop-linux",
     marker: "Docker Desktop",
-    candidates: &["%ProgramFiles%\\Docker\\Docker\\resources\\bin\\docker.exe"],
+    // Per-user install (Docker's recommended one), then the all-users one.
+    candidates: &[
+        "%LOCALAPPDATA%\\Programs\\DockerDesktop\\resources\\bin\\docker.exe",
+        "%ProgramFiles%\\Docker\\Docker\\resources\\bin\\docker.exe",
+    ],
     // `host-gateway` is Docker Desktop's way into the host (what host.docker.internal names).
     host: "hydra-host",
     add_host: Some("hydra-host:host-gateway"),
