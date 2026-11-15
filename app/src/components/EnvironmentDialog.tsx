@@ -31,6 +31,8 @@ function Line({ label, children }: { label: string; children: React.ReactNode })
 
 /** Create or edit a reusable environment: network, timezone, language and advanced launch options. */
 const place = (x: ExitInfo) => [x.country, x.region, x.city].filter(Boolean).join(" ");
+// The sandbox is Sandboxie-Plus, on Windows only; macOS gets the reason instead (see seatbelt.rs).
+const IS_MAC = navigator.userAgent.includes("Mac");
 
 export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBaseline, onClose, onSaved }: Props) {
   const [env, setEnv] = useState<EnvironmentInput>(emptyEnvironment);
@@ -163,7 +165,9 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
                 {env.isolation === "sandboxie"
                   ? "沙箱中只允许连接本账号的本地中继，任何绕过代理的进程都会断网；文件和注册表写入留在沙箱内（账号数据目录除外）。沙箱内无法经本机 DNS 解析外部域名，域名只经代理解析。商店版会先复制一份到 Hydra 数据目录再装入沙箱（首次较慢）；系统默认账号不能使用环境。启动后会核实 Claude 确实在沙箱中运行，否则立即关闭。"
                   : "不用沙箱时：Claude 与它启动的工具都经本地中继出网（无直连回退），出口不合规则时会自动断网；但忽略代理设置的程序仍可能直连。"}
-                {sandbox && !sandbox.ok && <span className="block text-warn">{sandbox.text}</span>}
+                {IS_MAC
+                  ? <span className="mt-1 block">macOS 上没有沙箱隔离：系统不允许在沙箱里再建沙箱，用 Seatbelt 套住 Claude 桌面版会让它自身的沙箱无法启动，只有关掉 Claude 的沙箱才能运行，安全代价太大。对隐私要求极高时，网页版请用「网页端」的账号浏览器，Claude Code 请用「容器」。加与不加 Seatbelt 的差别可以在「设置 → Claude 桌面端 → 模拟测试」中查看。</span>
+                  : sandbox && !sandbox.ok && <span className="block text-warn">{sandbox.text}</span>}
               </p>
             </div>
           </div>
