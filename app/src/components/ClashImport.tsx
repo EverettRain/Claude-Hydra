@@ -2,16 +2,26 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { parseDocument } from "yaml";
 import { MAX_FRONT, emptyNode, fronts, hopLabel } from "@/lib/node";
-import { errorText, type ClashSubscription, type NodeConfig } from "@/lib/api";
+import { api, errorText, type ClashSubscription, type NodeConfig } from "@/lib/api";
 import { Button } from "./ui/button";
 import { Input, Select } from "./ui/input";
 
-function nodes(raw: string): { items: NodeConfig[]; skipped: number } {
-  if (raw.length > 4194304) throw new Error("配置超过 4 MB。");
+/**
+ * Nodes in a subscription or pasted text: a Clash configuration (its `proxies`, a bare list of
+ * proxies, or one proxy), else share links (one, several, or base64 as v2ray subscriptions are).
+ */
+async function readNodes(raw: string): Promise<{ items: NodeConfig[]; skipped: number }> {
+  if (raw.length > 4194304) throw new Error("内容超过 4 MB。");
   const doc = parseDocument(raw);
-  if (doc.errors.length) throw new Error("无法解析 YAML，请确认订阅地址返回 Clash 格式配置。");
-  const rows = doc.toJS({ maxAliasCount: 50 })?.proxies;
-  if (!Array.isArray(rows)) throw new Error("配置中没有 proxies 节点列表。");
+  const value = doc.errors.length ? null : doc.toJS({ maxAliasCount: 50 });
+  const rows = Array.isArray(value?.proxies) ? value.proxies : Array.isArray(value) ? value
+    : value && typeof value === "object" && "type" in value && "server" in value ? [value] : null;
+  if (rows) return clashNodes(rows);
+  const links = await api.parseNodeLinks(raw);
+  return { items: links.nodes, skipped: links.skipped };
+}
+
+function clashNodes(rows: any[]): { items: NodeConfig[]; skipped: number } {
   const usable = (p: any) => {
     if (!p || typeof p.server !== "string" || typeof p.name !== "string" || typeof p.type !== "string") return false;
     const port = Number(p.port);
@@ -49,14 +59,28 @@ export function ClashImport({ subscription, onSubscriptionChange, node, choose, 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
+  const [pasted, setPasted] = useState("");
   async function load(source: Promise<string>) {
     setBusy(true); setError(""); setNote("");
     try {
-      const { items, skipped } = nodes(await source);
+      const { items, skipped } = await readNodes(await source);
       if (!items.length) throw new Error(skipped ? "订阅中的节点都依赖代理组或缺失的前置节点，无法单独使用。" : "没有可选择的节点。");
       if (skipped) setNote(`已略过 ${skipped} 个节点：它们的前置节点（dialer-proxy）是代理组、不存在、成环或超过 ${MAX_FRONT} 级。`);
       onSubscriptionChange({ url: address.trim(), nodes: items });
       setUrl(null);
+    } catch (e) { setError(errorText(e)); }
+    finally { setBusy(false); }
+  }
+  // One pasted node is used at once; several become the list to pick from, like a subscription.
+  async function usePasted(text: string) {
+    if (!text.trim()) return;
+    setPasted(""); setBusy(true); setError(""); setNote("");
+    try {
+      const { items, skipped } = await readNodes(text);
+      if (!items.length) throw new Error("没有可识别的节点。");
+      const left = skipped ? `已略过 ${skipped} 个无法识别的节点。` : "";
+      if (items.length === 1) { choose(items[0]); setNote(left); }
+      else { onSubscriptionChange({ url: "", nodes: items }); setNote(`读取到 ${items.length} 个节点，请在下方选择。${left}`); }
     } catch (e) { setError(errorText(e)); }
     finally { setBusy(false); }
   }
@@ -65,10 +89,16 @@ export function ClashImport({ subscription, onSubscriptionChange, node, choose, 
   const same = (a: NodeConfig, b: NodeConfig | null) => !!b && a.password === b.password && JSON.stringify(a.via ?? null) === JSON.stringify(b.via ?? null);
   return <div className="space-y-2 px-4 py-2">
     <div className="flex items-center gap-2">
-      <Input aria-label="Clash 订阅地址" type="password" placeholder="Clash 订阅地址" value={address} disabled={busy} onChange={e => setUrl(e.target.value)} />
+      <Input aria-label="Clash 订阅地址" type="password" placeholder="订阅地址（Clash 配置或节点链接列表）" value={address} disabled={busy} onChange={e => setUrl(e.target.value)} />
       <Button variant="outline" disabled={busy || !address.trim()} onClick={() => load(invoke<string>("clash_subscription", { url: address }))}>{busy ? "读取中…" : "读取订阅"}</Button>
     </div>
-    {!list.length && node?.kind === "clash" && <p className="text-xs text-muted">此环境只保存了{asFront ? "所选的前置节点" : "绑定节点"}。读取订阅后即可切换。</p>}
+    {/* Share links carry their secrets, so the field never keeps what was pasted. */}
+    <Input aria-label={asFront ? "粘贴前置节点" : "粘贴节点"} disabled={busy} value={pasted}
+      placeholder="或粘贴节点链接（vless://、trojan://、ss:// 等）或 Clash 节点配置"
+      onChange={(e) => setPasted(e.target.value)}
+      onPaste={(e) => { e.preventDefault(); void usePasted(e.clipboardData.getData("text")); }}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void usePasted(pasted); } }} />
+    {!list.length && node?.kind === "clash" && <p className="text-xs text-muted">此环境只保存了{asFront ? "所选的前置节点" : "绑定节点"}。读取订阅或粘贴其他节点即可切换。</p>}
     {!!list.length && <Select disabled={busy} aria-label={asFront ? "选择前置节点" : "选择 Clash 节点"} value={Math.max(list.findIndex(n => same(n, node)), list.findIndex(n => n.password === node?.password))} onChange={e => { const n=list[Number(e.target.value)]; if(n) choose(n); }}>
       <option disabled value={-1}>{asFront ? "选择前置节点" : "选择节点"}（{list.length}）</option>
       {list.map((n,i) => <option key={i} value={i}>{name(n)} · {JSON.parse(n.password).type}{n.via ? `（经 ${hopLabel(n.via)} 中转）` : ""}</option>)}

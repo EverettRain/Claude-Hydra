@@ -290,6 +290,8 @@ export const api = {
   resumeAccount: (id: string) => invoke<string>("resume_account", { id }),
   rebindExit: (id: string) => invoke<string>("rebind_exit", { id }),
   sandboxStatus: () => invoke<string>("sandbox_status"),
+  /** Share links (one, several, or a base64 subscription of them) as Clash nodes. */
+  parseNodeLinks: (text: string) => invoke<{ nodes: NodeConfig[]; skipped: number; firstError?: string }>("parse_node_links", { text }),
   configureQuietSandbox: () => invoke<void>("configure_quiet_sandbox"),
   containerRuntime: () => invoke<ContainerRuntime>("container_runtime"),
   setContainerRuntime: (dockerPath: string | null, terminal: string) => invoke<void>("set_container_runtime", { dockerPath, terminal }),

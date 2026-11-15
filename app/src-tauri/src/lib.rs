@@ -30,6 +30,7 @@ pub mod runtime;
 mod releases;
 pub mod sandbox;
 pub mod clash;
+mod share_link;
 mod relay;
 pub mod sessions;
 pub mod settings;
@@ -998,6 +999,7 @@ pub fn run(start_in_tray: bool) {
             profile_options,
             check_node,
             clash::clash_subscription,
+            share_link::parse_node_links,
             list_environments,
             save_environment,
             delete_environment,

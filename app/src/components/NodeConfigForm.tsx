@@ -95,6 +95,22 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
     if (parsed) set(parsed);
     return !!parsed;
   };
+  // A share link (vless://, trojan://, …) is one node of its own, run by the built-in kernel.
+  const isLink = (value: string) => /^[a-z0-9]+:\/\/\S+$/i.test(value.trim());
+  const readLink = async (value: string): Promise<NodeConfig | null> => {
+    try {
+      const { nodes } = await api.parseNodeLinks(value);
+      if (nodes.length === 1) return nodes[0];
+      setResult({ ok: false, text: "一次只能粘贴一个节点；多个节点请在“Clash 代理”中粘贴，再从列表里选择。" });
+    } catch (e) { setResult({ ok: false, text: errorText(e) }); }
+    return null;
+  };
+  const pasteHost = (value: string) => {
+    if (trySplit(value)) return true;
+    if (!isLink(value)) return false;
+    void readLink(value).then((node) => { if (node) changeNode({ ...node, via: n.via }); });
+    return true;
+  };
   // Front proxies: local machine -> front proxy -> this node -> destination.
   const chain = fronts(node);
   // A Clash exit node's own fronts come with it from its subscription and are not edited here; a
@@ -114,8 +130,13 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
     const text = value.trim();
     if (!text) return false;
     const parsed = parseNodeText(text);
+    if ((!parsed?.host || !parsed.port) && isLink(text)) {
+      setFrontDraft("");
+      void readLink(text).then((node) => { if (node) chooseFront(node); });
+      return true;
+    }
     if (!parsed?.host || !parsed.port) {
-      setResult({ ok: false, text: "前置代理格式无法识别。请使用“类型://主机:端口:账号:密码”或“类型://账号:密码@主机:端口”，类型为 socks5、http 或 https。" });
+      setResult({ ok: false, text: "前置代理格式无法识别。请使用“类型://主机:端口:账号:密码”或“类型://账号:密码@主机:端口”（socks5、http、https），或 vless://、trojan:// 等节点链接。" });
       return false;
     }
     // The new proxy becomes the outermost hop, the first one reached from this machine.
@@ -165,10 +186,10 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
             <span className="flex-1" />
             <Segmented label="IP协议" value={n.ipVersion} options={[["ipv4", "IPv4"], ["ipv6", "IPv6"]]} onChange={(v) => set({ ipVersion: v })} />
           </Row>
-          <Row label="代理主机" required hint="可粘贴“类型://主机:端口:账号:密码”或“账号:密码@主机:端口”，自动拆分到各栏。">
+          <Row label="代理主机" required hint="可粘贴“类型://主机:端口:账号:密码”或“账号:密码@主机:端口”，自动拆分到各栏；粘贴 vless://、trojan://、ss:// 等节点链接时，改由内置 Mihomo 内核运行这个节点。">
             <Input aria-label="代理主机" className="font-mono text-xs" value={n.host} placeholder="粘贴 类型://主机:端口:账号:密码 自动拆分"
               onChange={(e) => set({ host: e.target.value })}
-              onPaste={(e) => { if (trySplit(e.clipboardData.getData("text"))) e.preventDefault(); }}
+              onPaste={(e) => { if (pasteHost(e.clipboardData.getData("text"))) e.preventDefault(); }}
               onBlur={(e) => trySplit(e.target.value)} />
             <Input aria-label="代理端口" inputMode="numeric" className="w-24 shrink-0 font-mono text-xs" value={n.port || ""} placeholder="端口"
               onChange={(e) => { const v = e.target.value.replace(/\D/g, "").slice(0, 5); set({ port: v ? Math.min(Number(v), 65535) : 0 }); }} />
@@ -188,7 +209,7 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
               )}
               {!locked && chain.length < MAX_FRONT && (
                 <Input aria-label="前置代理" className={cn("font-mono text-xs", chain.length > 0 && "w-44 shrink-0")} value={frontDraft}
-                  placeholder={chain.length ? "再加一级（更靠近本机）" : "选填：socks5://主机:端口:账号:密码"}
+                  placeholder={chain.length ? "再加一级（更靠近本机）" : "选填：socks5://主机:端口:账号:密码 或节点链接"}
                   onChange={(e) => setFrontDraft(e.target.value)}
                   onPaste={(e) => { if (addFront(e.clipboardData.getData("text"))) e.preventDefault(); }}
                   onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFront(frontDraft); } }}
