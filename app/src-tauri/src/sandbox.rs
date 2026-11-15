@@ -1723,10 +1723,12 @@ int main(void) {
             r#"int main(int argc, char **argv) {
     int a, i;
     for (a = 1; a < argc; a++) {
-        WCHAR text[8]; LANGID id = 0;
+        WCHAR text[8]; LANGID id = 0; int ok;
         for (i = 0; argv[a][i] && i < 7; i++) text[i] = (WCHAR)argv[a][i];
         text[i] = 0;
-        printf(parse_hex(text, (BYTE *)&id, 2) ? "%04x\n" : "invalid\n", id);
+        /* Parsed before printing: C leaves the order arguments are evaluated in open. */
+        ok = parse_hex(text, (BYTE *)&id, 2);
+        printf(ok ? "%04x\n" : "invalid\n", id);
     }
     return 0;
 }
