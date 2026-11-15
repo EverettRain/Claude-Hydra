@@ -38,7 +38,11 @@ function nodes(raw: string): { items: NodeConfig[]; skipped: number } {
   return { items, skipped };
 }
 
-export function ClashImport({ subscription, onSubscriptionChange, node, choose }: { subscription?: ClashSubscription | null; onSubscriptionChange: (s: ClashSubscription) => void; node: NodeConfig | null; choose: (n: NodeConfig) => void }) {
+/**
+ * Reads a Clash subscription and picks one of its nodes: the exit node, or with `asFront` a front
+ * proxy the exit is reached through (e.g. an airport node before a residential proxy).
+ */
+export function ClashImport({ subscription, onSubscriptionChange, node, choose, asFront }: { subscription?: ClashSubscription | null; onSubscriptionChange: (s: ClashSubscription) => void; node: NodeConfig | null; choose: (n: NodeConfig) => void; asFront?: boolean }) {
   const [url, setUrl] = useState<string | null>(null);
   const address = url ?? subscription?.url ?? "";
   const list = subscription?.nodes ?? [];
@@ -64,13 +68,13 @@ export function ClashImport({ subscription, onSubscriptionChange, node, choose }
       <Input aria-label="Clash 订阅地址" type="password" placeholder="Clash 订阅地址" value={address} disabled={busy} onChange={e => setUrl(e.target.value)} />
       <Button variant="outline" disabled={busy || !address.trim()} onClick={() => load(invoke<string>("clash_subscription", { url: address }))}>{busy ? "读取中…" : "读取订阅"}</Button>
     </div>
-    {!list.length && node?.kind === "clash" && <p className="text-xs text-muted">此环境只保存了绑定节点。读取订阅后即可切换。</p>}
-    {!!list.length && <Select disabled={busy} aria-label="选择 Clash 节点" value={Math.max(list.findIndex(n => same(n, node)), list.findIndex(n => n.password === node?.password))} onChange={e => { const n=list[Number(e.target.value)]; if(n) choose(n); }}>
-      <option disabled value={-1}>选择节点（{list.length}）</option>
+    {!list.length && node?.kind === "clash" && <p className="text-xs text-muted">此环境只保存了{asFront ? "所选的前置节点" : "绑定节点"}。读取订阅后即可切换。</p>}
+    {!!list.length && <Select disabled={busy} aria-label={asFront ? "选择前置节点" : "选择 Clash 节点"} value={Math.max(list.findIndex(n => same(n, node)), list.findIndex(n => n.password === node?.password))} onChange={e => { const n=list[Number(e.target.value)]; if(n) choose(n); }}>
+      <option disabled value={-1}>{asFront ? "选择前置节点" : "选择节点"}（{list.length}）</option>
       {list.map((n,i) => <option key={i} value={i}>{name(n)} · {JSON.parse(n.password).type}{n.via ? `（经 ${hopLabel(n.via)} 中转）` : ""}</option>)}
     </Select>}
-    {node?.kind === "clash" && <p className="text-xs">已绑定：{name(node)} · {node.host}:{node.port}{chain(node)}</p>}
-    {node?.kind === "clash" && <p className="text-xs text-muted">保存环境后，在“账号 → 编辑”中绑定此环境。</p>}
+    {!asFront && node?.kind === "clash" && <p className="text-xs">已绑定：{name(node)} · {node.host}:{node.port}{chain(node)}</p>}
+    {!asFront && node?.kind === "clash" && <p className="text-xs text-muted">保存环境后，在“账号 → 编辑”中绑定此环境。</p>}
     {note && <p className="text-xs text-muted">{note}</p>}
     {error && <p role="alert" className="text-xs text-danger">{error}</p>}
   </div>;

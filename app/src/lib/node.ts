@@ -86,6 +86,27 @@ export function fronts(n: NodeConfig | null | undefined): NodeConfig[] {
   return out;
 }
 
+/** `n` with `front` (and whatever `front` is reached through) as the hop nearest to this machine. */
+export function withOutermostFront(n: NodeConfig, front: NodeConfig): NodeConfig {
+  return { ...n, via: n.via ? withOutermostFront(n.via, front) : front };
+}
+
+/**
+ * `n` with `picked` (a subscription node, with the nodes it is itself reached through) as its
+ * subscription front: in place of the one it has, keeping the typed-in fronts on either side, or
+ * else as the hop nearest to this machine.
+ */
+export function withSubscriptionFront(n: NodeConfig, picked: NodeConfig): NodeConfig {
+  const beyond = (v: NodeConfig | null | undefined): NodeConfig | null => (!v ? null : v.kind === "clash" ? beyond(v.via) : v);
+  const swap = (v: NodeConfig): NodeConfig => {
+    if (!v.via) return { ...v, via: picked };
+    if (v.via.kind !== "clash") return { ...v, via: swap(v.via) };
+    const rest = beyond(v.via);
+    return { ...v, via: rest ? withOutermostFront(picked, rest) : picked };
+  };
+  return swap(n);
+}
+
 export const COMMON_TIMEZONES = [
   "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Taipei", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore", "Asia/Kolkata", "Asia/Dubai",
   "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Amsterdam", "Europe/Moscow",

@@ -149,6 +149,32 @@ mod tests {
         assert!(deep.validated().is_err());
     }
 
+    /// Residential landing: a typed-in proxy is the exit, reached through a subscription node
+    /// (which is itself reached through another one, as its subscription says).
+    #[test]
+    fn a_custom_exit_goes_through_a_subscription_front() {
+        // Arrange
+        let relay = json!({"type":"ss","name":"relay","server":"relay.example","port":8388,"cipher":"aes-128-gcm","password":"r"});
+        let airport = json!({"type":"trojan","name":"airport","server":"airport.example","port":443,"password":"a","dialer-proxy":"relay"});
+        let relay = NodeConfig { kind: "clash".into(), host: "relay.example".into(), port: 8388, password: relay.to_string(), ..Default::default() };
+        let airport = NodeConfig { kind: "clash".into(), host: "airport.example".into(), port: 443, password: airport.to_string(), via: Some(Box::new(relay)), ..Default::default() };
+        let home = NodeConfig { kind: "socks5".into(), host: "home.example".into(), port: 1080, username: "u".into(), password: "p".into(), via: Some(Box::new(airport)), ..Default::default() }
+            .validated().unwrap();
+
+        // Act
+        let hops = chain(&home).unwrap();
+
+        // Assert
+        let route: Vec<(&str, &str, Option<&str>)> = hops.iter()
+            .map(|h| (h["name"].as_str().unwrap(), h["server"].as_str().unwrap(), h["dialer-proxy"].as_str())).collect();
+        assert_eq!(route, [
+            ("HYDRA-NODE", "home.example", Some("HYDRA-VIA-1")),
+            ("HYDRA-VIA-1", "airport.example", Some("HYDRA-VIA-2")),
+            ("HYDRA-VIA-2", "relay.example", None),
+        ], "the exit is the typed-in proxy; the subscription's own dialer-proxy is replaced by its saved front");
+        assert_eq!((hops[0]["type"].as_str(), hops[0]["username"].as_str()), (Some("socks5"), Some("u")));
+    }
+
     #[test]
     #[ignore = "requires Mihomo, HYDRA_TEST_PROXY and internet"]
     fn imported_node_reaches_exit_through_managed_core() {

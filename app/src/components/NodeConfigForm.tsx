@@ -2,7 +2,7 @@ import { ClashImport } from "./ClashImport";
 import { Check, CircleAlert, CircleCheck, Clock, Copy, Info, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { api, errorText, type ClashSubscription, type ExitInfo, type NodeCheck, type NodeConfig } from "@/lib/api";
-import { COMMON_TIMEZONES, MAX_FRONT, emptyNode, formatNode, fronts, hopLabel, parseNodeText } from "@/lib/node";
+import { COMMON_TIMEZONES, MAX_FRONT, emptyNode, formatNode, fronts, hopLabel, parseNodeText, withOutermostFront, withSubscriptionFront } from "@/lib/node";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { Input, Select } from "./ui/input";
@@ -100,8 +100,19 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
   };
   // Front proxies: local machine -> front proxy -> this node -> destination.
   const chain = fronts(node);
-  // A front node that came with a subscription node belongs to it and is not edited here.
+  // A Clash exit node's own fronts come with it from its subscription and are not edited here; a
+  // custom exit's subscription front was picked below and can be changed.
   const fromSubscription = chain.some((v) => v.kind === "clash");
+  const locked = mode === "clash" && fromSubscription;
+  const subscriptionFront = mode === "custom" ? chain.find((v) => v.kind === "clash") ?? null : null;
+  const chooseFront = (picked: NodeConfig) => {
+    const next = withSubscriptionFront(n, picked);
+    if (fronts(next).length > MAX_FRONT) {
+      setResult({ ok: false, text: `前置代理最多 ${MAX_FRONT} 级：这个节点${picked.via ? "连同它自己的中转节点" : ""}放不下了，请先清除手动填写的前置代理。` });
+      return;
+    }
+    changeNode(next);
+  };
   const addFront = (value: string) => {
     const text = value.trim();
     if (!text) return false;
@@ -111,8 +122,7 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
       return false;
     }
     // The new proxy becomes the outermost hop, the first one reached from this machine.
-    const append = (x: NodeConfig): NodeConfig => ({ ...x, via: x.via ? append(x.via) : { ...emptyNode(), ...parsed } });
-    changeNode(append(n));
+    changeNode(withOutermostFront(n, { ...emptyNode(), ...parsed }));
     setFrontDraft("");
     return true;
   };
@@ -171,13 +181,13 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
             <Input aria-label="代理密码" type="password" value={n.password} maxLength={200} placeholder="密码（选填）" autoComplete="new-password" onChange={(e) => set({ password: e.target.value })} />
           </Row>
           </>}
-          <Row label="前置代理" hint={`选填，链式代理：本机 → 前置代理 → 上面的节点 → 目标网站。出口 IP 仍是上面的节点，前置代理只负责中转。最多 ${MAX_FRONT} 级；有前置代理时由内置 Mihomo 内核建立链路。`}>
+          <Row label="前置代理" hint={`选填，链式代理：本机 → 前置代理 → 上面的节点 → 目标网站。出口 IP 仍是上面的节点，前置代理只负责中转。例如家宽落地：前置选机场的 Clash 节点，上面填家宽代理。最多 ${MAX_FRONT} 级；有前置代理时由内置 Mihomo 内核建立链路。`}>
             {chain.length > 0 && (
               <span className="selectable min-w-0 flex-1 truncate font-mono text-xs" title={chain.map(hopLabel).join(" ← ")}>
                 {chain.map(hopLabel).join(" ← ")}
               </span>
             )}
-            {!fromSubscription && chain.length < MAX_FRONT && (
+            {!locked && chain.length < MAX_FRONT && (
               <Input aria-label="前置代理" className={cn("font-mono text-xs", chain.length > 0 && "w-44 shrink-0")} value={frontDraft}
                 placeholder={chain.length ? "再加一级（更靠近本机）" : "选填：socks5://主机:端口:账号:密码"}
                 onChange={(e) => setFrontDraft(e.target.value)}
@@ -185,11 +195,17 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFront(frontDraft); } }}
                 onBlur={() => addFront(frontDraft)} />
             )}
-            {chain.length > 0 && !fromSubscription && (
+            {chain.length > 0 && !locked && (
               <Button variant="outline" size="sm" onClick={() => set({ via: null })}>清除</Button>
             )}
           </Row>
-          {fromSubscription && <p className="px-4 pb-2 pl-[116px] text-[11.5px] text-muted">前置节点来自订阅（dialer-proxy），随所选节点一起保存；要更换请在订阅中另选节点。</p>}
+          {locked && <p className="px-4 pb-2 pl-[116px] text-[11.5px] text-muted">前置节点来自订阅（dialer-proxy），随所选节点一起保存；要更换请在订阅中另选节点。</p>}
+          {mode === "custom" && (
+            <div className="pl-[100px]">
+              <p className="px-4 pt-1 text-[11.5px] text-muted">也可以从 Clash 订阅中选一个节点作为前置（最靠近本机的一跳），例如家宽落地：本机 → 机场节点 → 上面的家宽代理 → 目标网站。</p>
+              <ClashImport asFront subscription={subscription} onSubscriptionChange={onSubscriptionChange} node={subscriptionFront} choose={chooseFront} />
+            </div>
+          )}
           <Row label="出口检测" hint="经节点访问所选服务，检测出口 IP、地区与时区。IP 协议选 IPv6 时节点须提供 IPv6 出口。">
             <Select aria-label="IP查询渠道" value={n.geoChannel} onChange={(e) => set({ geoChannel: e.target.value as NodeConfig["geoChannel"] })}>
               <option value="ipinfo">ipinfo.io</option>
