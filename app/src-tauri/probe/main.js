@@ -145,6 +145,9 @@ async function mainChecks() {
       userData: app.getPath('userData'),
       home: app.getPath('home'),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      // What the system says its language is, as opposed to the --lang pages are given.
+      systemLocale: app.getSystemLocale(),
+      preferredLanguages: app.getPreferredSystemLanguages(),
       switches: Object.fromEntries(SWITCHES.filter((s) => app.commandLine.hasSwitch(s)).map((s) => [s, app.commandLine.getSwitchValue(s) || true])),
       env: Object.fromEntries(ENV_KEYS.filter((k) => k in process.env).map((k) => [k, process.env[k]])),
     },

@@ -294,6 +294,35 @@ mod win {
         (status <= 0 && n > 0 && (n as usize) < out.len()).then(|| String::from_utf16_lossy(&out[..n as usize]))
     }
 
+    /// This year's rules of the Windows zone `key`, for `idguard.c`: bias, standard bias, daylight
+    /// bias, then the standard and the daylight start as their eight SYSTEMTIME fields.
+    pub fn zone_rule(key: &str) -> Option<[i32; 19]> {
+        use windows_sys::Win32::System::SystemInformation::GetSystemTime;
+        use windows_sys::Win32::System::Time::{
+            EnumDynamicTimeZoneInformation, GetTimeZoneInformationForYear, DYNAMIC_TIME_ZONE_INFORMATION, TIME_ZONE_INFORMATION,
+        };
+        let mut zone: DYNAMIC_TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut index = 0;
+        loop {
+            if unsafe { EnumDynamicTimeZoneInformation(index, &mut zone) } != 0 { return None; }
+            let name = &zone.TimeZoneKeyName;
+            let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+            if String::from_utf16_lossy(&name[..len]).eq_ignore_ascii_case(key) { break; }
+            index += 1;
+        }
+        let mut now = unsafe { std::mem::zeroed() };
+        unsafe { GetSystemTime(&mut now) };
+        let mut year: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetTimeZoneInformationForYear(now.wYear, &zone, &mut year) } == 0 { return None; }
+        let mut rule = [0i32; 19];
+        rule[..3].copy_from_slice(&[year.Bias, year.StandardBias, year.DaylightBias]);
+        for (i, d) in [&year.StandardDate, &year.DaylightDate].into_iter().enumerate() {
+            let fields = [d.wYear, d.wMonth, d.wDayOfWeek, d.wDay, d.wHour, d.wMinute, d.wSecond, d.wMilliseconds];
+            for (j, f) in fields.into_iter().enumerate() { rule[3 + i * 8 + j] = f as i32; }
+        }
+        Some(rule)
+    }
+
     pub fn error_box(text: &str) {
         let t = wide(text);
         let c = wide("Claude-Hydra");
@@ -561,6 +590,8 @@ mod unix {
     pub fn own_console(_title: &str) {}
 
     pub fn windows_zone(_iana: &str) -> Option<String> { None }
+
+    pub fn zone_rule(_key: &str) -> Option<[i32; 19]> { None }
 
     pub fn error_box(text: &str) {
         eprintln!("{text}");

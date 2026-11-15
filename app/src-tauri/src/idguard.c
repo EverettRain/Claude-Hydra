@@ -32,22 +32,25 @@
  *   - the board, BIOS and disk serials: GetSystemFirmwareTable('RSMB') and the storage descriptor
  *     behind IOCTL_STORAGE_QUERY_PROPERTY. WMI, the other route to them, is closed off in the box.
  *
- * A box can also carry the account's time zone and language (`HydraTimeZone`, a Windows zone
- * name, and `HydraLocale`, e.g. ja-JP). Chromium's ICU, Node and the C runtime take the local zone
- * from GetDynamicTimeZoneInformation / GetTimeZoneInformation, so those report the account's zone,
- * and so do GetLocalTime and the local-time conversions given no zone of their own; a program then
- * sees the zone of its exit, not the host's. The default locale and UI languages (GetUserDefault*,
- * GetSystemDefault*, Get*PreferredUILanguages, and GetLocaleInfo for the default locale) report the
- * account's language, matching the --lang Claude is started with. Keyboard layouts, installed
- * voices and fonts are not changed: they belong to the system, and a keyboard that types another
- * layout would break typing.
+ * A box can also carry the account's time zone and language: `HydraTimeZone` (a Windows zone name)
+ * with `HydraTimeZoneRule` (its rules for this year, worked out by Hydra) and `HydraLocale` (e.g.
+ * ja-JP). Chromium's ICU, Node and the C runtime take the local zone from
+ * GetDynamicTimeZoneInformation / GetTimeZoneInformation, so those report the account's zone; the
+ * default locale (GetUserDefaultLocaleName, where ICU takes Node's and Electron's from) and the
+ * preferred UI languages report the account's language, matching the --lang Claude is started
+ * with. Only these few are answered, and with values read from the box's settings alone: the
+ * clock functions and the language IDs are called all the time by the system and by Sandboxie
+ * itself, and a Chromium child process may not read the registry at all. Keyboard layouts,
+ * installed voices and fonts are not changed: they belong to the system, and a keyboard that types
+ * another layout would break typing.
  *
  * Every box also leaves the host's public addresses out of the adapter lists (GetAdaptersAddresses,
  * GetAdaptersInfo, GetIpAddrTable, GetUnicastIpAddressTable): WebRTC hands a page whatever these
  * list, and listing sends nothing the box's network rules could stop. Private and local addresses
  * stay, so local networking and the relay keep working.
  *
- * Not covered: FileTimeToLocalFileTime (it uses the kernel's own bias), the DHCPv6 DUID (`ipconfig` prints the host's copy from outside the box),
+ * Not covered: GetLocalTime and the other conversions to local time (they use the kernel's own
+ * bias), language IDs and GetLocaleInfo for the default locale, the DHCPv6 DUID (`ipconfig` prints the host's copy from outside the box),
  * NtQueryMultipleValueKey, the SCSI pass-through IOCTLs that can report a disk serial, and
  * NtQueryInformationToken when a program calls ntdll directly instead of GetTokenInformation. The
  * token itself still carries the host's SID for access checks - only what it reports is changed.
@@ -84,24 +87,10 @@ typedef NTSTATUS(NTAPI *P_NtQueryInformationFile)(HANDLE, PIO_STATUS_BLOCK, PVOI
 typedef ULONG(WINAPI *P_GetAdaptersAddresses)(ULONG, ULONG, PVOID, PIP_ADAPTER_ADDRESSES, PULONG);
 typedef ULONG(WINAPI *P_GetAdaptersInfo)(PIP_ADAPTER_INFO, PULONG);
 typedef DWORD(WINAPI *P_GetIpAddrTable)(PMIB_IPADDRTABLE, PULONG, BOOL);
-typedef DWORD(WINAPI *P_EnumDynamicTimeZoneInformation)(DWORD, PDYNAMIC_TIME_ZONE_INFORMATION);
 typedef DWORD(WINAPI *P_GetDynamicTimeZoneInformation)(PDYNAMIC_TIME_ZONE_INFORMATION);
 typedef DWORD(WINAPI *P_GetTimeZoneInformation)(LPTIME_ZONE_INFORMATION);
-typedef void(WINAPI *P_GetLocalTime)(LPSYSTEMTIME);
-typedef BOOL(WINAPI *P_SystemTimeToTzSpecificLocalTime)(const TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME);
-typedef BOOL(WINAPI *P_TzSpecificLocalTimeToSystemTime)(const TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME);
 typedef int(WINAPI *P_GetUserDefaultLocaleName)(LPWSTR, int);
-typedef int(WINAPI *P_GetSystemDefaultLocaleName)(LPWSTR, int);
-typedef LCID(WINAPI *P_GetUserDefaultLCID)(void);
-typedef LCID(WINAPI *P_GetSystemDefaultLCID)(void);
-typedef LANGID(WINAPI *P_GetUserDefaultLangID)(void);
-typedef LANGID(WINAPI *P_GetSystemDefaultLangID)(void);
-typedef LANGID(WINAPI *P_GetUserDefaultUILanguage)(void);
-typedef LANGID(WINAPI *P_GetSystemDefaultUILanguage)(void);
 typedef BOOL(WINAPI *P_GetUserPreferredUILanguages)(DWORD, PULONG, PZZWSTR, PULONG);
-typedef BOOL(WINAPI *P_GetSystemPreferredUILanguages)(DWORD, PULONG, PZZWSTR, PULONG);
-typedef int(WINAPI *P_GetLocaleInfoEx)(LPCWSTR, LCTYPE, LPWSTR, int);
-typedef int(WINAPI *P_GetLocaleInfoW)(LCID, LCTYPE, LPWSTR, int);
 typedef DWORD(WINAPI *P_GetUnicastIpAddressTable)(ADDRESS_FAMILY, PMIB_UNICASTIPADDRESS_TABLE *);
 typedef DWORD(WINAPI *P_GetIfTable)(PMIB_IFTABLE, PULONG, BOOL);
 typedef DWORD(WINAPI *P_GetIfEntry)(PMIB_IFROW);
@@ -182,21 +171,8 @@ static P_GetIpAddrTable sys_GetIpAddrTable;
 static P_GetUnicastIpAddressTable sys_GetUnicastIpAddressTable;
 static PAIR(P_GetDynamicTimeZoneInformation) sys_GetDynamicTimeZoneInformation;
 static PAIR(P_GetTimeZoneInformation) sys_GetTimeZoneInformation;
-static PAIR(P_GetLocalTime) sys_GetLocalTime;
-static PAIR(P_SystemTimeToTzSpecificLocalTime) sys_SystemTimeToTzSpecificLocalTime;
-static PAIR(P_TzSpecificLocalTimeToSystemTime) sys_TzSpecificLocalTimeToSystemTime;
 static PAIR(P_GetUserDefaultLocaleName) sys_GetUserDefaultLocaleName;
-static PAIR(P_GetSystemDefaultLocaleName) sys_GetSystemDefaultLocaleName;
-static PAIR(P_GetUserDefaultLCID) sys_GetUserDefaultLCID;
-static PAIR(P_GetSystemDefaultLCID) sys_GetSystemDefaultLCID;
-static PAIR(P_GetUserDefaultLangID) sys_GetUserDefaultLangID;
-static PAIR(P_GetSystemDefaultLangID) sys_GetSystemDefaultLangID;
-static PAIR(P_GetUserDefaultUILanguage) sys_GetUserDefaultUILanguage;
-static PAIR(P_GetSystemDefaultUILanguage) sys_GetSystemDefaultUILanguage;
 static PAIR(P_GetUserPreferredUILanguages) sys_GetUserPreferredUILanguages;
-static PAIR(P_GetSystemPreferredUILanguages) sys_GetSystemPreferredUILanguages;
-static PAIR(P_GetLocaleInfoEx) sys_GetLocaleInfoEx;
-static PAIR(P_GetLocaleInfoW) sys_GetLocaleInfoW;
 static P_GetIfTable sys_GetIfTable;
 static P_GetIfEntry sys_GetIfEntry;
 static P_GetIfTable2 sys_GetIfTable2;
@@ -241,8 +217,8 @@ static int have_mac;
 static WCHAR id_time_zone[128];
 static DYNAMIC_TIME_ZONE_INFORMATION id_zone;
 static int have_zone;
+static int load_zone(const WCHAR *rule);
 static WCHAR id_locale[LOCALE_NAME_MAX_LENGTH];
-static LCID id_lcid;
 static BYTE id_volume_key[4];
 static int have_volume_serial;
 /* The account the box reports. The name is what the system answers for "who am I"; the SID is
@@ -332,7 +308,7 @@ static void load_account(HMODULE advapi32) {
 
 /* Reads this box's identifiers; without a machine GUID the option is off and nothing is hooked. */
 static int load_identity(HMODULE sbie) {
-    WCHAR own_box[34], image[96], sid[96], hex[64];
+    WCHAR own_box[34], image[96], sid[96], hex[64], rule[200];
     ULONG session = 0;
     P_QueryProcess query_process = (P_QueryProcess)(void *)GetProcAddress(sbie, "SbieApi_QueryProcess");
     P_QueryConf query_conf = (P_QueryConf)(void *)GetProcAddress(sbie, "SbieApi_QueryConf");
@@ -349,8 +325,8 @@ static int load_identity(HMODULE sbie) {
     if (!conf_text(query_conf, own_box, L"HydraUserName", id_user_name, sizeof(id_user_name))) id_user_name[0] = 0;
     if (!conf_text(query_conf, own_box, L"HydraUserSid", id_user_sid, sizeof(id_user_sid))) id_user_sid[0] = 0;
     if (!conf_text(query_conf, own_box, L"HydraTimeZone", id_time_zone, sizeof(id_time_zone))) id_time_zone[0] = 0;
+    have_zone = id_time_zone[0] && conf_text(query_conf, own_box, L"HydraTimeZoneRule", rule, sizeof(rule)) && load_zone(rule);
     if (!conf_text(query_conf, own_box, L"HydraLocale", id_locale, sizeof(id_locale))) id_locale[0] = 0;
-    id_lcid = id_locale[0] ? LocaleNameToLCID(id_locale, 0) : 0;
     return 1;
 }
 
@@ -1870,27 +1846,44 @@ static BOOL WINAPI my_ConvertSidToStringSidA(PSID sid, LPSTR *text) {    void *c
 
 /* --- detours: time zone ------------------------------------------------------ */
 
-/* Finds the account's zone among the system's zone definitions. */
-static int load_zone(HMODULE advapi32) {
-    P_EnumDynamicTimeZoneInformation enumerate =
-        advapi32 ? (P_EnumDynamicTimeZoneInformation)(void *)GetProcAddress(advapi32, "EnumDynamicTimeZoneInformation") : NULL;
-    DWORD i;
-    if (!enumerate || !id_time_zone[0]) return 0;
-    for (i = 0; enumerate(i, &id_zone) == ERROR_SUCCESS; i++)
-        if (lstrcmpiW(id_zone.TimeZoneKeyName, id_time_zone) == 0) return 1;
-    return 0;
+/* Comma-separated whole numbers, exactly `count` of them. */
+static int parse_numbers(const WCHAR *text, LONG *out, int count) {
+    int n = 0, digits;
+    LONG sign, value;
+    while (n < count) {
+        sign = 1; value = 0; digits = 0;
+        if (*text == '-') { sign = -1; text++; }
+        while (*text >= '0' && *text <= '9') {
+            if (++digits > 6) return 0;
+            value = value * 10 + (*text++ - '0');
+        }
+        if (!digits) return 0;
+        out[n++] = sign * value;
+        if (n < count && *text++ != ',') return 0;
+    }
+    return *text == 0;
 }
 
-/* The zone's rules for this year (some zones changed theirs over the years). */
-static void zone_now(TIME_ZONE_INFORMATION *out) {
-    SYSTEMTIME utc;
-    GetSystemTime(&utc);
-    if (!GetTimeZoneInformationForYear(utc.wYear, &id_zone, out)) memcpy(out, &id_zone, sizeof(*out));
-}
-
-static BOOL to_local(const TIME_ZONE_INFORMATION *zone, const SYSTEMTIME *utc, LPSYSTEMTIME local) {
-    P_SystemTimeToTzSpecificLocalTime real = REAL(sys_SystemTimeToTzSpecificLocalTime);
-    return (real ? real : SystemTimeToTzSpecificLocalTime)(zone, utc, local);
+/* `HydraTimeZoneRule`: the bias, standard bias and daylight bias, then the standard and the
+   daylight start (eight SYSTEMTIME fields each), as Hydra read them for this year (sandbox.rs).
+   Nothing is read from the system: a Chromium child process may not open the registry. */
+static int load_zone(const WCHAR *rule) {
+    LONG v[19];
+    WORD *standard = (WORD *)&id_zone.StandardDate, *daylight = (WORD *)&id_zone.DaylightDate;
+    int i;
+    if (!parse_numbers(rule, v, 19)) return 0;
+    memset(&id_zone, 0, sizeof(id_zone));
+    id_zone.Bias = v[0];
+    id_zone.StandardBias = v[1];
+    id_zone.DaylightBias = v[2];
+    for (i = 0; i < 8; i++) {
+        standard[i] = (WORD)v[3 + i];
+        daylight[i] = (WORD)v[11 + i];
+    }
+    lstrcpynW(id_zone.TimeZoneKeyName, id_time_zone, 128);
+    lstrcpynW(id_zone.StandardName, id_time_zone, 32);
+    lstrcpynW(id_zone.DaylightName, id_time_zone, 32);
+    return 1;
 }
 
 /* Standard or daylight time now, as GetTimeZoneInformation reports it. */
@@ -1900,7 +1893,7 @@ static DWORD zone_state(const TIME_ZONE_INFORMATION *zone) {
     LONGLONG minutes;
     if (!zone->StandardDate.wMonth) return TIME_ZONE_ID_UNKNOWN;
     GetSystemTime(&utc);
-    if (!to_local(zone, &utc, &local) || !SystemTimeToFileTime(&utc, &u) || !SystemTimeToFileTime(&local, &l))
+    if (!SystemTimeToTzSpecificLocalTime(zone, &utc, &local) || !SystemTimeToFileTime(&utc, &u) || !SystemTimeToFileTime(&local, &l))
         return TIME_ZONE_ID_STANDARD;
     minutes = ((LONGLONG)(((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime) -
                (LONGLONG)(((ULONGLONG)l.dwHighDateTime << 32) | l.dwLowDateTime)) / 600000000;
@@ -1909,78 +1902,39 @@ static DWORD zone_state(const TIME_ZONE_INFORMATION *zone) {
 }
 
 static DWORD WINAPI my_GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION out) {
-    TIME_ZONE_INFORMATION now;
     if (!have_zone || !out) return REAL(sys_GetDynamicTimeZoneInformation)(out);
-    zone_now(&now);
     *out = id_zone;
-    memcpy(out, &now, sizeof(now));
-    return zone_state(&now);
+    return zone_state((const TIME_ZONE_INFORMATION *)&id_zone);
 }
 
 static DWORD WINAPI my_GetTimeZoneInformation(LPTIME_ZONE_INFORMATION out) {
     if (!have_zone || !out) return REAL(sys_GetTimeZoneInformation)(out);
-    zone_now(out);
+    memcpy(out, &id_zone, sizeof(*out));
     return zone_state(out);
-}
-
-static void WINAPI my_GetLocalTime(LPSYSTEMTIME out) {
-    SYSTEMTIME utc;
-    TIME_ZONE_INFORMATION now;
-    if (have_zone && out) {
-        GetSystemTime(&utc);
-        zone_now(&now);
-        if (to_local(&now, &utc, out)) return;
-    }
-    REAL(sys_GetLocalTime)(out);
-}
-
-/* Without a zone of their own these convert with the local one, which is the account's here. */
-static BOOL WINAPI my_SystemTimeToTzSpecificLocalTime(const TIME_ZONE_INFORMATION *zone, const SYSTEMTIME *utc,
-                                                      LPSYSTEMTIME local) {
-    TIME_ZONE_INFORMATION now;
-    if (have_zone && !zone) { zone_now(&now); zone = &now; }
-    return REAL(sys_SystemTimeToTzSpecificLocalTime)(zone, utc, local);
-}
-
-static BOOL WINAPI my_TzSpecificLocalTimeToSystemTime(const TIME_ZONE_INFORMATION *zone, const SYSTEMTIME *local,
-                                                      LPSYSTEMTIME utc) {
-    TIME_ZONE_INFORMATION now;
-    if (have_zone && !zone) { zone_now(&now); zone = &now; }
-    return REAL(sys_TzSpecificLocalTimeToSystemTime)(zone, local, utc);
 }
 
 /* --- detours: language ------------------------------------------------------- */
 
-static int answer_locale(LPWSTR out, int size) {
+static int WINAPI my_GetUserDefaultLocaleName(LPWSTR out, int size) {
     int needed = lstrlenW(id_locale) + 1;
+    if (!id_locale[0]) return REAL(sys_GetUserDefaultLocaleName)(out, size);
     if (!out || size <= 0) return needed;
     if (size < needed) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return 0; }
     lstrcpynW(out, id_locale, size);
     return needed;
 }
 
-static int WINAPI my_GetUserDefaultLocaleName(LPWSTR out, int size) {
-    return id_lcid ? answer_locale(out, size) : REAL(sys_GetUserDefaultLocaleName)(out, size);
-}
-static int WINAPI my_GetSystemDefaultLocaleName(LPWSTR out, int size) {
-    return id_lcid ? answer_locale(out, size) : REAL(sys_GetSystemDefaultLocaleName)(out, size);
-}
-static LCID WINAPI my_GetUserDefaultLCID(void) { return id_lcid ? id_lcid : REAL(sys_GetUserDefaultLCID)(); }
-static LCID WINAPI my_GetSystemDefaultLCID(void) { return id_lcid ? id_lcid : REAL(sys_GetSystemDefaultLCID)(); }
-static LANGID WINAPI my_GetUserDefaultLangID(void) { return id_lcid ? LANGIDFROMLCID(id_lcid) : REAL(sys_GetUserDefaultLangID)(); }
-static LANGID WINAPI my_GetSystemDefaultLangID(void) { return id_lcid ? LANGIDFROMLCID(id_lcid) : REAL(sys_GetSystemDefaultLangID)(); }
-static LANGID WINAPI my_GetUserDefaultUILanguage(void) { return id_lcid ? LANGIDFROMLCID(id_lcid) : REAL(sys_GetUserDefaultUILanguage)(); }
-static LANGID WINAPI my_GetSystemDefaultUILanguage(void) { return id_lcid ? LANGIDFROMLCID(id_lcid) : REAL(sys_GetSystemDefaultUILanguage)(); }
-
 /* The preferred UI languages: just the account's, as a name or a hex language ID, in a list ended
    by an empty string. With no buffer the call only reports the size it needs. */
-static BOOL answer_languages(DWORD flags, PULONG count, PZZWSTR buffer, PULONG size) {
+static BOOL WINAPI my_GetUserPreferredUILanguages(DWORD flags, PULONG count, PZZWSTR buffer, PULONG size) {
+    static const WCHAR hex[] = L"0123456789ABCDEF";
     WCHAR one[LOCALE_NAME_MAX_LENGTH];
     ULONG needed;
+    LANGID lang;
+    if (!id_locale[0]) return REAL(sys_GetUserPreferredUILanguages)(flags, count, buffer, size);
     if (!count || !size) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     if (flags & MUI_LANGUAGE_ID) {
-        static const WCHAR hex[] = L"0123456789ABCDEF";
-        LANGID lang = LANGIDFROMLCID(id_lcid);
+        lang = LANGIDFROMLCID(LocaleNameToLCID(id_locale, 0));
         one[0] = hex[(lang >> 12) & 15]; one[1] = hex[(lang >> 8) & 15]; one[2] = hex[(lang >> 4) & 15]; one[3] = hex[lang & 15];
         one[4] = 0;
     } else {
@@ -1994,23 +1948,6 @@ static BOOL answer_languages(DWORD flags, PULONG count, PZZWSTR buffer, PULONG s
     buffer[needed - 1] = 0;
     *size = needed;
     return TRUE;
-}
-
-static BOOL WINAPI my_GetUserPreferredUILanguages(DWORD flags, PULONG count, PZZWSTR buffer, PULONG size) {
-    return id_lcid ? answer_languages(flags, count, buffer, size) : REAL(sys_GetUserPreferredUILanguages)(flags, count, buffer, size);
-}
-static BOOL WINAPI my_GetSystemPreferredUILanguages(DWORD flags, PULONG count, PZZWSTR buffer, PULONG size) {
-    return id_lcid ? answer_languages(flags, count, buffer, size) : REAL(sys_GetSystemPreferredUILanguages)(flags, count, buffer, size);
-}
-
-/* Formats and names asked of the default locale come from the account's. */
-static int WINAPI my_GetLocaleInfoEx(LPCWSTR name, LCTYPE type, LPWSTR data, int size) {
-    if (id_lcid && (!name || lstrcmpiW(name, LOCALE_NAME_SYSTEM_DEFAULT) == 0)) name = id_locale;
-    return REAL(sys_GetLocaleInfoEx)(name, type, data, size);
-}
-static int WINAPI my_GetLocaleInfoW(LCID locale, LCTYPE type, LPWSTR data, int size) {
-    if (id_lcid && (locale == LOCALE_USER_DEFAULT || locale == LOCALE_SYSTEM_DEFAULT)) locale = id_lcid;
-    return REAL(sys_GetLocaleInfoW)(locale, type, data, size);
 }
 
 #define HOOK(module, name) hook(sbie_hook, module, self, #name, (void *)my_##name, (void **)&sys_##name)
@@ -2081,27 +2018,13 @@ __declspec(dllexport) void __stdcall InjectDllMain(HINSTANCE sbie, ULONG_PTR unu
     /* The in-process sources of the board, BIOS and disk serials and the product UUID. WMI is
        closed off in the box, so these are what is left of them. */
     /* The zone and language of the account, when the box has them. */
-    have_zone = load_zone(advapi32);
     if (have_zone) {
         HOOK_PAIR(kernel32, kernelbase, GetDynamicTimeZoneInformation);
         HOOK_PAIR(kernel32, kernelbase, GetTimeZoneInformation);
-        HOOK_PAIR(kernel32, kernelbase, GetLocalTime);
-        HOOK_PAIR(kernel32, kernelbase, SystemTimeToTzSpecificLocalTime);
-        HOOK_PAIR(kernel32, kernelbase, TzSpecificLocalTimeToSystemTime);
     }
-    if (id_lcid) {
+    if (id_locale[0]) {
         HOOK_PAIR(kernel32, kernelbase, GetUserDefaultLocaleName);
-        HOOK_PAIR(kernel32, kernelbase, GetSystemDefaultLocaleName);
-        HOOK_PAIR(kernel32, kernelbase, GetUserDefaultLCID);
-        HOOK_PAIR(kernel32, kernelbase, GetSystemDefaultLCID);
-        HOOK_PAIR(kernel32, kernelbase, GetUserDefaultLangID);
-        HOOK_PAIR(kernel32, kernelbase, GetSystemDefaultLangID);
-        HOOK_PAIR(kernel32, kernelbase, GetUserDefaultUILanguage);
-        HOOK_PAIR(kernel32, kernelbase, GetSystemDefaultUILanguage);
         HOOK_PAIR(kernel32, kernelbase, GetUserPreferredUILanguages);
-        HOOK_PAIR(kernel32, kernelbase, GetSystemPreferredUILanguages);
-        HOOK_PAIR(kernel32, kernelbase, GetLocaleInfoEx);
-        HOOK_PAIR(kernel32, kernelbase, GetLocaleInfoW);
     }
     HOOK_PAIR(kernel32, kernelbase, GetSystemFirmwareTable);
     HOOK_PAIR(kernel32, kernelbase, DeviceIoControl);

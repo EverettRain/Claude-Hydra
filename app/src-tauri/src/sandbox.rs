@@ -250,7 +250,7 @@ pub fn forget(id: &str) {
         // not answer with the previous account's device if the wildcard wipe ever misses them.
         for key in [
             "HydraMachineGuid", "HydraHwProfileGuid", "HydraComputerName", "HydraMac", "HydraVolumeSerial",
-            "HydraUserName", "HydraUserSid", "HydraTimeZone", "HydraLocale",
+            "HydraUserName", "HydraUserSid", "HydraTimeZone", "HydraTimeZoneRule", "HydraLocale",
         ] {
             let _ = ini(&dir, &["set", &name, key, ""]);
         }
@@ -321,6 +321,12 @@ pub fn configure_quiet_start() -> Result<(), String> {
     ini(&dir, &["append", section, "SbieCtrl_HideMessage", detail])
 }
 
+/// A zone's rules as `idguard.c` reads them: the numbers, comma-separated.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rule_text(rule: &[i32]) -> String {
+    rule.iter().map(i32::to_string).collect::<Vec<_>>().join(",")
+}
+
 /// Creates or updates the account's box. `relay_port` = the only address the box may reach;
 /// `None` (no node) leaves the network unrestricted. `zone` (IANA) and `locale` are what the
 /// programs in the box are told the local time zone and language are; `None` / "" = the system's.
@@ -361,12 +367,15 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, zone: Option
     set("HydraUserName", &ids.user_name)?;
     set("HydraUserSid", &ids.user_sid)?;
     // The zone a page reads from Chromium (and Node from its ICU) comes from the system, not `TZ`:
-    // the guard answers with the account's, by its Windows name.
+    // the guard answers with the account's, by its Windows name and with this year's rules read
+    // here, since a Chromium child process in the box may not read the registry itself.
     let windows_zone = zone.and_then(crate::sys::windows_zone);
-    if let (Some(zone), None) = (zone, &windows_zone) {
+    let rule = windows_zone.as_deref().and_then(crate::sys::zone_rule).map(|r| rule_text(&r));
+    if let (Some(zone), None) = (zone, &rule) {
         crate::paths::append_log("hydra-error.log", &format!("sandbox {id}: no Windows time zone for {zone}; the box keeps the system's"));
     }
-    set("HydraTimeZone", windows_zone.as_deref().unwrap_or_default())?;
+    set("HydraTimeZone", rule.as_ref().and(windows_zone.as_deref()).unwrap_or_default())?;
+    set("HydraTimeZoneRule", rule.as_deref().unwrap_or_default())?;
     set("HydraLocale", locale)?;
     // WMI answers hardware questions from `WmiPrvSE.exe`, a service outside the box, so the box
     // cannot derive those values: board, BIOS and disk-drive serials and the SMBIOS UUID would come
@@ -1548,5 +1557,49 @@ if ($needed -gt 0) {
         let unreadable: Vec<&str> = got.lines().filter(|l| l.ends_with("=-1")).collect();
         assert_eq!(public, ["8.8.8.8=1", "112.86.1.2=1", "172.32.0.1=1", "100.128.0.1=1", "198.20.0.1=1", "2409::=1"], "{got}");
         assert_eq!(unreadable, ["1.2.3=-1", "256.1.1.1=-1"], "not addresses: {got}");
+    }
+
+    /// The zone rule Hydra writes (`rule_text`) is the one `idguard.c` reads (`parse_numbers`,
+    /// compiled from the guard's source and run); anything malformed leaves the zone alone.
+    /// Skipped where no C compiler is installed.
+    #[test]
+    fn the_guard_reads_the_zone_rule_hydra_writes() {
+        // Arrange
+        let pacific = [480, 0, -60, 0, 11, 0, 1, 2, 0, 0, 0, 0, 3, 0, 2, 2, 0, 0, 0];
+        let tokyo = [-540, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let inputs = [super::rule_text(&pacific), super::rule_text(&tokyo), "1,2,3".into(), format!("{},9", super::rule_text(&tokyo)), "480,x".into(), String::new()];
+        let source = include_str!("idguard.c");
+        let start = source.find("static int parse_numbers").unwrap();
+        let end = start + source[start..].find("/* `HydraTimeZoneRule`").unwrap();
+        let program = format!(
+            "#include <stdio.h>\ntypedef unsigned short WCHAR;\ntypedef long LONG;\n{}\n{}",
+            &source[start..end],
+            r#"int main(int argc, char **argv) {
+    int a, i;
+    for (a = 1; a < argc; a++) {
+        WCHAR text[256]; LONG v[19];
+        for (i = 0; argv[a][i] && i < 255; i++) text[i] = (WCHAR)argv[a][i];
+        text[i] = 0;
+        if (!parse_numbers(text, v, 19)) { printf("invalid\n"); continue; }
+        for (i = 0; i < 19; i++) printf(i ? ",%ld" : "%ld", v[i]);
+        printf("\n");
+    }
+    return 0;
+}
+"#
+        );
+        let dir = std::env::temp_dir().join(format!("hydra-zone-rule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rule.c"), program).unwrap();
+        let Ok(built) = std::process::Command::new("cc").current_dir(&dir).args(["rule.c", "-o", "rule"]).status() else { return };
+
+        // Act
+        assert!(built.success(), "the rule parser did not compile");
+        let out = std::process::Command::new(dir.join("rule")).args(&inputs).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Assert
+        let got: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect();
+        assert_eq!(got, [super::rule_text(&pacific), super::rule_text(&tokyo), "invalid".into(), "invalid".into(), "invalid".into(), "invalid".into()]);
     }
 }

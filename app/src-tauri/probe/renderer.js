@@ -119,6 +119,8 @@ function rows(data, page, shared) {
 
   add('启动环境', '保护', 'info', PROTECTION[x.protection] || '未启用');
   add('启动环境', '系统级代理', 'info', fakeIp ? '检测到（TUN / fake IP）：直连测试显示的出口取决于它的规则' : r.nodeDnsLookup.ok ? '未检测到' : '无法判断（本机 DNS 查询被拦截）');
+  add('启动环境', '主进程时区', tzVerdict(info.timezone), `${info.timezone}${tzWanted ? `，账号应为 ${tzWanted}` : ''}`);
+  add('启动环境', '系统语言', 'info', [info.systemLocale, (info.preferredLanguages || []).join(', ')].filter(Boolean).join('　首选：') || '未知');
   add('启动环境', '版本', 'info', `Electron ${info.electron} · Chromium ${info.chrome} · Node ${info.node} · ${info.platform}`);
   add('启动环境', '数据目录', 'info', local(info.userData));
   add('启动环境', '启动开关', 'info', Object.entries(info.switches).map(([k, v]) => v === true ? `--${k}` : `--${k}=${local(v)}`).join(' ') || '无');
