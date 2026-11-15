@@ -115,21 +115,24 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
         <section>
           <div className="group-label">出口保护与隔离</div>
           <div className="list-card">
-            <Line label="出口规则">
-              <Select aria-label="出口规则" value={env.exitRule} disabled={!env.node} onChange={(e) => setEnv({ ...env, exitRule: e.target.value as ExitRule })}>
-                {EXIT_RULES.map(([v, label]) => <option key={v} value={v}>{v === "" && env.allowCn ? "不限" : label}</option>)}
-              </Select>
-            </Line>
-            {env.node && env.exitRule && (
-              <div className="flex items-center gap-2 px-4 pb-2 pl-[116px] text-[11.5px] text-muted">
-                <span className="min-w-0 flex-1">{baseline ? `已绑定出口 ${baseline}` : "尚未绑定：第一次通过检测的出口会成为基准。"}</span>
-                {id && JSON.stringify(env.node) === JSON.stringify(initial?.node ?? null) && (
-                  <Button variant="outline" size="sm" disabled={rebinding} onClick={rebind} title="以节点当前出口为新基准，并恢复被切断的账号">
-                    {rebinding ? "检测中…" : "重新绑定"}
-                  </Button>
-                )}
-              </div>
-            )}
+            {/* One card row with its note: `.list-card` draws a line between its children. */}
+            <div>
+              <Line label="出口规则">
+                <Select aria-label="出口规则" value={env.exitRule} disabled={!env.node} onChange={(e) => setEnv({ ...env, exitRule: e.target.value as ExitRule })}>
+                  {EXIT_RULES.map(([v, label]) => <option key={v} value={v}>{v === "" && env.allowCn ? "不限" : label}</option>)}
+                </Select>
+              </Line>
+              {env.node && env.exitRule && (
+                <div className="flex items-center gap-2 px-4 pb-2 pl-[116px] text-[11.5px] text-muted">
+                  <span className="min-w-0 flex-1">{baseline ? `已绑定出口 ${baseline}` : "尚未绑定：第一次通过检测的出口会成为基准。"}</span>
+                  {id && JSON.stringify(env.node) === JSON.stringify(initial?.node ?? null) && (
+                    <Button variant="outline" size="sm" disabled={rebinding} onClick={rebind} title="以节点当前出口为新基准，并恢复被切断的账号">
+                      {rebinding ? "检测中…" : "重新绑定"}
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
             <Line label="放行不支持地区">
               <Switch checked={env.allowCn} onCheckedChange={(allowCn) => setEnv({ ...env, allowCn })} label="放行 Claude 不提供服务地区的出口" />
               <span className={env.allowCn ? "text-[11.5px] text-warn" : "text-[11.5px] text-muted"} title="中国大陆、香港、澳门、俄罗斯、白俄罗斯、伊朗、朝鲜、古巴、叙利亚">
@@ -142,24 +145,27 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
                 ? "沙箱隔离时强制开启：共用 ~/.claude.json 会让各沙箱报出同一个 Claude Code 设备 ID"
                 : env.separateCode ? "每个账号有自己的 Claude Code 登录、配置与会话目录" : "与本机的 Claude Code 共用登录和会话（~/.claude）"}</span>
             </Line>
-            <Line label="沙箱隔离">
-              <Switch checked={env.isolation === "sandboxie"} disabled={!sandbox?.ok && env.isolation !== "sandboxie"} onCheckedChange={(v) => setEnv({ ...env, isolation: v ? "sandboxie" : "" })} label="在 Sandboxie-Plus 沙箱中运行" />
-              <span className="text-[11.5px] text-muted">{env.isolation === "sandboxie" ? "在 Sandboxie-Plus 沙箱中运行" : "不使用沙箱"}</span>
-            </Line>
-            <p className="px-4 pb-3 text-[11.5px] leading-relaxed text-muted">
-              {env.isolation === "sandboxie" && sandbox?.ok && <span className="mb-2 block">
-                <Button variant="outline" disabled={quietStatus !== "idle"} onClick={async () => {
-                  setQuietStatus("applying");
-                  try { await api.configureQuietSandbox(); setQuietStatus("done"); }
-                  catch (e) { setError(errorText(e)); setQuietStatus("idle"); }
-                }}>{quietStatus === "done" ? "已应用静默启动" : quietStatus === "applying" ? "正在应用…" : "启用沙箱静默启动"}</Button>
-                <span className="mt-1 block">立即应用到当前 Windows 用户的所有沙箱。启动时不自动打开 Sandboxie Control，并隐藏 ConsoleInit (C00000D4) 提示。</span>
-              </span>}
-              {env.isolation === "sandboxie"
-                ? "沙箱中只允许连接本账号的本地中继，任何绕过代理的进程都会断网；文件和注册表写入留在沙箱内（账号数据目录除外）。沙箱内无法经本机 DNS 解析外部域名，域名只经代理解析。商店版会先复制一份到 Hydra 数据目录再装入沙箱（首次较慢）；系统默认账号不能使用环境。启动后会核实 Claude 确实在沙箱中运行，否则立即关闭。"
-                : "不用沙箱时：Claude 与它启动的工具都经本地中继出网（无直连回退），出口不合规则时会自动断网；但忽略代理设置的程序仍可能直连。"}
-              {sandbox && !sandbox.ok && <span className="block text-warn">{sandbox.text}</span>}
-            </p>
+            {/* One card row with its note: `.list-card` draws a line between its children. */}
+            <div>
+              <Line label="沙箱隔离">
+                <Switch checked={env.isolation === "sandboxie"} disabled={!sandbox?.ok && env.isolation !== "sandboxie"} onCheckedChange={(v) => setEnv({ ...env, isolation: v ? "sandboxie" : "" })} label="在 Sandboxie-Plus 沙箱中运行" />
+                <span className="text-[11.5px] text-muted">{env.isolation === "sandboxie" ? "在 Sandboxie-Plus 沙箱中运行" : "不使用沙箱"}</span>
+              </Line>
+              <p className="px-4 pb-3 text-[11.5px] leading-relaxed text-muted">
+                {env.isolation === "sandboxie" && sandbox?.ok && <span className="mb-2 block">
+                  <Button variant="outline" disabled={quietStatus !== "idle"} onClick={async () => {
+                    setQuietStatus("applying");
+                    try { await api.configureQuietSandbox(); setQuietStatus("done"); }
+                    catch (e) { setError(errorText(e)); setQuietStatus("idle"); }
+                  }}>{quietStatus === "done" ? "已应用静默启动" : quietStatus === "applying" ? "正在应用…" : "启用沙箱静默启动"}</Button>
+                  <span className="mt-1 block">立即应用到当前 Windows 用户的所有沙箱。启动时不自动打开 Sandboxie Control，并隐藏 ConsoleInit (C00000D4) 提示。</span>
+                </span>}
+                {env.isolation === "sandboxie"
+                  ? "沙箱中只允许连接本账号的本地中继，任何绕过代理的进程都会断网；文件和注册表写入留在沙箱内（账号数据目录除外）。沙箱内无法经本机 DNS 解析外部域名，域名只经代理解析。商店版会先复制一份到 Hydra 数据目录再装入沙箱（首次较慢）；系统默认账号不能使用环境。启动后会核实 Claude 确实在沙箱中运行，否则立即关闭。"
+                  : "不用沙箱时：Claude 与它启动的工具都经本地中继出网（无直连回退），出口不合规则时会自动断网；但忽略代理设置的程序仍可能直连。"}
+                {sandbox && !sandbox.ok && <span className="block text-warn">{sandbox.text}</span>}
+              </p>
+            </div>
           </div>
         </section>
 

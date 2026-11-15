@@ -178,31 +178,34 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
             <Input aria-label="代理密码" type="password" value={n.password} maxLength={200} placeholder="密码（选填）" autoComplete="new-password" onChange={(e) => set({ password: e.target.value })} />
           </Row>
           </>}
-          <Row label="前置代理" hint={`选填，链式代理：本机 → 前置代理 → 上面的节点 → 目标网站。出口 IP 仍是上面的节点，前置代理只负责中转。例如家宽落地：前置选机场的 Clash 节点，上面填家宽代理。最多 ${MAX_FRONT} 级；有前置代理时由内置 Mihomo 内核建立链路。`}>
-            {chain.length > 0 && (
-              <span className="selectable min-w-0 flex-1 truncate font-mono text-xs" title={chain.map(hopLabel).join(" ← ")}>
-                {chain.map(hopLabel).join(" ← ")}
-              </span>
+          {/* One card row with its notes: `.list-card` draws a line between its children. */}
+          <div>
+            <Row label="前置代理" hint={`选填，链式代理：本机 → 前置代理 → 上面的节点 → 目标网站。出口 IP 仍是上面的节点，前置代理只负责中转。例如家宽落地：前置选机场的 Clash 节点，上面填家宽代理。最多 ${MAX_FRONT} 级；有前置代理时由内置 Mihomo 内核建立链路。`}>
+              {chain.length > 0 && (
+                <span className="selectable min-w-0 flex-1 truncate font-mono text-xs" title={chain.map(hopLabel).join(" ← ")}>
+                  {chain.map(hopLabel).join(" ← ")}
+                </span>
+              )}
+              {!locked && chain.length < MAX_FRONT && (
+                <Input aria-label="前置代理" className={cn("font-mono text-xs", chain.length > 0 && "w-44 shrink-0")} value={frontDraft}
+                  placeholder={chain.length ? "再加一级（更靠近本机）" : "选填：socks5://主机:端口:账号:密码"}
+                  onChange={(e) => setFrontDraft(e.target.value)}
+                  onPaste={(e) => { if (addFront(e.clipboardData.getData("text"))) e.preventDefault(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFront(frontDraft); } }}
+                  onBlur={() => addFront(frontDraft)} />
+              )}
+              {chain.length > 0 && !locked && (
+                <Button variant="outline" size="sm" onClick={() => set({ via: null })}>清除</Button>
+              )}
+            </Row>
+            {locked && <p className="px-4 pb-2 pl-[116px] text-[11.5px] text-muted">前置节点来自订阅（dialer-proxy），随所选节点一起保存；要更换请在订阅中另选节点。</p>}
+            {mode === "custom" && (
+              <div className="pl-[100px]">
+                <p className="px-4 pt-1 text-[11.5px] text-muted">也可以从 Clash 订阅中选一个节点作为前置（最靠近本机的一跳），例如家宽落地：本机 → 机场节点 → 上面的家宽代理 → 目标网站。</p>
+                <ClashImport asFront subscription={subscription} onSubscriptionChange={onSubscriptionChange} node={subscriptionFront} choose={chooseFront} />
+              </div>
             )}
-            {!locked && chain.length < MAX_FRONT && (
-              <Input aria-label="前置代理" className={cn("font-mono text-xs", chain.length > 0 && "w-44 shrink-0")} value={frontDraft}
-                placeholder={chain.length ? "再加一级（更靠近本机）" : "选填：socks5://主机:端口:账号:密码"}
-                onChange={(e) => setFrontDraft(e.target.value)}
-                onPaste={(e) => { if (addFront(e.clipboardData.getData("text"))) e.preventDefault(); }}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFront(frontDraft); } }}
-                onBlur={() => addFront(frontDraft)} />
-            )}
-            {chain.length > 0 && !locked && (
-              <Button variant="outline" size="sm" onClick={() => set({ via: null })}>清除</Button>
-            )}
-          </Row>
-          {locked && <p className="px-4 pb-2 pl-[116px] text-[11.5px] text-muted">前置节点来自订阅（dialer-proxy），随所选节点一起保存；要更换请在订阅中另选节点。</p>}
-          {mode === "custom" && (
-            <div className="pl-[100px]">
-              <p className="px-4 pt-1 text-[11.5px] text-muted">也可以从 Clash 订阅中选一个节点作为前置（最靠近本机的一跳），例如家宽落地：本机 → 机场节点 → 上面的家宽代理 → 目标网站。</p>
-              <ClashImport asFront subscription={subscription} onSubscriptionChange={onSubscriptionChange} node={subscriptionFront} choose={chooseFront} />
-            </div>
-          )}
+          </div>
           <Row label="出口检测" hint="经节点访问所选服务，检测出口 IP、地区与时区。IP 协议选 IPv6 时节点须提供 IPv6 出口。">
             <Select aria-label="IP查询渠道" value={n.geoChannel} onChange={(e) => set({ geoChannel: e.target.value as NodeConfig["geoChannel"] })}>
               <option value="ipinfo">ipinfo.io</option>
@@ -239,28 +242,31 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
         </>
       )}
 
-      <Row label="时区" hint="通过 TZ 环境变量设置。macOS 上窗口与子进程均生效；Windows 上 Claude 窗口可能仍显示系统时区。">
-        <Segmented label="时区" value={tzMode} options={[["proxy", checkedTz ?? "跟随代理 IP"], ["system", "跟随系统"], ["custom", "自定义"]]}
-          onChange={(v) => onTimezoneChange(v === "custom" ? checkedTz || lastExit?.timezone || "Asia/Tokyo" : v)} />
-      </Row>
-      {tzMode === "custom" && (
-        <Row label="">
-          <Input aria-label="自定义时区" list={`${idPrefix}-tz-list`} className="font-mono text-xs" value={timezone} placeholder="IANA 时区，例如 Asia/Tokyo" onChange={(e) => onTimezoneChange(e.target.value)} />
-          <datalist id={`${idPrefix}-tz-list`}>{COMMON_TIMEZONES.map((t) => <option key={t} value={t} />)}</datalist>
+      {/* One card row with its notes: `.list-card` draws a line between its children. */}
+      <div>
+        <Row label="时区" hint="通过 TZ 环境变量设置。macOS 上窗口与子进程均生效；Windows 上 Claude 窗口可能仍显示系统时区。">
+          <Segmented label="时区" value={tzMode} options={[["proxy", checkedTz ?? "跟随代理 IP"], ["system", "跟随系统"], ["custom", "自定义"]]}
+            onChange={(v) => onTimezoneChange(v === "custom" ? checkedTz || lastExit?.timezone || "Asia/Tokyo" : v)} />
         </Row>
-      )}
-      {tzMode === "proxy" && node && checkedTz && (
-        <div className="flex items-center gap-2.5 px-4 py-2 text-[11.5px] text-fg-2">
-          <Clock className="h-4 w-4 shrink-0 text-muted" />
-          <p>跟随代理 IP，已匹配时区：<span className="selectable font-mono">{checkedTz}</span></p>
-        </div>
-      )}
-      {(lastExit || (tzMode === "proxy" && !node)) && (
-        <div className="px-4 py-2 text-[11.5px] text-muted">
-          {tzMode === "proxy" && !node && <p>未设置代理时，“跟随代理 IP”等同于跟随系统。</p>}
-          {lastExit && <p>上次启动检测：{exitText(lastExit)}（{new Date(lastExit.checkedAt).toLocaleString()}）</p>}
-        </div>
-      )}
+        {tzMode === "custom" && (
+          <Row label="">
+            <Input aria-label="自定义时区" list={`${idPrefix}-tz-list`} className="font-mono text-xs" value={timezone} placeholder="IANA 时区，例如 Asia/Tokyo" onChange={(e) => onTimezoneChange(e.target.value)} />
+            <datalist id={`${idPrefix}-tz-list`}>{COMMON_TIMEZONES.map((t) => <option key={t} value={t} />)}</datalist>
+          </Row>
+        )}
+        {tzMode === "proxy" && node && checkedTz && (
+          <div className="flex items-center gap-2.5 px-4 py-2 text-[11.5px] text-fg-2">
+            <Clock className="h-4 w-4 shrink-0 text-muted" />
+            <p>跟随代理 IP，已匹配时区：<span className="selectable font-mono">{checkedTz}</span></p>
+          </div>
+        )}
+        {(lastExit || (tzMode === "proxy" && !node)) && (
+          <div className="px-4 py-2 text-[11.5px] text-muted">
+            {tzMode === "proxy" && !node && <p>未设置代理时，“跟随代理 IP”等同于跟随系统。</p>}
+            {lastExit && <p>上次启动检测：{exitText(lastExit)}（{new Date(lastExit.checkedAt).toLocaleString()}）</p>}
+          </div>
+        )}
+      </div>
     </fieldset>
   );
 }
