@@ -6,7 +6,9 @@
 
 **同时运行多个 Claude 桌面端账号，每个账号配置防泄漏策略，拥有独立的数据目录、代理节点与时区。**
 
-基于 Tauri 2（Rust + React）构建，支持 Windows 与 macOS。
+基于 Tauri 2（Rust + React）构建，支持 Windows 与 macOS。防泄漏效果可以用内置的 [模拟测试](#模拟测试) 自己检查。
+
+Fork 自 [jin-yu-liu/Claude-Hydra](https://github.com/jin-yu-liu/Claude-Hydra)。本项目是第三方开源工具，与 Anthropic 无关联。
 
 ![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?style=flat-square&logo=windows)
 ![macOS](https://img.shields.io/badge/macOS-11%2B-000000?style=flat-square&logo=apple)
@@ -48,7 +50,7 @@
 | 模拟测试 | 不需要安装 Claude：按账号的启动方式运行一个小型 Electron 探针，逐项检查每条网络路径是否经节点，可对比使用与不使用保护 |
 | 时区同步 | 时区可跟随代理出口、跟随系统或手动指定；确认出口后直接显示具体时区 |
 | 仪表板 | 启动首页：容器账号的 token 消耗、API 等价成本、活动热力图与趋势，以及各容器账号的 5 小时与本周额度 |
-| 网页端 | 每个账号独立的浏览器：经该账号的节点联网，时区、语言与页面指纹跟随账号，Cookie 互不相通 |
+| 网页端 | 每个账号独立的浏览器：经该账号的节点联网，时区与语言跟随账号，硬件指纹保持本机真实值，Cookie 互不相通 |
 | 配置管理 | 浏览、阅读、迁移和导出本机、桌面版账号与容器的 Claude Code 会话；管理 CLAUDE.md、settings.json、技能、命令、MCP 与插件 |
 | Claude Code 容器 | 借助用户自装的 OrbStack（macOS）或 Docker Desktop（Windows），在容器中运行 Claude Code；网络只经环境的代理节点，UDP / IPv6 / 直连全部阻断 |
 
@@ -141,6 +143,10 @@ Claude 不接受调试开关，无法直接看到它的每条网络路径实际�
 
 - macOS 的保护是 Seatbelt（`sandbox-exec`）：探针及其子进程只能连本机中继端口，系统 DNS 服务与其他网络连接都被拒绝。macOS 不允许在沙箱里再建沙箱，而 Chromium 会给自己的每个子进程建沙箱，所以探针在这个模式下关闭了 Chromium 自身的沙箱；同样的原因，Seatbelt 不能用于整个 Claude 桌面版（它的窗口加载线上页面，不应关闭自身沙箱）。启动输出记录在 `probe/seatbelt.log`。
 - Windows 的保护是这个环境的 Sandboxie 沙箱，与开启「沙箱隔离」的账号相同：只放行中继，并加载 Hydra 的 DNS 与身份保护（时区与系统语言跟随环境，替换机器标识，隐藏网卡上的公网地址）。
+
+<div align="center">
+<img src="docs/images/probe.png" alt="模拟测试报告：不使用保护与使用保护（Windows 沙箱）" width="760">
+</div>
 
 报告里「连不出去」表示这条路径被拦住了，判为通过；不使用保护时，不读代理变量的程序通常会绕过节点直连。开启沙箱隔离后 WebRTC 仍能看到局域网地址（如 `192.168.x.x`），会标为提醒：这类地址千家万户都一样，查不到出口或位置，隐藏它反而可能让 Chromium 误判为离线。
 
