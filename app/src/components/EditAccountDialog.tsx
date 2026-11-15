@@ -1,6 +1,6 @@
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 import { Check } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errorText, type Profile, type ProfileOptions } from "@/lib/api";
 import { PALETTE, cn } from "@/lib/utils";
 import { EnvironmentPicker } from "./EnvironmentPicker";
@@ -22,6 +22,9 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
   const [opts, setOpts] = useState<ProfileOptions | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const errorLine = useRef<HTMLParagraphElement>(null);
+  // The error sits below the environment list, out of view once the list is long.
+  useEffect(() => { if (error) errorLine.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [error]);
 
   useEffect(() => {
     setOpts(null);
@@ -102,11 +105,11 @@ export function EditAccountDialog({ profile, onClose, onSaved }: Props) {
 
           <section>
             <div className="group-label">环境配置</div>
-            <EnvironmentPicker value={opts.environment} onChange={(environment) => setOpts({ ...opts, environment })} />
+            <EnvironmentPicker value={opts.environment} unusable={opts.unusable} onChange={(environment) => setOpts({ ...opts, environment })} />
             {opts.lastExit && <p className="mt-1.5 px-1 text-[11.5px] text-muted">上次启动检测：{exitText(opts.lastExit)}</p>}
           </section>
 
-          {error && <p className="selectable whitespace-pre-wrap rounded-xl bg-danger-soft px-4 py-3 text-[12.5px] text-danger">{error}</p>}
+          {error && <p ref={errorLine} className="selectable whitespace-pre-wrap rounded-xl bg-danger-soft px-4 py-3 text-[12.5px] text-danger">{error}</p>}
         </div>
       )}
     </Dialog>

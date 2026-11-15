@@ -11,6 +11,8 @@ interface Props {
   disabled?: boolean;
   /** Only environments with a proxy node can be chosen (container accounts). */
   requireNode?: boolean;
+  /** Environments this account cannot use, with the reason shown in their place. */
+  unusable?: Record<string, string>;
 }
 
 function Option({ on, icon: Icon, title, sub, onClick, disabled }: { on: boolean; icon: React.ComponentType<{ className?: string }>; title: string; sub: string; onClick: () => void; disabled?: boolean }) {
@@ -35,7 +37,7 @@ function Option({ on, icon: Icon, title, sub, onClick, disabled }: { on: boolean
 }
 
 /** Choose which saved environment an account uses, or create one on the spot. */
-export function EnvironmentPicker({ value, onChange, disabled, requireNode }: Props) {
+export function EnvironmentPicker({ value, onChange, disabled, requireNode, unusable }: Props) {
   const [envs, setEnvs] = useState<Environment[] | null>(null);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -51,14 +53,21 @@ export function EnvironmentPicker({ value, onChange, disabled, requireNode }: Pr
       <div role="radiogroup" aria-label="环境配置" className="list-card">
         {!requireNode && <Option on={!value} icon={WifiOff} title="不使用环境配置" sub="直连网络 · 系统时区 · 默认启动参数" onClick={() => onChange("")} disabled={disabled} />}
         {envs?.map((e) => {
-          const unusable = requireNode && !e.node;
-          return <Option key={e.id} on={value === e.id} icon={unusable ? WifiOff : Globe2} title={e.name} sub={unusable ? "没有代理节点，容器不能使用" : environmentSummary(e)} onClick={() => onChange(e.id)} disabled={disabled || unusable} />;
+          const why = requireNode && !e.node ? "没有代理节点，容器不能使用" : unusable?.[e.id];
+          return <Option key={e.id} on={value === e.id} icon={why ? WifiOff : Globe2} title={e.name} sub={why ?? environmentSummary(e)} onClick={() => onChange(e.id)} disabled={disabled || !!why} />;
         })}
         <button onClick={() => setCreating(true)} disabled={disabled} className="flex w-full items-center gap-2 px-4 py-2.5 text-[12.5px] text-muted hover:bg-card-2 hover:text-fg active:!scale-100">
           <Plus className="h-3.5 w-3.5" />
           新建环境配置…
         </button>
       </div>
+      {/* Going without one is a choice that should not pass unnoticed once proxies are set up. */}
+      {!value && !requireNode && envs?.some((e) => e.node) && (
+        <p className="mt-1.5 px-1 text-[11.5px] text-warn">
+          未使用环境配置：这个账号直连网络、使用系统时区，网站看到的是本机的真实 IP。
+          {envs.filter((e) => e.node).every((e) => unusable?.[e.id]) && "它用不了带代理的环境；需要经代理使用时，请添加账号。"}
+        </p>
+      )}
       {envs === null && !error && <p className="mt-1.5 px-1 text-[11.5px] text-muted">正在读取环境配置…</p>}
       {error && <p className="mt-1.5 px-1 text-[11.5px] text-danger">{error}</p>}
       <EnvironmentDialog open={creating} id={null} onClose={() => setCreating(false)} onSaved={async (id) => { setCreating(false); await load(); onChange(id); }} />

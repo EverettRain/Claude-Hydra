@@ -164,7 +164,7 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
                   <span className="mt-1 block">立即应用到当前 Windows 用户的所有沙箱。启动时不自动打开 Sandboxie Control，并隐藏 ConsoleInit (C00000D4) 提示。</span>
                 </span>}
                 {env.isolation === "sandboxie"
-                  ? "沙箱中只允许连接本账号的本地中继，任何绕过代理的进程都会断网；文件和注册表写入留在沙箱内（账号数据目录除外）。沙箱内无法经本机 DNS 解析外部域名，域名只经代理解析。沙箱里的程序看到的时区和系统语言与本环境一致，机器标识按账号替换，网卡上的公网地址被隐藏。商店版会先复制一份到 Hydra 数据目录再装入沙箱（首次较慢）；系统默认账号不能使用环境。启动后会核实 Claude 确实在沙箱中运行，否则立即关闭。"
+                  ? "沙箱中只允许连接本账号的本地中继，任何绕过代理的进程都会断网；文件和注册表写入留在沙箱内（账号数据目录除外）。沙箱内无法经本机 DNS 解析外部域名，域名只经代理解析。沙箱里的程序看到的时区和系统语言与本环境一致，机器标识按账号替换，网卡上的公网地址被隐藏。MSIX 版 Claude 会先复制一份到 Hydra 数据目录再装入沙箱（首次较慢）；系统默认账号不能使用环境。启动后会核实 Claude 确实在沙箱中运行，否则立即关闭。"
                   : `不用沙箱时：Claude 与它启动的工具都经本地中继出网（无直连回退），出口不合规则时会自动断网；但忽略代理设置的程序仍可能直连${IS_MAC ? "" : "，Claude 窗口也可能显示系统时区"}。`}
                 {!IS_MAC && env.isolation !== "sandboxie" && <span className="mt-1 block text-fg-2">对隐私要求高时建议开启沙箱隔离：它还会让 Claude 窗口与它启动的程序看到本环境的时区和系统语言，替换机器标识，并隐藏网卡上的公网地址。</span>}
                 {IS_MAC

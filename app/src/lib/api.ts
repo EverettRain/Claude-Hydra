@@ -26,6 +26,8 @@ export interface ProfileOptions {
   /** Assigned environment id; "" = none. */
   environment: string;
   lastExit: ExitInfo | null;
+  /** Environments this account cannot use (id → reason); read-only. */
+  unusable?: Record<string, string>;
 }
 
 export interface ClashSubscription { url: string; nodes: NodeConfig[] }

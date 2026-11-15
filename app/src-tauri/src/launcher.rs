@@ -39,7 +39,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
     #[cfg(target_os = "macos")]
     let _ = (sandboxed, relay_port, locale);
     if p.is_default && install.is_msix() {
-        let aumid = install.aumid.as_deref().ok_or("缺少商店版应用标识。")?;
+        let aumid = install.aumid.as_deref().ok_or("缺少 MSIX 版 Claude 的应用标识。")?;
         Command::new("explorer.exe")
             .arg(format!("shell:AppsFolder\\{aumid}"))
             .spawn()
@@ -169,7 +169,7 @@ pub fn prepare_for(id: &str, is_default: bool, msix: bool) -> Result<Spec, Strin
     let mut timezone = match effective.timezone.as_str() { "" | "proxy" | "system" => None, tz => Some(tz.to_string()) };
     let sandboxed = effective.isolation == "sandboxie";
     if (node.is_some() || timezone.is_some() || sandboxed) && is_default && msix {
-        return Err("商店版默认账号无法应用环境配置中的代理节点、时区或沙箱隔离。".into());
+        return Err("MSIX 版 Claude 的默认账号由系统启动，无法应用环境配置中的代理节点、时区或沙箱隔离。".into());
     }
     // A soft cut (checks kept failing) is not refused here: the relay host re-checks the exit
     // before it opens the route, and the launch check below verifies it once more.

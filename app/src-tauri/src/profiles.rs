@@ -319,6 +319,10 @@ pub struct ProfileOptions {
     /// Last exit seen at launch; read-only for the UI.
     #[serde(default, skip_deserializing)]
     pub last_exit: Option<crate::node::ExitInfo>,
+    /// Environments this account cannot use, with the reason; read-only for the UI, so the choice
+    /// is ruled out where it is made instead of failing on save.
+    #[serde(default, skip_deserializing)]
+    pub unusable: BTreeMap<String, String>,
 }
 
 fn valid_env_name(n: &str) -> bool {
@@ -345,7 +349,15 @@ pub fn options(install: &Install, id: &str) -> Result<ProfileOptions, String> {
         keep_running: p.keep_running,
         environment: acc.environment.clone().filter(|e| s.environments.contains_key(e)).unwrap_or_default(),
         last_exit: acc.last_exit.clone(),
+        unusable: unusable_environments(install, &s, id),
     })
+}
+
+/// The environments `account_id` cannot use, with the reason `check_environment` gives.
+fn unusable_environments(install: &Install, s: &Settings, account_id: &str) -> BTreeMap<String, String> {
+    s.environments.keys()
+        .filter_map(|e| check_environment(install, s, account_id, e).err().map(|why| (e.clone(), why)))
+        .collect()
 }
 
 /// "" / "proxy" → follow the node; "system" → OS zone; otherwise a validated IANA name.
@@ -386,7 +398,7 @@ pub fn check_environment(install: &Install, s: &Settings, account_id: &str, envi
     if environment.is_empty() { return Ok(None); }
     let env = s.environments.get(environment).ok_or("所选环境配置已不存在。")?;
     if account_id == DEFAULT_ID && install.is_msix() && env.customizes_launch() {
-        return Err("商店版默认账号由系统启动，无法应用代理、时区或启动参数，不能使用此环境。".into());
+        return Err("MSIX 版 Claude（官网安装包与 Microsoft Store 都是）的默认账号由系统启动，无法应用代理、时区或启动参数，不能使用此环境。".into());
     }
     Ok(Some(environment.to_string()))
 }
@@ -419,6 +431,29 @@ pub fn save_options(install: &Install, id: &str, o: &ProfileOptions) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Store build's default account is started by Windows, so only an environment that
+    /// changes nothing about the launch is open to it; added accounts may use any.
+    #[test]
+    fn store_default_account_is_offered_only_environments_it_can_apply() {
+        // Arrange
+        let store = Install { kind: "Msix".into(), exe: None, version: None, family: None, aumid: None, default_profile: PathBuf::new() };
+        let mut s = Settings::default();
+        let zoned = crate::environment::Environment { name: "东京".into(), timezone: "Asia/Tokyo".into(), ..Default::default() };
+        let plain = crate::environment::Environment { name: "跟随系统".into(), ..Default::default() };
+        assert!(zoned.customizes_launch() && !plain.customizes_launch());
+        s.environments.insert("zoned".into(), zoned);
+        s.environments.insert("plain".into(), plain);
+
+        // Act
+        let default = unusable_environments(&store, &s, DEFAULT_ID);
+        let added = unusable_environments(&store, &s, "work");
+
+        // Assert
+        assert_eq!(default.keys().collect::<Vec<_>>(), ["zoned"]);
+        assert_eq!(default["zoned"], check_environment(&store, &s, DEFAULT_ID, "zoned").unwrap_err());
+        assert!(added.is_empty());
+    }
 
     #[test]
     fn badges_distinguish_related_names() {

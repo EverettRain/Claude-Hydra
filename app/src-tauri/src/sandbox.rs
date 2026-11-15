@@ -74,8 +74,8 @@ pub fn launch_exe(install: &crate::install::Install) -> Result<PathBuf, String> 
     }
     static COPYING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = COPYING.lock().unwrap_or_else(|e| e.into_inner());
-    let src = package_app_dir(install).ok_or("找不到商店版 Claude 的安装目录，无法在沙箱中运行。")?;
-    let package = src.parent().and_then(Path::file_name).ok_or("商店版 Claude 的安装目录无效。")?.to_string_lossy().to_string();
+    let src = package_app_dir(install).ok_or("找不到 MSIX 版 Claude 的安装目录，无法在沙箱中运行。")?;
+    let package = src.parent().and_then(Path::file_name).ok_or("MSIX 版 Claude 的安装目录无效。")?.to_string_lossy().to_string();
     let root = apps_dir();
     let dst = root.join(&package);
     if !dst.join(".complete").is_file() {
@@ -85,7 +85,7 @@ pub fn launch_exe(install: &crate::install::Install) -> Result<PathBuf, String> 
         copy_tree(&src, &partial)
             .and_then(|_| std::fs::write(partial.join(".complete"), &package))
             .and_then(|_| std::fs::rename(&partial, &dst))
-            .map_err(|e| { let _ = std::fs::remove_dir_all(&partial); format!("无法为沙箱复制商店版 Claude（{}）：{e}", root.display()) })?;
+            .map_err(|e| { let _ = std::fs::remove_dir_all(&partial); format!("无法为沙箱复制 MSIX 版 Claude（{}）：{e}", root.display()) })?;
     }
     remove_stale_copies(&root, &package);
     Ok(dst.join("Claude.exe"))

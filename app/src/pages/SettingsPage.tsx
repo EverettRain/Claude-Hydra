@@ -177,7 +177,7 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
           {info?.installError && <div className="px-4 py-3 text-[12.5px] text-danger">{info.installError}</div>}
           {install && (
             <div className="py-1">
-              <KeyValue k="类型" v={install.kind === "Msix" ? "Microsoft Store 版" : install.kind === "App" ? "Claude.app" : "安装程序版"} />
+              <KeyValue k="类型" v={install.kind === "Msix" ? "MSIX 版（官网安装包或 Microsoft Store）" : install.kind === "App" ? "Claude.app" : "安装程序版"} />
               {install.version && install.version !== "unknown" && <KeyValue k="版本" v={install.version} />}
               <KeyValue k="程序" v={install.exe ?? install.family} />
               <KeyValue k="默认数据目录" v={install.defaultProfile} />
