@@ -1,10 +1,11 @@
 import { ClashImport } from "./ClashImport";
-import { Check, CircleAlert, CircleCheck, Clock, Copy, Info, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
+import { Check, CircleAlert, CircleCheck, Clock, Copy, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { api, errorText, type ClashSubscription, type ExitInfo, type NodeCheck, type NodeConfig } from "@/lib/api";
 import { COMMON_TIMEZONES, MAX_FRONT, emptyNode, formatNode, fronts, hopLabel, parseNodeText, withOutermostFront, withSubscriptionFront } from "@/lib/node";
 import { cn } from "@/lib/utils";
 import { Button } from "./ui/button";
+import { InfoTip } from "./ui/info-tip";
 import { Input, Select } from "./ui/input";
 
 interface Props {
@@ -29,11 +30,7 @@ function Row({ label, required, hint, children }: { label: string; required?: bo
       <span className="flex items-center gap-1 text-[12.5px] text-fg-2">
         {label}
         {required && <span className="text-danger">*</span>}
-        {hint && (
-          <span title={hint} className="text-faint hover:text-muted">
-            <Info className="h-3 w-3" />
-          </span>
-        )}
+        {hint && <InfoTip text={hint} label={`${label}说明`} />}
       </span>
       <div className="flex min-w-0 items-center gap-2">{children}</div>
     </div>
