@@ -129,7 +129,7 @@ function rows(data, page, shared) {
 
 const PROTECTION = {
   seatbelt: 'Seatbelt：只允许连本机中继端口，系统 DNS 服务被拒绝。macOS 不允许沙箱嵌套，探针因此关闭了 Chromium 自身的沙箱',
-  sandboxie: 'Sandboxie：在这个环境的沙箱中运行，只放行它的中继，并加载 Hydra 的 DNS 与身份保护（替换机器标识，隐藏网卡上的公网地址）',
+  sandboxie: 'Sandboxie：在这个环境的沙箱中运行，只放行它的中继，并加载 Hydra 的 DNS 与身份保护（时区与系统语言跟随环境，替换机器标识，隐藏网卡上的公网地址）',
 };
 
 const LABEL = { pass: '正常', fail: '泄漏', warn: '注意', error: '连不通', info: '' };

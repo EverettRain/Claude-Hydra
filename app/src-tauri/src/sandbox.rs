@@ -250,7 +250,7 @@ pub fn forget(id: &str) {
         // not answer with the previous account's device if the wildcard wipe ever misses them.
         for key in [
             "HydraMachineGuid", "HydraHwProfileGuid", "HydraComputerName", "HydraMac", "HydraVolumeSerial",
-            "HydraUserName", "HydraUserSid",
+            "HydraUserName", "HydraUserSid", "HydraTimeZone", "HydraLocale",
         ] {
             let _ = ini(&dir, &["set", &name, key, ""]);
         }
@@ -322,8 +322,10 @@ pub fn configure_quiet_start() -> Result<(), String> {
 }
 
 /// Creates or updates the account's box. `relay_port` = the only address the box may reach;
-/// `None` (no node) leaves the network unrestricted. Each box gets its own Code directory.
-pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<String, String> {
+/// `None` (no node) leaves the network unrestricted. `zone` (IANA) and `locale` are what the
+/// programs in the box are told the local time zone and language are; `None` / "" = the system's.
+/// Each box gets its own Code directory.
+pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, zone: Option<&str>, locale: &str) -> Result<String, String> {
     let dir = available()?;
     let name = box_name(id);
     let drop = drop_dir();
@@ -358,6 +360,14 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>) -> Result<St
     // `identity.rs` and the status document) rather than being obviously synthetic.
     set("HydraUserName", &ids.user_name)?;
     set("HydraUserSid", &ids.user_sid)?;
+    // The zone a page reads from Chromium (and Node from its ICU) comes from the system, not `TZ`:
+    // the guard answers with the account's, by its Windows name.
+    let windows_zone = zone.and_then(crate::sys::windows_zone);
+    if let (Some(zone), None) = (zone, &windows_zone) {
+        crate::paths::append_log("hydra-error.log", &format!("sandbox {id}: no Windows time zone for {zone}; the box keeps the system's"));
+    }
+    set("HydraTimeZone", windows_zone.as_deref().unwrap_or_default())?;
+    set("HydraLocale", locale)?;
     // WMI answers hardware questions from `WmiPrvSE.exe`, a service outside the box, so the box
     // cannot derive those values: board, BIOS and disk-drive serials and the SMBIOS UUID would come
     // back as this machine's. Closing the WMI client side makes the query fail instead, which is
@@ -879,7 +889,7 @@ if ($needed -gt 0) {
         let data = crate::paths::storage_root().join("proxy-test");
         std::fs::create_dir_all(&data).unwrap();
         let id = "hydra-proxy-integration-test";
-        let name = super::configure(id, &data.to_string_lossy(), None).unwrap();
+        let name = super::configure(id, &data.to_string_lossy(), None, None, "").unwrap();
         let key = r"Software\Policies\Claude";
         let host = [true, false].map(|machine| crate::sys::reg_string(machine, key, "egressProxyUrl"));
         let host_https = crate::sys::reg_string(false, "Environment", "HTTPS_PROXY");
@@ -928,7 +938,7 @@ if ($needed -gt 0) {
         let port = relay.local_addr().unwrap().port();
         let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let other_port = other.local_addr().unwrap().port();
-        let name = super::configure(id, &data.to_string_lossy(), Some(port)).unwrap();
+        let name = super::configure(id, &data.to_string_lossy(), Some(port), None, "").unwrap();
         println!("box {name}, relay port {port}");
 
         // 1) network rules, through `command` (what launcher uses).
@@ -997,7 +1007,7 @@ if ($needed -gt 0) {
         let data = crate::paths::storage_root().join("identity-test");
         std::fs::create_dir_all(&data).unwrap();
         let ids = crate::identity::Identifiers::for_account("hydra-identity-test");
-        let name = super::configure("hydra-identity-test", &data.to_string_lossy(), None).unwrap();
+        let name = super::configure("hydra-identity-test", &data.to_string_lossy(), None, None, "").unwrap();
         // What the host calls itself, for the probe to look up by name as a control.
         let host_user = std::env::var("USERNAME").unwrap();
         let host_name = std::env::var("COMPUTERNAME").unwrap();
@@ -1300,7 +1310,7 @@ if ($needed -gt 0) {
         let dir = super::available().unwrap();
         let data = crate::paths::storage_root().join("wmi-test");
         std::fs::create_dir_all(&data).unwrap();
-        let name = super::configure("hydra-wmi-test", &data.to_string_lossy(), None).unwrap();
+        let name = super::configure("hydra-wmi-test", &data.to_string_lossy(), None, None, "").unwrap();
 
         // The host's real identifiers, read outside the box. A query inside the box that prints one
         // of them is the leak this test exists for.
@@ -1423,7 +1433,7 @@ if ($needed -gt 0) {
         let dir = super::available().unwrap();
         use std::os::windows::process::CommandExt;
         let id = "hydra-injection-test";
-        let name = super::configure(id, &crate::paths::storage_root().join("injection-test").to_string_lossy(), None).unwrap();
+        let name = super::configure(id, &crate::paths::storage_root().join("injection-test").to_string_lossy(), None, None, "").unwrap();
         let count = |key: &str| {
             let out = std::process::Command::new(dir.join("SbieIni.exe")).args(["query", &name, key]).creation_flags(0x0800_0000).output().unwrap();
             assert!(out.status.success(), "query {key} failed");
@@ -1472,6 +1482,25 @@ if ($needed -gt 0) {
         assert_eq!(a, super::box_name("Account 2"));
         assert_ne!(a, super::box_name("Account 3"));
         assert!(a.len() <= 32 && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'), "{a}");
+    }
+
+    /// The box is told the account's zone by its Windows name, which Windows' own ICU gives.
+    #[cfg(windows)]
+    #[test]
+    fn iana_zones_have_windows_names() {
+        // Arrange
+        let zones = ["Asia/Tokyo", "America/Los_Angeles", "Europe/London", "Not/AZone"];
+
+        // Act
+        let names: Vec<Option<String>> = zones.iter().map(|z| crate::sys::windows_zone(z)).collect();
+
+        // Assert
+        assert_eq!(names, [
+            Some("Tokyo Standard Time".to_string()),
+            Some("Pacific Standard Time".to_string()),
+            Some("GMT Standard Time".to_string()),
+            None,
+        ]);
     }
 
     /// The identity guard's address checks, compiled from `idguard.c` itself and run: a box keeps

@@ -21,6 +21,8 @@ pub struct Spec {
     pub relay_port: Option<u16>,
     /// The exit the launch check verified (`None` without a node).
     pub exit: Option<crate::node::ExitInfo>,
+    /// The environment's window language (`--lang`); "" = the system's.
+    pub locale: String,
 }
 
 pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
@@ -33,9 +35,9 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         }
     }
     let outcome = if running.is_some() { "focused" } else { "started" };
-    let Spec { env, managed, extra, sandboxed, relay_port, .. } = prepare_for(&p.id, p.is_default, install.is_msix())?;
+    let Spec { env, managed, extra, sandboxed, relay_port, locale, .. } = prepare_for(&p.id, p.is_default, install.is_msix())?;
     #[cfg(target_os = "macos")]
-    let _ = (sandboxed, relay_port);
+    let _ = (sandboxed, relay_port, locale);
     if p.is_default && install.is_msix() {
         let aumid = install.aumid.as_deref().ok_or("缺少商店版应用标识。")?;
         Command::new("explorer.exe")
@@ -69,7 +71,7 @@ pub fn launch(install: &Install, p: &Profile) -> Result<&'static str, String> {
         };
         let line = windows_line((!p.is_default).then_some(p.path.as_str()), &managed, &extra);
         let mut cmd = if sandboxed {
-            crate::sandbox::configure(&p.id, &p.path, relay_port).map_err(|e| format!("账号未启动：{e}"))?;
+            crate::sandbox::configure(&p.id, &p.path, relay_port, zone_of(&env), &locale).map_err(|e| format!("账号未启动：{e}"))?;
             crate::sandbox::command(&p.id, &exe, &line, &env)?
         } else {
             let mut cmd = Command::new(&exe);
@@ -236,7 +238,14 @@ pub fn prepare_for(id: &str, is_default: bool, msix: bool) -> Result<Spec, Strin
             }
         }
     }
-    Ok(Spec { env, managed, extra, sandboxed, relay_port, exit: checked_exit })
+    let locale = effective.environment.as_deref().and_then(|e| s.environments.get(e)).map(|e| e.locale.clone()).unwrap_or_default();
+    Ok(Spec { env, managed, extra, sandboxed, relay_port, exit: checked_exit, locale })
+}
+
+/// The zone a launch sets (`TZ`), if any: the box reports it to the programs in it as well.
+#[cfg(not(target_os = "macos"))]
+pub fn zone_of(env: &[(String, String)]) -> Option<&str> {
+    env.iter().find(|(k, _)| k.eq_ignore_ascii_case("TZ")).map(|(_, v)| v.as_str())
 }
 
 /// Checks the exact route an account will use (local relay → node → internet) against its

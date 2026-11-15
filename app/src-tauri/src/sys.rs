@@ -278,6 +278,22 @@ mod win {
         }
     }
 
+    /// The Windows zone name for an IANA one (Asia/Tokyo → Tokyo Standard Time), from the ICU that
+    /// Windows ships (`icu.dll`, Windows 10 1903 and later); `None` without it or for an unknown zone.
+    pub fn windows_zone(iana: &str) -> Option<String> {
+        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        type Convert = unsafe extern "C" fn(*const u16, i32, *mut u16, i32, *mut i32) -> i32;
+        let lib = unsafe { LoadLibraryW(wide("icu.dll").as_ptr()) };
+        if lib.is_null() { return None; }
+        let found = unsafe { GetProcAddress(lib, c"ucal_getWindowsTimeZoneID".as_ptr().cast()) }?;
+        let convert: Convert = unsafe { std::mem::transmute(found) };
+        let id: Vec<u16> = iana.encode_utf16().collect();
+        let (mut out, mut status) = ([0u16; 128], 0i32);
+        let n = unsafe { convert(id.as_ptr(), id.len() as i32, out.as_mut_ptr(), out.len() as i32, &mut status) };
+        // ICU reports failure as a positive status.
+        (status <= 0 && n > 0 && (n as usize) < out.len()).then(|| String::from_utf16_lossy(&out[..n as usize]))
+    }
+
     pub fn error_box(text: &str) {
         let t = wide(text);
         let c = wide("Claude-Hydra");
@@ -543,6 +559,8 @@ mod unix {
 
     /// The terminal that ran this program already is the console.
     pub fn own_console(_title: &str) {}
+
+    pub fn windows_zone(_iana: &str) -> Option<String> { None }
 
     pub fn error_box(text: &str) {
         eprintln!("{text}");

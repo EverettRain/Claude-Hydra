@@ -244,7 +244,7 @@ export function NodeConfigForm({ subscription, onSubscriptionChange, node, onNod
 
       {/* One card row with its notes: `.list-card` draws a line between its children. */}
       <div>
-        <Row label="时区" hint="通过 TZ 环境变量设置。macOS 上窗口与子进程均生效；Windows 上 Claude 窗口可能仍显示系统时区。">
+        <Row label="时区" hint="通过 TZ 环境变量设置。macOS 上窗口与子进程均生效；Windows 上子进程生效，Claude 窗口需开启沙箱隔离才会使用这个时区，否则可能仍显示系统时区。">
           <Segmented label="时区" value={tzMode} options={[["proxy", checkedTz ?? "跟随代理 IP"], ["system", "跟随系统"], ["custom", "自定义"]]}
             onChange={(v) => onTimezoneChange(v === "custom" ? checkedTz || lastExit?.timezone || "Asia/Tokyo" : v)} />
         </Row>

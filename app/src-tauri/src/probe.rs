@@ -238,7 +238,7 @@ fn start(id: &str, electron: &Path, app: &Path, profile: &Path, spec: &crate::la
         // The account's own box, set up as for a sandboxed account: only the relay is reachable,
         // and Hydra's DNS and identity guards are loaded.
         Some(port) => {
-            crate::sandbox::configure(id, &profile, Some(port))?;
+            crate::sandbox::configure(id, &profile, Some(port), crate::launcher::zone_of(&spec.env), &spec.locale)?;
             crate::sandbox::command(id, electron, &line, &spec.env)?
         }
         None => {
