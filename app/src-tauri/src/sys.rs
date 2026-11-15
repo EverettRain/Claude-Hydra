@@ -294,6 +294,13 @@ mod win {
         (status <= 0 && n > 0 && (n as usize) < out.len()).then(|| String::from_utf16_lossy(&out[..n as usize]))
     }
 
+    /// The Windows language ID of a locale name (ja-JP → 0x0411); `None` for one Windows lacks.
+    pub fn language_id(locale: &str) -> Option<u16> {
+        use windows_sys::Win32::Globalization::LocaleNameToLCID;
+        let lcid = unsafe { LocaleNameToLCID(wide(locale).as_ptr(), 0) };
+        (lcid != 0).then_some((lcid & 0xffff) as u16)
+    }
+
     /// This year's rules of the Windows zone `key`, for `idguard.c`: bias, standard bias, daylight
     /// bias, then the standard and the daylight start as their eight SYSTEMTIME fields.
     pub fn zone_rule(key: &str) -> Option<[i32; 19]> {
@@ -592,6 +599,8 @@ mod unix {
     pub fn windows_zone(_iana: &str) -> Option<String> { None }
 
     pub fn zone_rule(_key: &str) -> Option<[i32; 19]> { None }
+
+    pub fn language_id(_locale: &str) -> Option<u16> { None }
 
     pub fn error_box(text: &str) {
         eprintln!("{text}");

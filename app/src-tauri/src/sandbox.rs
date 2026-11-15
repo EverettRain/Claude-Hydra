@@ -250,7 +250,7 @@ pub fn forget(id: &str) {
         // not answer with the previous account's device if the wildcard wipe ever misses them.
         for key in [
             "HydraMachineGuid", "HydraHwProfileGuid", "HydraComputerName", "HydraMac", "HydraVolumeSerial",
-            "HydraUserName", "HydraUserSid", "HydraTimeZone", "HydraTimeZoneRule", "HydraLocale",
+            "HydraUserName", "HydraUserSid", "HydraTimeZone", "HydraTimeZoneRule", "HydraLocale", "HydraLocaleId",
         ] {
             let _ = ini(&dir, &["set", &name, key, ""]);
         }
@@ -321,6 +321,12 @@ pub fn configure_quiet_start() -> Result<(), String> {
     ini(&dir, &["append", section, "SbieCtrl_HideMessage", detail])
 }
 
+/// A language ID as `idguard.c` reads it: its bytes in memory order (little-endian), in hex.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn language_hex(id: u16) -> String {
+    id.to_le_bytes().iter().map(|b| format!("{b:02X}")).collect()
+}
+
 /// A zone's rules as `idguard.c` reads them: the numbers, comma-separated.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn rule_text(rule: &[i32]) -> String {
@@ -376,7 +382,10 @@ pub fn configure(id: &str, data_dir: &str, relay_port: Option<u16>, zone: Option
     }
     set("HydraTimeZone", rule.as_ref().and(windows_zone.as_deref()).unwrap_or_default())?;
     set("HydraTimeZoneRule", rule.as_deref().unwrap_or_default())?;
-    set("HydraLocale", locale)?;
+    // With its language ID, so the guard needs no locale lookup of its own.
+    let language = (!locale.is_empty()).then(|| crate::sys::language_id(locale)).flatten();
+    set("HydraLocale", if language.is_some() { locale } else { "" })?;
+    set("HydraLocaleId", &language.map(language_hex).unwrap_or_default())?;
     // WMI answers hardware questions from `WmiPrvSE.exe`, a service outside the box, so the box
     // cannot derive those values: board, BIOS and disk-drive serials and the SMBIOS UUID would come
     // back as this machine's. Closing the WMI client side makes the query fail instead, which is
@@ -1601,5 +1610,97 @@ if ($needed -gt 0) {
         // Assert
         let got: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect();
         assert_eq!(got, [super::rule_text(&pacific), super::rule_text(&tokyo), "invalid".into(), "invalid".into(), "invalid".into(), "invalid".into()]);
+    }
+
+    /// The guard's own daylight-time rule (`zone_state_at`, compiled from `idguard.c` and run) at
+    /// the real changes of 2026: a northern zone, a southern one whose summer spans the new year,
+    /// and one without daylight time. Skipped where no C compiler is installed.
+    #[test]
+    fn the_guard_knows_daylight_time_from_the_rules() {
+        // Arrange
+        let source = include_str!("idguard.c");
+        let start = source.find("/* Days since 1970-01-01").unwrap();
+        let end = start + source[start..].find("static DWORD zone_state(").unwrap();
+        let program = format!(
+            "{}\n{}\n{}",
+            r#"#include <stdio.h>
+typedef long LONG; typedef long long LONGLONG; typedef unsigned short WORD; typedef unsigned long DWORD;
+typedef struct { WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds; } SYSTEMTIME;
+typedef struct { LONG Bias; SYSTEMTIME StandardDate; LONG StandardBias; SYSTEMTIME DaylightDate; LONG DaylightBias; } TIME_ZONE_INFORMATION;
+enum { TIME_ZONE_ID_UNKNOWN, TIME_ZONE_ID_STANDARD, TIME_ZONE_ID_DAYLIGHT };"#,
+            &source[start..end],
+            r#"static const char *at(const TIME_ZONE_INFORMATION *z, int y, int mo, int d, int h, int mi) {
+    SYSTEMTIME t = {0}; t.wYear = y; t.wMonth = mo; t.wDay = d; t.wHour = h; t.wMinute = mi;
+    switch (zone_state_at(z, &t)) { case TIME_ZONE_ID_DAYLIGHT: return "D"; case TIME_ZONE_ID_STANDARD: return "S"; default: return "-"; }
+}
+int main(void) {
+    /* US Pacific: daylight from the 2nd Sunday of March 2:00, standard from the 1st Sunday of November 2:00. */
+    TIME_ZONE_INFORMATION pacific = {480, {0, 11, 0, 1, 2, 0, 0, 0}, 0, {0, 3, 0, 2, 2, 0, 0, 0}, -60};
+    /* Sydney: daylight from the 1st Sunday of October 2:00, standard from the 1st Sunday of April 3:00. */
+    TIME_ZONE_INFORMATION sydney = {-600, {0, 4, 0, 1, 3, 0, 0, 0}, 0, {0, 10, 0, 1, 2, 0, 0, 0}, -60};
+    TIME_ZONE_INFORMATION tokyo = {-540, {0}, 0, {0}, 0};
+    printf("%s%s%s%s%s%s ", at(&pacific, 2026, 3, 8, 9, 59), at(&pacific, 2026, 3, 8, 10, 0), at(&pacific, 2026, 7, 1, 12, 0),
+           at(&pacific, 2026, 11, 1, 8, 59), at(&pacific, 2026, 11, 1, 9, 0), at(&pacific, 2026, 12, 1, 12, 0));
+    printf("%s%s%s%s%s%s ", at(&sydney, 2026, 1, 15, 0, 0), at(&sydney, 2026, 4, 4, 15, 59), at(&sydney, 2026, 4, 4, 16, 0),
+           at(&sydney, 2026, 6, 15, 0, 0), at(&sydney, 2026, 10, 3, 15, 59), at(&sydney, 2026, 10, 3, 16, 0));
+    printf("%s\n", at(&tokyo, 2026, 7, 1, 0, 0));
+    return 0;
+}
+"#
+        );
+        let dir = std::env::temp_dir().join(format!("hydra-zone-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("state.c"), program).unwrap();
+        let Ok(built) = std::process::Command::new("cc").current_dir(&dir).args(["state.c", "-o", "state"]).status() else { return };
+
+        // Act
+        assert!(built.success(), "the daylight rule did not compile");
+        let out = std::process::Command::new(dir.join("state")).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Assert
+        // Pacific: just before / at the March change, summer, just before / at the November
+        // change, winter. Sydney: summer, just before / at the April change, winter, just before /
+        // at the October change. Tokyo: no daylight time at all.
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "SDDDSS DDSSSD -");
+    }
+
+    /// The language ID Hydra writes (`language_hex`) reads back as the same ID in the guard
+    /// (`parse_hex` filling a LANGID). Skipped where no C compiler is installed.
+    #[test]
+    fn the_guard_reads_the_language_id_hydra_writes() {
+        // Arrange
+        let source = include_str!("idguard.c");
+        let start = source.find("static int hex_digit").unwrap();
+        let end = start + source[start..].find("static int conf_text").unwrap();
+        let ids = [0x0411u16, 0x0804, 0x0409];
+        let program = format!(
+            "#include <stdio.h>\ntypedef unsigned short WCHAR; typedef unsigned char BYTE; typedef unsigned short LANGID;\n{}\n{}",
+            &source[start..end],
+            r#"int main(int argc, char **argv) {
+    int a, i;
+    for (a = 1; a < argc; a++) {
+        WCHAR text[8]; LANGID id = 0;
+        for (i = 0; argv[a][i] && i < 7; i++) text[i] = (WCHAR)argv[a][i];
+        text[i] = 0;
+        printf(parse_hex(text, (BYTE *)&id, 2) ? "%04x\n" : "invalid\n", id);
+    }
+    return 0;
+}
+"#
+        );
+        let dir = std::env::temp_dir().join(format!("hydra-language-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lang.c"), program).unwrap();
+        let Ok(built) = std::process::Command::new("cc").current_dir(&dir).args(["lang.c", "-o", "lang"]).status() else { return };
+
+        // Act
+        assert!(built.success(), "the hex parser did not compile");
+        let out = std::process::Command::new(dir.join("lang")).args(ids.map(super::language_hex)).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Assert
+        let got: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect();
+        assert_eq!(got, ids.map(|id| format!("{id:04x}")));
     }
 }

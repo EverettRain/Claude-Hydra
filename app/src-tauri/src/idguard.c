@@ -38,7 +38,9 @@
  * GetDynamicTimeZoneInformation / GetTimeZoneInformation, so those report the account's zone; the
  * default locale (GetUserDefaultLocaleName, where ICU takes Node's and Electron's from) and the
  * preferred UI languages report the account's language, matching the --lang Claude is started
- * with. Only these few are answered, and with values read from the box's settings alone: the
+ * with. Only these few are answered, with values read from the box's settings alone (the
+ * language ID as `HydraLocaleId`), and without calling any time or locale function of the system,
+ * which may call back into the functions answered here: the
  * clock functions and the language IDs are called all the time by the system and by Sandboxie
  * itself, and a Chromium child process may not read the registry at all. Keyboard layouts,
  * installed voices and fonts are not changed: they belong to the system, and a keyboard that types
@@ -219,6 +221,7 @@ static DYNAMIC_TIME_ZONE_INFORMATION id_zone;
 static int have_zone;
 static int load_zone(const WCHAR *rule);
 static WCHAR id_locale[LOCALE_NAME_MAX_LENGTH];
+static LANGID id_language;
 static BYTE id_volume_key[4];
 static int have_volume_serial;
 /* The account the box reports. The name is what the system answers for "who am I"; the SID is
@@ -326,7 +329,11 @@ static int load_identity(HMODULE sbie) {
     if (!conf_text(query_conf, own_box, L"HydraUserSid", id_user_sid, sizeof(id_user_sid))) id_user_sid[0] = 0;
     if (!conf_text(query_conf, own_box, L"HydraTimeZone", id_time_zone, sizeof(id_time_zone))) id_time_zone[0] = 0;
     have_zone = id_time_zone[0] && conf_text(query_conf, own_box, L"HydraTimeZoneRule", rule, sizeof(rule)) && load_zone(rule);
-    if (!conf_text(query_conf, own_box, L"HydraLocale", id_locale, sizeof(id_locale))) id_locale[0] = 0;
+    /* The language ID comes worked out by Hydra too: the system's locale lookups may ask the very
+       functions answered here. Without both, the language is left alone. */
+    if (!conf_text(query_conf, own_box, L"HydraLocale", id_locale, sizeof(id_locale)) ||
+        !conf_text(query_conf, own_box, L"HydraLocaleId", hex, sizeof(hex)) || !parse_hex(hex, (BYTE *)&id_language, 2))
+        id_locale[0] = 0;
     return 1;
 }
 
@@ -1886,19 +1893,55 @@ static int load_zone(const WCHAR *rule) {
     return 1;
 }
 
-/* Standard or daylight time now, as GetTimeZoneInformation reports it. */
+/* Days since 1970-01-01 of a date in the proleptic Gregorian calendar. */
+static LONGLONG days_from_civil(LONG y, LONG m, LONG d) {
+    LONG era, yoe, doy, doe;
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (LONGLONG)era * 146097 + doe - 719468;
+}
+
+static LONG days_in_month(LONG y, LONG m) {
+    static const LONG days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    return m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 29 : days[m - 1];
+}
+
+/* Minutes since 1970 of a zone change in `year`, in the local time the change is given in. A date
+   without a year is "the nth (5 = last) given weekday of the month", as Windows keeps them. */
+static LONGLONG change_at(const SYSTEMTIME *change, LONG year) {
+    LONG day = change->wDay, first;
+    if (change->wYear) {
+        year = change->wYear;
+    } else {
+        first = (LONG)(((days_from_civil(year, change->wMonth, 1) % 7) + 7 + 4) % 7); /* 1970-01-01 was a Thursday */
+        day = 1 + (change->wDayOfWeek - first + 7) % 7 + 7 * (change->wDay - 1);
+        while (day > days_in_month(year, change->wMonth)) day -= 7;
+    }
+    return (days_from_civil(year, change->wMonth, day) * 24 + change->wHour) * 60 + change->wMinute;
+}
+
+/* Standard or daylight time at `utc`, worked out from the zone's rules alone: the system's own
+   conversions ask GetDynamicTimeZoneInformation in turn, and from inside its detour that would
+   never end. */
+static DWORD zone_state_at(const TIME_ZONE_INFORMATION *zone, const SYSTEMTIME *utc) {
+    LONGLONG now, to_daylight, to_standard;
+    if (!zone->StandardDate.wMonth || !zone->DaylightDate.wMonth) return TIME_ZONE_ID_UNKNOWN;
+    now = (days_from_civil(utc->wYear, utc->wMonth, utc->wDay) * 24 + utc->wHour) * 60 + utc->wMinute;
+    /* Daylight time starts at a standard-time clock reading, standard time at a daylight one. */
+    to_daylight = change_at(&zone->DaylightDate, utc->wYear) + zone->Bias + zone->StandardBias;
+    to_standard = change_at(&zone->StandardDate, utc->wYear) + zone->Bias + zone->DaylightBias;
+    if (to_daylight < to_standard) return now >= to_daylight && now < to_standard ? TIME_ZONE_ID_DAYLIGHT : TIME_ZONE_ID_STANDARD;
+    /* Southern hemisphere: daylight time spans the turn of the year. */
+    return now >= to_standard && now < to_daylight ? TIME_ZONE_ID_STANDARD : TIME_ZONE_ID_DAYLIGHT;
+}
+
 static DWORD zone_state(const TIME_ZONE_INFORMATION *zone) {
-    SYSTEMTIME utc, local;
-    FILETIME u, l;
-    LONGLONG minutes;
-    if (!zone->StandardDate.wMonth) return TIME_ZONE_ID_UNKNOWN;
+    SYSTEMTIME utc;
     GetSystemTime(&utc);
-    if (!SystemTimeToTzSpecificLocalTime(zone, &utc, &local) || !SystemTimeToFileTime(&utc, &u) || !SystemTimeToFileTime(&local, &l))
-        return TIME_ZONE_ID_STANDARD;
-    minutes = ((LONGLONG)(((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime) -
-               (LONGLONG)(((ULONGLONG)l.dwHighDateTime << 32) | l.dwLowDateTime)) / 600000000;
-    return minutes == zone->Bias + zone->DaylightBias && zone->DaylightBias != zone->StandardBias ? TIME_ZONE_ID_DAYLIGHT
-                                                                                                : TIME_ZONE_ID_STANDARD;
+    return zone_state_at(zone, &utc);
 }
 
 static DWORD WINAPI my_GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION out) {
@@ -1930,11 +1973,10 @@ static BOOL WINAPI my_GetUserPreferredUILanguages(DWORD flags, PULONG count, PZZ
     static const WCHAR hex[] = L"0123456789ABCDEF";
     WCHAR one[LOCALE_NAME_MAX_LENGTH];
     ULONG needed;
-    LANGID lang;
+    LANGID lang = id_language;
     if (!id_locale[0]) return REAL(sys_GetUserPreferredUILanguages)(flags, count, buffer, size);
     if (!count || !size) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     if (flags & MUI_LANGUAGE_ID) {
-        lang = LANGIDFROMLCID(LocaleNameToLCID(id_locale, 0));
         one[0] = hex[(lang >> 12) & 15]; one[1] = hex[(lang >> 8) & 15]; one[2] = hex[(lang >> 4) & 15]; one[3] = hex[lang & 15];
         one[4] = 0;
     } else {
