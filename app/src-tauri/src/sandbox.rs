@@ -60,9 +60,30 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let target = to.join(e.file_name());
-        if e.file_type()?.is_dir() { copy_tree(&e.path(), &target)?; } else { std::fs::copy(e.path(), &target)?; }
+        if e.file_type()?.is_dir() { copy_tree(&e.path(), &target)?; } else { copy_file(&e.path(), &target)?; }
     }
     Ok(())
+}
+
+/// Copies one file out of `WindowsApps`. Files there can carry the EFS flag, and a plain copy then
+/// insists on encrypting the target, which fails with error 6000 on a volume or Windows edition
+/// without EFS. The copy only has to run in a box, so it may land unencrypted.
+#[cfg(windows)]
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::CopyFileExW;
+    // WinBase.h; windows-sys keeps it under a feature this crate has no other use for.
+    const COPY_FILE_ALLOW_DECRYPTED_DESTINATION: u32 = 0x8;
+    let wide = |p: &Path| p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+    let ok = unsafe {
+        CopyFileExW(wide(from).as_ptr(), wide(to).as_ptr(), None, std::ptr::null(), std::ptr::null_mut(), COPY_FILE_ALLOW_DECRYPTED_DESTINATION)
+    };
+    if ok == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+}
+
+#[cfg(not(windows))]
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::copy(from, to).map(|_| ())
 }
 
 /// Executable a sandboxed account starts. Classic installs run in place. A Store build is
@@ -1492,6 +1513,28 @@ if ($needed -gt 0) {
         if cfg!(windows) {
             assert_eq!(super::box_copy(root, std::path::Path::new(r"q:\data\x")), Some(root.join("drive").join("Q").join(r"data\x")));
         }
+    }
+
+    /// The copy that tolerates an unencryptable target is still a byte-for-byte copy of the tree.
+    #[test]
+    fn package_copy_keeps_every_file() {
+        // Arrange
+        let root = std::env::temp_dir().join(format!("hydra-package-copy-{}", std::process::id()));
+        let (from, to) = (root.join("app"), root.join("copy"));
+        std::fs::create_dir_all(from.join("resources")).unwrap();
+        std::fs::write(from.join("Claude.exe"), b"MZ demo").unwrap();
+        std::fs::write(from.join("resources").join("app.asar"), vec![7u8; 70_000]).unwrap();
+
+        // Act
+        let copied = super::copy_tree(&from, &to);
+
+        // Assert
+        let read = |p: &std::path::Path| std::fs::read(p).unwrap();
+        let same = copied.is_ok()
+            && read(&to.join("Claude.exe")) == read(&from.join("Claude.exe"))
+            && read(&to.join("resources").join("app.asar")) == read(&from.join("resources").join("app.asar"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(same, "{copied:?}");
     }
 
     #[test]
