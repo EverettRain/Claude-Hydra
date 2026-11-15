@@ -78,7 +78,7 @@ for sub in ["shop-api/src", "shop-api/tests", "shop-api/migrations", "web/src", 
 
 exit_jp = {"ip": "203.0.113.24", "country": "JP", "region": "Tokyo", "city": "Tokyo", "timezone": "Asia/Tokyo", "checkedAt": now - 2 * HOUR}
 exit_us = {"ip": "198.51.100.77", "country": "US", "region": "California", "city": "Los Angeles", "timezone": "America/Los_Angeles", "checkedAt": now - HOUR}
-node = lambda kind, host, port: {"kind": kind, "host": host, "port": port, "ipVersion": "ipv4", "geoChannel": "ipinfo"}
+node = lambda kind, host, port, **more: {"kind": kind, "host": host, "port": port, "ipVersion": "ipv4", "geoChannel": "ipinfo", **more}
 settings = {
     "accounts": {
         "work": {"label": "工作", "environment": "tokyo", "keepRunning": True},
@@ -88,7 +88,9 @@ settings = {
         "ctr-2": {"label": "日本容器", "environment": "tokyo", "container": {"mounts": [{"source": f"{code}/game", "name": "game"}]}},
     },
     "environments": {
-        "tokyo": {"name": "东京住宅", "node": node("socks5", "jp-res.example.net", 1080), "timezone": "proxy", "locale": "ja-JP",
+        # A home proxy reached through a relay first (chain proxy), held to the same city.
+        "tokyo": {"name": "东京住宅", "node": node("socks5", "jp-res.example.net", 1080, via=node("socks5", "relay.example.net", 7890)),
+                  "timezone": "proxy", "locale": "ja-JP", "exitRule": "city", "exitBaseline": exit_jp, "separateCode": True,
                   "lastCheck": {"exit": exit_jp, "quality": "住宅", "risk": "低"}},
         "uswest": {"name": "美西节点", "node": node("https", "us-west.example.net", 443), "timezone": "proxy", "locale": "en-US",
                    "lastCheck": {"exit": exit_us, "quality": "机房", "risk": "低"}},
@@ -96,6 +98,8 @@ settings = {
     },
     "requireEnvironment": True,
     "terminal": "iterm",
+    # The privacy notice would cover the accounts page in every shot.
+    "hidePrivacyNotice": True,
 }
 if not os.path.isdir("/Applications/Claude.app"):
     # A stand-in, only so the desktop accounts list; nothing is ever launched from it.
@@ -327,6 +331,9 @@ press "编辑" "点「东京住宅」右侧的「编辑」"        # environment
 press "自定义代理" "点对话框里的「自定义代理」，让名称输入框失去焦点"
 shot environment-edit
 press "取消" "关闭对话框"
+press "网页端" "点左侧「网页端」" 0 exact
+press "配置" "点第一个账号右侧的「配置」" 0 exact;  shot web
+press "完成" "点对话框里的「完成」" 0 exact
 press "仪表板" "点左侧「仪表板」" 0 exact;         sleep 2; shot dashboard
 press "容器" "点左侧「容器」" 0 exact
 press "打开" "点「美国容器」右侧的「打开」" 1      # 日本容器 comes first
