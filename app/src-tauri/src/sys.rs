@@ -7,6 +7,17 @@ pub struct Proc {
     pub name: String,
 }
 
+/// Opens `url` in the default browser.
+pub fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    #[cfg(windows)]
+    let mut cmd = { let mut c = std::process::Command::new("rundll32"); c.arg("url.dll,FileProtocolHandler"); c };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url).spawn().map(|_| ())
+}
+
 #[cfg(windows)]
 pub use win::*;
 

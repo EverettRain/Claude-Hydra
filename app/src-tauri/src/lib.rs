@@ -453,6 +453,24 @@ fn create_container_shortcut(id: String) -> Result<String, String> {
     Ok(format!("已在桌面创建快捷方式：{}", path.file_name().unwrap_or_default().to_string_lossy()))
 }
 
+/// Official download page of a program Hydra works with but does not ship. Only these fixed
+/// addresses can be opened, whatever the page asks for.
+fn download_page(tool: &str) -> Option<&'static str> {
+    Some(match tool {
+        "claude" => "https://claude.com/download",
+        "orbstack" => "https://orbstack.dev/download",
+        "docker" => "https://www.docker.com/products/docker-desktop/",
+        "sandboxie" => "https://sandboxie-plus.com/downloads/",
+        _ => return None,
+    })
+}
+
+#[tauri::command]
+fn open_download_page(tool: String) -> Result<(), String> {
+    let url = download_page(&tool).ok_or("未知的下载项。")?;
+    sys::open_in_browser(url).map_err(|e| format!("无法打开下载页面：{e}"))
+}
+
 #[tauri::command]
 fn sandbox_status() -> Result<String, String> {
     sandbox::available().map(|p| p.display().to_string())
@@ -1018,6 +1036,7 @@ pub fn run(start_in_tray: bool) {
             resume_account,
             rebind_exit,
             sandbox_status,
+            open_download_page,
             configure_quiet_sandbox,
             container_runtime,
             set_container_runtime,
@@ -1156,4 +1175,22 @@ pub fn run(start_in_tray: bool) {
                 api.prevent_exit();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    /// The page can only name a program; anything else, an address included, opens nothing.
+    #[test]
+    fn download_pages_are_fixed_https_addresses() {
+        // Arrange
+        let tools = ["claude", "orbstack", "docker", "sandboxie"];
+
+        // Act
+        let pages: Vec<_> = tools.iter().map(|t| super::download_page(t)).collect();
+        let other = super::download_page("https://example.com/setup.exe");
+
+        // Assert
+        assert!(pages.iter().all(|p| p.is_some_and(|u| u.starts_with("https://"))), "{pages:?}");
+        assert!(other.is_none());
+    }
 }

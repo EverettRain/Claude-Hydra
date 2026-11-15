@@ -60,13 +60,7 @@ pub async fn release_notes(after: String, upto: String) -> Result<Vec<ReleaseNot
 pub fn open_release_page(version: String) -> Result<(), String> {
     let (a, b, c) = parse(&version).ok_or("版本号无效。")?;
     let url = format!("https://github.com/{REPO}/releases/tag/v{a}.{b}.{c}");
-    #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("/usr/bin/open");
-    #[cfg(windows)]
-    let mut cmd = { let mut c = std::process::Command::new("rundll32"); c.arg("url.dll,FileProtocolHandler"); c };
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let mut cmd = std::process::Command::new("xdg-open");
-    cmd.arg(url).spawn().map(|_| ()).map_err(|e| format!("无法打开发布页面：{e}"))
+    crate::sys::open_in_browser(&url).map_err(|e| format!("无法打开发布页面：{e}"))
 }
 
 /// Relaunches Hydra after an update was installed.

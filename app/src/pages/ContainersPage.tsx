@@ -1,3 +1,4 @@
+import { DownloadButton } from "@/components/DownloadButton";
 import { Box, Hammer, Link2, Loader2, MoreHorizontal, Pencil, Plus, Power, RefreshCw, ShieldAlert, SquareTerminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { ContainerDialog } from "@/components/ContainerDialog";
@@ -110,6 +111,7 @@ export function ContainersPage({ onOpenSettings }: { onOpenSettings: () => void 
         {runtime && !runtime.version && (
           <div className="flex items-start gap-3 rounded-xl bg-warn-soft px-4 py-3 text-[12.5px] text-warn">
             <span className="selectable min-w-0 flex-1 whitespace-pre-wrap">{runtime.error}</span>
+            {runtime.supported && <DownloadButton tool={runtime.name === "OrbStack" ? "orbstack" : "docker"} />}
             {runtime.supported && <Button variant="outline" size="sm" onClick={onOpenSettings}>{runtime.name} 设置</Button>}
           </div>
         )}

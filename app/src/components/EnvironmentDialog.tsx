@@ -1,3 +1,4 @@
+import { DownloadButton } from "./DownloadButton";
 import { useEffect, useState } from "react";
 import { api, errorText, type EnvironmentInput, type ExitInfo, type ExitRule } from "@/lib/api";
 import { EXIT_RULES, LOCALES, emptyEnvironment } from "@/lib/environment";
@@ -169,7 +170,10 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
                 {!IS_MAC && env.isolation !== "sandboxie" && <span className="mt-1 block text-fg-2">对隐私要求高时建议开启沙箱隔离：它还会让 Claude 窗口与它启动的程序看到本环境的时区和系统语言，替换机器标识，并隐藏网卡上的公网地址。</span>}
                 {IS_MAC
                   ? <span className="mt-1 block">macOS 上没有沙箱隔离：系统不允许在沙箱里再建沙箱，用 Seatbelt 套住 Claude 桌面版会让它自身的沙箱无法启动，只有关掉 Claude 的沙箱才能运行，安全代价太大。对隐私要求极高时，网页版请用「网页端」的账号浏览器，Claude Code 请用「容器」。加与不加 Seatbelt 的差别可以在「设置 → Claude 桌面端 → 模拟测试」中查看。</span>
-                  : sandbox && !sandbox.ok && <span className="block text-warn">{sandbox.text}</span>}
+                  : sandbox && !sandbox.ok && <>
+                    <span className="block text-warn">{sandbox.text}</span>
+                    <DownloadButton tool="sandboxie" className="mt-2" />
+                  </>}
               </p>
             </div>
           </div>

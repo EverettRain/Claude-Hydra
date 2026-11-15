@@ -63,6 +63,8 @@ export interface Environment extends EnvironmentInput {
   exitBaseline: ExitInfo | null;
 }
 
+export type DownloadTool = "claude" | "orbstack" | "docker" | "sandboxie";
+
 export type NodeKind = "clash" | "http" | "https" | "socks5";
 export interface NodeConfig {
   kind: NodeKind; host: string; port: number; username: string; password: string;
@@ -290,6 +292,8 @@ export const api = {
   resumeAccount: (id: string) => invoke<string>("resume_account", { id }),
   rebindExit: (id: string) => invoke<string>("rebind_exit", { id }),
   sandboxStatus: () => invoke<string>("sandbox_status"),
+  /** Opens the official download page of Claude or a tool Hydra relies on. */
+  openDownloadPage: (tool: DownloadTool) => invoke<void>("open_download_page", { tool }),
   /** Share links (one, several, or a base64 subscription of them) as Clash nodes. */
   parseNodeLinks: (text: string) => invoke<{ nodes: NodeConfig[]; skipped: number; firstError?: string }>("parse_node_links", { text }),
   configureQuietSandbox: () => invoke<void>("configure_quiet_sandbox"),

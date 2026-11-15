@@ -1,3 +1,4 @@
+import { DownloadButton } from "@/components/DownloadButton";
 import { Copy, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Group, Page, PageHeader, Row } from "@/components/PageHeader";
@@ -174,7 +175,12 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
         </Group>
 
         <Group label="Claude 桌面端">
-          {info?.installError && <div className="px-4 py-3 text-[12.5px] text-danger">{info.installError}</div>}
+          {info?.installError && (
+            <div className="flex items-start gap-3 px-4 py-3 text-[12.5px] text-danger">
+              <span className="min-w-0 flex-1">{info.installError}</span>
+              <DownloadButton tool="claude" />
+            </div>
+          )}
           {install && (
             <div className="py-1">
               <KeyValue k="类型" v={install.kind === "Msix" ? "MSIX 版（官网安装包或 Microsoft Store）" : install.kind === "App" ? "Claude.app" : "安装程序版"} />
@@ -244,6 +250,7 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
                   <div className="mt-2 text-[12px] text-muted">还没有带代理节点的环境，请先在「环境配置」中新建一个。</div>
                 )}
                 {sandboxie && <div className={cn("mt-2 text-[12px]", sandboxie.ok ? "text-muted" : "text-warn")}>{sandboxie.text}</div>}
+                {sandboxie && !sandboxie.ok && <DownloadButton tool="sandboxie" className="mt-2" />}
               </div>
             </>
           )}
@@ -255,6 +262,7 @@ export function SettingsPage({ info, reloadInfo, theme, onThemeChange, onInstall
               label="连接状态"
               hint={runtime?.version ? `已连接 ${containerRuntime}（docker ${runtime.version}）。` : runtime?.error ?? "正在检测…"}
             >
+              {runtime && !runtime.version && <DownloadButton tool={containerRuntime === "OrbStack" ? "orbstack" : "docker"} />}
               <Button variant="outline" size="sm" disabled={busy === "probe"} onClick={() => act("probe", loadRuntime)}>
                 {busy === "probe" && <Loader2 className="animate-spin" />}
                 重新检测
