@@ -2,6 +2,7 @@ import { AlertCircle, ArrowLeft, Check, ChevronRight, Copy, Download, FileText, 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { WindowControls } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
+import { Scrollbar } from "@/components/ui/scrollbar";
 import { api, errorText, type ClaudeCodeSession, type TranscriptItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Dialog } from "@/components/ui/dialog";
@@ -379,14 +380,17 @@ export function ChatView({ folder, session, onBack, onCopy, onMove, onExport, on
         <Button size="iconSm" variant="ghost" aria-label="导出备份" title="导出备份（zip，可导入到其他位置继续使用）" onClick={onExport}><Download /></Button>
         {!isMac && <WindowControls />}
       </div>
-      <div ref={body} className="min-h-0 flex-1 overflow-y-auto px-5 pt-5">
-      <div className="mx-auto max-w-[760px] space-y-4 pb-8">
-        <Conversation items={items} images={images} />
-        {error && <p role="alert" className="text-sm text-danger">{error} <button className="underline" onClick={() => load(items.length)}>重试</button></p>}
-        {loading && <p className="text-center text-sm text-muted">正在读取…</p>}
-        {!loading && !error && total === 0 && <p className="text-center text-sm text-muted">这个会话没有可显示的内容。</p>}
-        <div ref={end} />
-      </div>
+      <div className="relative min-h-0 flex-1">
+        <div ref={body} className="h-full overflow-y-auto px-5 pt-5">
+          <div className="mx-auto max-w-[760px] space-y-4 pb-8">
+            <Conversation items={items} images={images} />
+            {error && <p role="alert" className="text-sm text-danger">{error} <button className="underline" onClick={() => load(items.length)}>重试</button></p>}
+            {loading && <p className="text-center text-sm text-muted">正在读取…</p>}
+            {!loading && !error && total === 0 && <p className="text-center text-sm text-muted">这个会话没有可显示的内容。</p>}
+            <div ref={end} />
+          </div>
+        </div>
+        <Scrollbar target={body} />
       </div>
     </div>
   );
