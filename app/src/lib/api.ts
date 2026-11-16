@@ -294,6 +294,9 @@ export const api = {
   sandboxStatus: () => invoke<string>("sandbox_status"),
   /** Opens the official download page of Claude or a tool Hydra relies on. */
   openDownloadPage: (tool: DownloadTool) => invoke<void>("open_download_page", { tool }),
+  /** The environment's name when its sandbox is on but Sandboxie-Plus is missing, else null. */
+  environmentSandboxMissing: (id: string) => invoke<string | null>("environment_sandbox_missing", { id }),
+  dropEnvironmentIsolation: (id: string) => invoke<void>("drop_environment_isolation", { id }),
   /** Share links (one, several, or a base64 subscription of them) as Clash nodes. */
   parseNodeLinks: (text: string) => invoke<{ nodes: NodeConfig[]; skipped: number; firstError?: string }>("parse_node_links", { text }),
   configureQuietSandbox: () => invoke<void>("configure_quiet_sandbox"),

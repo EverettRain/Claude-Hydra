@@ -6,7 +6,10 @@ export const LOCALES: [string, string][] = [
   ["zh-CN", "简体中文"], ["zh-TW", "繁體中文"], ["ja-JP", "日语"], ["ko-KR", "韩语"],
 ];
 
-export const emptyEnvironment = (): EnvironmentInput => ({ name: "", node: null, timezone: "proxy", locale: "", args: "", env: "", lastCheck: null, exitRule: "", allowCn: false, isolation: "", separateCode: false });
+// New environments on Windows start sandboxed; an account asks before starting without it.
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+
+export const emptyEnvironment = (): EnvironmentInput => ({ name: "", node: null, timezone: "proxy", locale: "", args: "", env: "", lastCheck: null, exitRule: "", allowCn: false, isolation: IS_WINDOWS ? "sandboxie" : "", separateCode: false });
 
 export const EXIT_RULES: [string, string][] = [
   ["", "不限（只拦截不支持地区的出口）"], ["country", "同国家"], ["region", "同省/州"], ["city", "同城市"], ["static", "固定 IP"],

@@ -73,6 +73,13 @@ impl Environment {
     /// pairing no real fleet of machines produces, and more telling than no isolation at all.
     pub fn keeps_code_separate(&self) -> bool { self.separate_code || self.isolation == "sandboxie" }
 
+    /// Turns the sandbox off. Each account keeps its own Claude Code folder, which the sandbox had
+    /// enforced: going back to the shared `~/.claude` would sign every account out of Claude Code.
+    pub fn drop_isolation(&mut self) {
+        self.separate_code = self.keeps_code_separate();
+        self.isolation.clear();
+    }
+
     /// Window language plus the user's extra switches.
     pub fn launch_args(&self) -> String {
         let lang = (!self.locale.is_empty()).then(|| format!("--lang={}", self.locale));
@@ -216,9 +223,26 @@ fn build(input: &EnvironmentInput) -> Result<Environment, String> {
 
 /// Creates (`id` = None) or updates an environment and returns its id. `install` is `None`
 /// when Claude desktop is not installed (container-only use).
+/// The name of `id` when it runs its accounts in a sandbox that cannot start here (Sandboxie-Plus
+/// missing), so the user can be asked before the start fails.
+pub fn sandbox_missing(id: &str) -> Option<String> {
+    let env = settings::load().environments.get(id).filter(|e| e.isolation == "sandboxie")?.clone();
+    crate::sandbox::available().is_err().then_some(env.name)
+}
+
+/// Turns the sandbox of `id` off (see `Environment::drop_isolation`).
+pub fn drop_isolation(id: &str) -> Result<(), String> {
+    settings::update_with(|s| {
+        s.environments.get_mut(id).ok_or("这个环境配置已不存在。")?.drop_isolation();
+        Ok(())
+    })
+}
+
 pub fn save(install: Option<&crate::install::Install>, id: Option<&str>, input: &EnvironmentInput) -> Result<String, String> {
     let mut env = build(input)?;
-    if env.isolation == "sandboxie" { crate::sandbox::available()?; }
+    // Whether Sandboxie-Plus is installed is asked when an account starts, where the user can
+    // install it or go without; a new environment on Windows starts with the sandbox on.
+    if env.isolation == "sandboxie" && !cfg!(windows) { return Err("沙箱隔离目前只支持 Windows（Sandboxie-Plus）。".into()); }
     settings::update_with(|s| {
         if let Some(id) = id { if !s.environments.contains_key(id) { return Err("这个环境配置已不存在。".into()); } }
         if s.environments.iter().any(|(k, e)| Some(k.as_str()) != id && e.name == env.name) { return Err(format!("已有名为“{}”的环境配置。", env.name)); }
@@ -295,6 +319,24 @@ pub fn migrate() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Going without the sandbox leaves Claude Code where the sandbox had put it, per account.
+    #[test]
+    fn dropping_the_sandbox_keeps_claude_code_separate() {
+        // Arrange
+        let mut sandboxed = Environment { isolation: "sandboxie".into(), ..Default::default() };
+        let mut plain = Environment::default();
+        assert!(sandboxed.keeps_code_separate() && !plain.keeps_code_separate());
+
+        // Act
+        sandboxed.drop_isolation();
+        plain.drop_isolation();
+
+        // Assert
+        assert_eq!(sandboxed.isolation, "");
+        assert!(sandboxed.keeps_code_separate());
+        assert!(!plain.keeps_code_separate());
+    }
     use crate::settings::AccountConfig;
 
     #[test]

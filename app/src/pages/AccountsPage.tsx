@@ -1,3 +1,4 @@
+import { SandboxPrompt } from "@/components/SandboxPrompt";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 import {
   FolderOpen,
@@ -70,11 +71,19 @@ export function AccountsPage({ profiles, loadError, refresh, info, reloadInfo, o
     }
   };
 
-  const launch = (p: Profile) =>
+  const start = (p: Profile) =>
     run(p, "启动中", async () => {
       const r = await api.launch(p.id);
       if (r === "started") toast(`正在启动 ${p.name}`);
     });
+  // An environment whose sandbox cannot run here is asked about before the start, not after.
+  const [sandboxAsk, setSandboxAsk] = useState<{ p: Profile; environment: string; name: string } | null>(null);
+  const launch = async (p: Profile) => {
+    const environment = await api.options(p.id).then((o) => o.environment, () => "");
+    const name = environment ? await api.environmentSandboxMissing(environment).catch(() => null) : null;
+    if (name) setSandboxAsk({ p, environment, name });
+    else void start(p);
+  };
 
   const addAccount = () => setAdding(true);
 
@@ -172,6 +181,17 @@ export function AccountsPage({ profiles, loadError, refresh, info, reloadInfo, o
       >
         <p className="selectable break-all rounded-lg bg-pill px-3 py-2 font-mono text-[11.5px] text-muted">{deleting?.path}</p>
       </Dialog>
+      <SandboxPrompt
+        environment={sandboxAsk?.name ?? null}
+        onClose={() => setSandboxAsk(null)}
+        onWithout={async () => {
+          if (!sandboxAsk) return;
+          await api.dropEnvironmentIsolation(sandboxAsk.environment);
+          setSandboxAsk(null);
+          toast(`已关闭环境「${sandboxAsk.name}」的沙箱隔离，可在环境配置中重新开启。`);
+          void start(sandboxAsk.p);
+        }}
+      />
       {info && !info.hidePrivacyNotice && !noticeClosed && (
         <PrivacyNotice platform={info.platform} onTest={onOpenSettings} onDismiss={closeNotice} />
       )}

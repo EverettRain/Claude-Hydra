@@ -152,7 +152,7 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
             {/* One card row with its note: `.list-card` draws a line between its children. */}
             <div>
               <Line label="沙箱隔离">
-                <Switch checked={env.isolation === "sandboxie"} disabled={!sandbox?.ok && env.isolation !== "sandboxie"} onCheckedChange={(v) => setEnv({ ...env, isolation: v ? "sandboxie" : "" })} label="在 Sandboxie-Plus 沙箱中运行" />
+                <Switch checked={env.isolation === "sandboxie"} disabled={IS_MAC} onCheckedChange={(v) => setEnv({ ...env, isolation: v ? "sandboxie" : "" })} label="在 Sandboxie-Plus 沙箱中运行" />
                 <span className="text-[11.5px] text-muted">{env.isolation === "sandboxie" ? "在 Sandboxie-Plus 沙箱中运行" : "不使用沙箱"}</span>
               </Line>
               <p className="px-4 pb-3 text-[11.5px] leading-relaxed text-muted">
@@ -171,7 +171,9 @@ export function EnvironmentDialog({ open, id, initial, detectedTimezone, exitBas
                 {IS_MAC
                   ? <span className="mt-1 block">macOS 上没有沙箱隔离：系统不允许在沙箱里再建沙箱，用 Seatbelt 套住 Claude 桌面版会让它自身的沙箱无法启动，只有关掉 Claude 的沙箱才能运行，安全代价太大。对隐私要求极高时，网页版请用「网页端」的账号浏览器，Claude Code 请用「容器」。加与不加 Seatbelt 的差别可以在「设置 → Claude 桌面端 → 模拟测试」中查看。</span>
                   : sandbox && !sandbox.ok && <>
-                    <span className="block text-warn">{sandbox.text}</span>
+                    <span className="block text-warn">
+                      {env.isolation === "sandboxie" ? "这台电脑上还没有 Sandboxie-Plus。可以先保存，启动账号时会请你安装，或改为不使用沙箱隔离。" : sandbox.text}
+                    </span>
                     <DownloadButton tool="sandboxie" className="mt-2" />
                   </>}
               </p>

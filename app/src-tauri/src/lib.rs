@@ -177,6 +177,18 @@ async fn create_configured_account(app: AppHandle, name: String, environment: St
 }
 
 #[tauri::command]
+fn environment_sandbox_missing(id: String) -> Option<String> {
+    environment::sandbox_missing(&id)
+}
+
+#[tauri::command]
+fn drop_environment_isolation(app: AppHandle, id: String) -> Result<(), String> {
+    environment::drop_isolation(&id)?;
+    after_change(&app);
+    Ok(())
+}
+
+#[tauri::command]
 fn list_environments() -> Vec<environment::EnvironmentView> {
     environment::list()
 }
@@ -1037,6 +1049,8 @@ pub fn run(start_in_tray: bool) {
             rebind_exit,
             sandbox_status,
             open_download_page,
+            environment_sandbox_missing,
+            drop_environment_isolation,
             configure_quiet_sandbox,
             container_runtime,
             set_container_runtime,

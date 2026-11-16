@@ -2,6 +2,7 @@ import { Loader2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, type Profile } from "@/lib/api";
 import { EnvironmentPicker } from "./EnvironmentPicker";
+import { SandboxPrompt } from "./SandboxPrompt";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
@@ -11,6 +12,7 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
+  const [sandboxAsk, setSandboxAsk] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -34,6 +36,12 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
     try { await onCreated(await api.createConfiguredAccount(name, environment)); }
     catch (e) { setError(errorText(e)); }
     finally { setLoading(false); }
+  };
+  // Creating opens the account at once, so a sandbox that cannot run is asked about first.
+  const createChecked = async () => {
+    const missing = environment ? await api.environmentSandboxMissing(environment).catch(() => null) : null;
+    if (missing) setSandboxAsk(missing);
+    else await create();
   };
 
   return (
@@ -69,12 +77,17 @@ export function CreateAccountPanel({ open, onClose, onCreated }: { open: boolean
 
         <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line-2 px-5 py-3">
           <Button variant="outline" onClick={onClose} disabled={loading}>取消</Button>
-          <Button onClick={create} disabled={loading || !ready || !name.trim()}>
+          <Button onClick={createChecked} disabled={loading || !ready || !name.trim()}>
             {loading && <Loader2 className="animate-spin" />}
             创建并打开
           </Button>
         </div>
       </div>
+      <SandboxPrompt
+        environment={sandboxAsk}
+        onClose={() => setSandboxAsk(null)}
+        onWithout={async () => { await api.dropEnvironmentIsolation(environment); setSandboxAsk(null); await create(); }}
+      />
     </div>
   );
 }
